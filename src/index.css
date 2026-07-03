@@ -1,0 +1,17 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Real CSS fix for the overscroll "white bounce" — much cleaner than patching this at
+   runtime, since here we actually control the page's own background. */
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background-color: #0b1e36;
+  overscroll-behavior-x: contain;
+}
+
+#root {
+  min-height: 100vh;
+}
