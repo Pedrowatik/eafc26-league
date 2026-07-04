@@ -2459,7 +2459,10 @@ const sofifaPosition = (code) => SOFIFA_POSITION_MAP[code] ?? "ST";
 async function sofifaFetch(path) {
   const url = `${supabaseUrl}/functions/v1/sofifa-proxy?path=${encodeURIComponent(path)}`;
   const res = await fetch(url, {
-    headers: { Authorization: `Bearer ${supabaseAnonKey}` },
+    headers: {
+      Authorization: `Bearer ${supabaseAnonKey}`,
+      apikey: supabaseAnonKey,
+    },
   });
   if (!res.ok) throw new Error(`Sofifa proxy returned ${res.status}`);
   const json = await res.json();
