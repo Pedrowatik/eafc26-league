@@ -23,6 +23,7 @@ const C = {
 };
 
 const money = (n) => `£${(Number(n) || 0).toFixed(2)}M`;
+const roundUpTo250k = (n) => Math.ceil((Number(n) || 0) / 0.25) * 0.25;
 const moneyK = (n) => `£${Math.round(Number(n) || 0)}k`;
 const todayISO = () => new Date().toISOString().slice(0, 10);
 const uid = () => Math.random().toString(36).slice(2, 10);
@@ -185,6 +186,54 @@ function Select(props) {
   return <select {...props} style={{ ...inputStyle, ...(props.style || {}) }}>{props.children}</select>;
 }
 
+// Type a name, get matches from the imported player database (CM Tracker/Sofifa), pick one to
+// auto-fill position/rating/club/age/wage/value on whatever form it's plugged into.
+function PlayerAutocomplete({ value, onChange, onSelect, playerDatabase, placeholder }) {
+  const [open, setOpen] = useState(false);
+  const boxRef = useRef(null);
+
+  const matches = useMemo(() => {
+    const q = (value || "").trim().toLowerCase();
+    if (!q || !playerDatabase || playerDatabase.length === 0) return [];
+    return playerDatabase.filter((p) => p.name.toLowerCase().includes(q)).slice(0, 8);
+  }, [value, playerDatabase]);
+
+  useEffect(() => {
+    const onClickOutside = (e) => {
+      if (boxRef.current && !boxRef.current.contains(e.target)) setOpen(false);
+    };
+    document.addEventListener("mousedown", onClickOutside);
+    return () => document.removeEventListener("mousedown", onClickOutside);
+  }, []);
+
+  return (
+    <div ref={boxRef} style={{ position: "relative" }}>
+      <TextInput
+        placeholder={placeholder || "Start typing a player name…"}
+        value={value}
+        onChange={(e) => { onChange(e.target.value); setOpen(true); }}
+        onFocus={() => setOpen(true)}
+      />
+      {open && matches.length > 0 && (
+        <div style={{
+          position: "absolute", top: "calc(100% + 4px)", left: 0, right: 0, zIndex: 20,
+          background: C.panel, border: `1px solid ${C.border}`, borderRadius: 8,
+          maxHeight: 220, overflowY: "auto", boxShadow: "0 8px 20px rgba(0,0,0,0.4)",
+        }}>
+          {matches.map((p) => (
+            <button key={p.id} onClick={() => { onSelect(p); setOpen(false); }}
+              className="flex items-center justify-between"
+              style={{ width: "100%", textAlign: "left", background: "transparent", border: "none", borderBottom: `1px solid ${C.border}33`, padding: "8px 10px", cursor: "pointer", color: C.text, fontSize: 12.5 }}>
+              <span>{p.name}</span>
+              <span style={{ color: C.muted, fontSize: 11 }}>{p.position} · {p.rating} OVR{p.club ? ` · ${p.club}` : ""}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function Btn({ children, onClick, variant = "primary", size = "md", icon: Icon, disabled, style, title }) {
   const base = {
     display: "inline-flex", alignItems: "center", gap: 6, justifyContent: "center",
@@ -238,6 +287,7 @@ export default function EafcLeagueApp() {
   const [seasonHistory, setSeasonHistory] = useState([]);
   const [activity, setActivity] = useState([]);
   const [chat, setChat] = useState([]);
+  const [playerDatabase, setPlayerDatabase] = useState([]); // imported from CM Tracker/Sofifa for autocomplete
   const [myTeamId, setMyTeamId] = useState(null); // personal — which team is "me" on this device
   const [tab, setTab] = useState("dashboard");
   const [loaded, setLoaded] = useState(false);
@@ -264,6 +314,7 @@ export default function EafcLeagueApp() {
     if (data.seasonHistory) setSeasonHistory(data.seasonHistory);
     if (data.activity) setActivity(data.activity);
     if (data.chat) setChat(data.chat);
+    if (data.playerDatabase) setPlayerDatabase(data.playerDatabase);
   }, []);
 
   // load once
@@ -299,7 +350,7 @@ export default function EafcLeagueApp() {
         const savedAt = Date.now();
         await storage.set(
           STORAGE_KEY,
-          JSON.stringify({ teams, squads, transfers, fixtures, prizes, events, auctions, adminPin, season, seasonHistory, activity, chat, savedAt }),
+          JSON.stringify({ teams, squads, transfers, fixtures, prizes, events, auctions, adminPin, season, seasonHistory, activity, chat, playerDatabase, savedAt }),
           true
         );
         knownSavedAtRef.current = savedAt;
@@ -310,7 +361,7 @@ export default function EafcLeagueApp() {
       }
     }, 500);
     return () => clearTimeout(t);
-  }, [teams, squads, transfers, fixtures, prizes, events, auctions, adminPin, season, seasonHistory, activity, chat, loaded]);
+  }, [teams, squads, transfers, fixtures, prizes, events, auctions, adminPin, season, seasonHistory, activity, chat, playerDatabase, loaded]);
 
   // live sync: poll for other people's changes and pull them in automatically. Skipped while we
   // have our own unsaved edit in flight, so we don't clobber it with a slightly stale copy.
@@ -853,6 +904,40 @@ export default function EafcLeagueApp() {
     return null;
   };
 
+  // Replaces or merges the imported player reference database (from CM Tracker, Sofifa, etc.)
+  // used to power autocomplete/autofill on player-name fields throughout the app.
+  const importPlayerDatabase = (pinAttempt, players, mode) => {
+    if (pinAttempt !== adminPin) return "Incorrect PIN.";
+    if (!Array.isArray(players) || players.length === 0) return "No players to import.";
+    const cleaned = players.map((p) => ({
+      id: uid(),
+      name: (p.name || "").trim(),
+      position: (p.position || "").trim().toUpperCase(),
+      rating: Number(p.rating) || 0,
+      club: (p.club || "").trim(),
+      age: Number(p.age) || 0,
+      value: Number(p.value) || 0,
+      wage: Number(p.wage) || 0,
+    })).filter((p) => p.name);
+    if (mode === "replace") {
+      setPlayerDatabase(cleaned);
+    } else {
+      setPlayerDatabase((existing) => {
+        const byName = new Map(existing.map((p) => [p.name.toLowerCase(), p]));
+        cleaned.forEach((p) => byName.set(p.name.toLowerCase(), p));
+        return Array.from(byName.values());
+      });
+    }
+    logActivity(`Player database ${mode === "replace" ? "replaced" : "updated"} — ${cleaned.length} players imported.`, "admin");
+    return null;
+  };
+
+  const clearPlayerDatabase = (pinAttempt) => {
+    if (pinAttempt !== adminPin) return "Incorrect PIN.";
+    setPlayerDatabase([]);
+    return null;
+  };
+
   const addFundsToTeam = (pinAttempt, teamId, amount) => {
     if (pinAttempt !== adminPin) return "Incorrect PIN.";
     const amt = Number(amount);
@@ -967,7 +1052,7 @@ export default function EafcLeagueApp() {
             setTransfers={setTransfers} auctions={auctions} createAuction={createAuction}
             placeBid={placeBid} finalizeAuction={finalizeAuction} respondToAuction={respondToAuction}
             deleteBid={deleteBid} editAuctionPlayerName={editAuctionPlayerName} nowTick={nowTick}
-            myTeamId={myTeamId} />
+            myTeamId={myTeamId} playerDatabase={playerDatabase} />
         )}
         {tab === "fixtures" && (
           <FixturesTab teams={teams} fixtures={fixtures} setFixtures={setFixtures} logActivity={logActivity}
@@ -987,7 +1072,9 @@ export default function EafcLeagueApp() {
           <RulesTab teams={teams} resetAll={resetAll} changeAdminPin={changeAdminPin}
             addFundsToTeam={addFundsToTeam} addEarned86Slot={addEarned86Slot}
             exportBackup={exportBackup} restoreBackup={restoreBackup}
-            endSeason={endSeason} season={season} seasonHistory={seasonHistory} standings={standings} />
+            endSeason={endSeason} season={season} seasonHistory={seasonHistory} standings={standings}
+            playerDatabase={playerDatabase} importPlayerDatabase={importPlayerDatabase}
+            clearPlayerDatabase={clearPlayerDatabase} />
         )}
       </div>
     </div>
@@ -1442,7 +1529,7 @@ function formatCountdown(ms) {
   return `${m}m ${s}s left`;
 }
 
-function AuctionsPanel({ teams, squads, auctions, createAuction, placeBid, finalizeAuction, respondToAuction, deleteBid, editAuctionPlayerName, myTeamId }) {
+function AuctionsPanel({ teams, squads, auctions, createAuction, placeBid, finalizeAuction, respondToAuction, deleteBid, editAuctionPlayerName, myTeamId, playerDatabase }) {
   const firstBidderFor = (sellerId) => {
     if (myTeamId && myTeamId !== sellerId) return myTeamId;
     return teams.find((t) => t.id !== sellerId)?.id || teams[0].id;
@@ -1525,7 +1612,18 @@ function AuctionsPanel({ teams, squads, auctions, createAuction, placeBid, final
           </div>
         ) : (
           <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", marginTop: 12 }}>
-            <Field label="Player name"><TextInput value={form.name} onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} /></Field>
+            <Field label="Player name">
+              <PlayerAutocomplete
+                value={form.name}
+                onChange={(name) => setForm((f) => ({ ...f, name }))}
+                playerDatabase={playerDatabase}
+                onSelect={(p) => setForm((f) => ({
+                  ...f, name: p.name, position: p.position || f.position, rating: p.rating || f.rating,
+                  club: p.club || f.club, age: p.age || f.age, wage: p.wage || f.wage,
+                  minBid: p.value ? roundUpTo250k(p.value) : f.minBid,
+                }))}
+              />
+            </Field>
             <Field label="Position">
               <Select value={form.position} onChange={(e) => setForm((f) => ({ ...f, position: e.target.value }))}>
                 {POSITIONS.map((pos) => <option key={pos}>{pos}</option>)}
@@ -1748,7 +1846,7 @@ function AuctionCard({ auction, teams, now, placeBid, finalizeAuction, deleteBid
   );
 }
 
-function TransfersTab({ teams, squads, transfers, logTransfer, setTransfers, auctions, createAuction, placeBid, finalizeAuction, respondToAuction, deleteBid, editAuctionPlayerName, nowTick, myTeamId }) {
+function TransfersTab({ teams, squads, transfers, logTransfer, setTransfers, auctions, createAuction, placeBid, finalizeAuction, respondToAuction, deleteBid, editAuctionPlayerName, nowTick, myTeamId, playerDatabase }) {
   const blank = { date: todayISO(), from: "FA", to: myTeamId || teams[0].id, name: "", position: "ST", rating: 75, club: "", age: 25, wage: 0, price: 0, notes: "" };
   const [form, setForm] = useState(blank);
   const [warning, setWarning] = useState("");
@@ -1774,7 +1872,8 @@ function TransfersTab({ teams, squads, transfers, logTransfer, setTransfers, auc
     <div className="grid gap-4">
       <AuctionsPanel teams={teams} squads={squads} auctions={auctions} createAuction={createAuction}
         placeBid={placeBid} finalizeAuction={finalizeAuction} respondToAuction={respondToAuction}
-        deleteBid={deleteBid} editAuctionPlayerName={editAuctionPlayerName} myTeamId={myTeamId} />
+        deleteBid={deleteBid} editAuctionPlayerName={editAuctionPlayerName} myTeamId={myTeamId}
+        playerDatabase={playerDatabase} />
 
       <Panel style={{ padding: 18 }}>
         <SectionTitle icon={Repeat}>Instant Transfer</SectionTitle>
@@ -1814,7 +1913,18 @@ function TransfersTab({ teams, squads, transfers, logTransfer, setTransfers, auc
           </div>
         ) : (
           <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", marginTop: 12 }}>
-            <Field label="Player name"><TextInput value={form.name} onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} /></Field>
+            <Field label="Player name">
+              <PlayerAutocomplete
+                value={form.name}
+                onChange={(name) => setForm((f) => ({ ...f, name }))}
+                playerDatabase={playerDatabase}
+                onSelect={(p) => setForm((f) => ({
+                  ...f, name: p.name, position: p.position || f.position, rating: p.rating || f.rating,
+                  club: p.club || f.club, age: p.age || f.age, wage: p.wage || f.wage,
+                  price: p.value ? roundUpTo250k(p.value) : f.price,
+                }))}
+              />
+            </Field>
             <Field label="Position">
               <Select value={form.position} onChange={(e) => setForm((f) => ({ ...f, position: e.target.value }))}>
                 {POSITIONS.map((pos) => <option key={pos}>{pos}</option>)}
@@ -2205,7 +2315,7 @@ function ChatTab({ chat, setChat, teams, myTeamId }) {
 }
 
 /* --------------------------------- Rules ---------------------------------- */
-function RulesTab({ teams, resetAll, changeAdminPin, addFundsToTeam, addEarned86Slot, exportBackup, restoreBackup, endSeason, season, seasonHistory, standings }) {
+function RulesTab({ teams, resetAll, changeAdminPin, addFundsToTeam, addEarned86Slot, exportBackup, restoreBackup, endSeason, season, seasonHistory, standings, playerDatabase, importPlayerDatabase, clearPlayerDatabase }) {
   const n = teams.length;
   return (
     <div className="grid gap-4">
@@ -2248,6 +2358,9 @@ function RulesTab({ teams, resetAll, changeAdminPin, addFundsToTeam, addEarned86
       </Panel>
 
       <BackupTools exportBackup={exportBackup} restoreBackup={restoreBackup} />
+
+      <PlayerDatabaseTools playerDatabase={playerDatabase} importPlayerDatabase={importPlayerDatabase}
+        clearPlayerDatabase={clearPlayerDatabase} />
 
       <EndSeasonTools endSeason={endSeason} season={season} seasonHistory={seasonHistory} standings={standings} teams={teams} />
 
@@ -2313,6 +2426,166 @@ function BackupTools({ exportBackup, restoreBackup }) {
               onChange={(e) => { handleFile(e.target.files?.[0]); e.target.value = ""; }} />
           </label>
         </div>
+      </div>
+
+      {msg && (
+        <div className="flex items-center gap-2" style={{ marginTop: 14, color: msg.tone === "green" ? C.green : C.red, fontSize: 12.5 }}>
+          {msg.tone === "green" ? <CheckCircle2 size={14} /> : <AlertTriangle size={14} />} {msg.text}
+        </div>
+      )}
+    </Panel>
+  );
+}
+
+const PLAYER_FIELD_OPTIONS = [
+  { value: "ignore", label: "Ignore this column" },
+  { value: "name", label: "Player Name" },
+  { value: "position", label: "Position" },
+  { value: "rating", label: "Rating / OVR" },
+  { value: "club", label: "Club" },
+  { value: "age", label: "Age" },
+  { value: "value", label: "Value (£M)" },
+  { value: "wage", label: "Wage (£k/week)" },
+];
+
+function parsePastedTable(raw) {
+  const lines = raw.split(/\r?\n/).map((l) => l.trim()).filter((l) => l.length > 0);
+  if (lines.length === 0) return { rows: [], columnCount: 0 };
+  const delimiter = lines[0].includes("\t") ? "\t" : ",";
+  const rows = lines.map((l) => l.split(delimiter).map((c) => c.trim()));
+  const columnCount = Math.max(...rows.map((r) => r.length));
+  return { rows, columnCount, delimiter };
+}
+
+function guessFieldForColumn(headerText) {
+  const h = (headerText || "").toLowerCase();
+  if (/name|player/.test(h)) return "name";
+  if (/pos/.test(h)) return "position";
+  if (/rat|ovr|overall/.test(h)) return "rating";
+  if (/club|team/.test(h)) return "club";
+  if (/wage|salary/.test(h)) return "wage";
+  if (/\bage\b/.test(h)) return "age";
+  if (/value|transfer|price|worth/.test(h)) return "value";
+  return "ignore";
+}
+
+function PlayerDatabaseTools({ playerDatabase, importPlayerDatabase, clearPlayerDatabase }) {
+  const [raw, setRaw] = useState("");
+  const [hasHeaders, setHasHeaders] = useState(true);
+  const [mapping, setMapping] = useState([]); // field per column index
+  const [pin, setPin] = useState("");
+  const [msg, setMsg] = useState(null);
+
+  const parsed = useMemo(() => parsePastedTable(raw), [raw]);
+
+  useEffect(() => {
+    if (parsed.columnCount === 0) { setMapping([]); return; }
+    const headerRow = hasHeaders ? parsed.rows[0] : [];
+    setMapping(Array.from({ length: parsed.columnCount }, (_, i) => guessFieldForColumn(headerRow[i])));
+  }, [parsed.columnCount, hasHeaders]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const dataRows = hasHeaders ? parsed.rows.slice(1) : parsed.rows;
+
+  const buildPlayers = () => {
+    const nameCol = mapping.indexOf("name");
+    if (nameCol === -1) return [];
+    return dataRows.map((row) => {
+      const p = {};
+      mapping.forEach((field, i) => {
+        if (field !== "ignore") p[field] = row[i];
+      });
+      return p;
+    }).filter((p) => p.name);
+  };
+
+  const preview = buildPlayers().slice(0, 5);
+
+  const doImport = (mode) => {
+    const players = buildPlayers();
+    const err = importPlayerDatabase(pin, players, mode);
+    if (err) setMsg({ text: err, tone: "red" });
+    else {
+      setMsg({ text: `Imported ${players.length} players (${mode === "replace" ? "replaced database" : "merged into existing database"}).`, tone: "green" });
+      setRaw("");
+    }
+  };
+
+  const doClear = () => {
+    if (!window.confirm("Clear the entire imported player database? This doesn't affect any squads or transfers, just the autocomplete list.")) return;
+    const err = clearPlayerDatabase(pin);
+    if (err) setMsg({ text: err, tone: "red" });
+    else setMsg({ text: "Player database cleared.", tone: "green" });
+  };
+
+  return (
+    <Panel style={{ padding: 18 }}>
+      <SectionTitle icon={Search}>Player Database (for autocomplete)</SectionTitle>
+      <div style={{ color: C.muted, fontSize: 12.5, marginBottom: 14, lineHeight: 1.6 }}>
+        Paste player data copied from CM Tracker, Sofifa, or a spreadsheet — any table with columns for
+        name, position, rating, club, age, value and wage works. Map the columns below, then import.
+        Once imported, every "Player name" field in Transfers and Auctions will suggest matching players
+        as you type, and picking one auto-fills their position, rating, club, age, wage, and a suggested
+        bid (their value rounded up to the nearest £250,000). Currently{" "}
+        <b style={{ color: C.gold }}>{playerDatabase.length} players</b> in the database.
+      </div>
+
+      <Field label="Paste data here (tab or comma separated)">
+        <textarea
+          value={raw}
+          onChange={(e) => setRaw(e.target.value)}
+          placeholder={"Name\tPosition\tRating\tClub\tAge\tValue\tWage\nErling Haaland\tST\t91\tMan City\t25\t185\t350"}
+          rows={6}
+          style={{ ...inputStyle, fontFamily: "monospace", fontSize: 12, resize: "vertical" }}
+        />
+      </Field>
+
+      {parsed.columnCount > 0 && (
+        <>
+          <div className="flex items-center gap-2" style={{ marginTop: 10, marginBottom: 10 }}>
+            <input type="checkbox" checked={hasHeaders} onChange={(e) => setHasHeaders(e.target.checked)} id="hasHeaders" />
+            <label htmlFor="hasHeaders" style={{ color: C.muted, fontSize: 12.5 }}>First row is column headers (not a player)</label>
+          </div>
+
+          <div style={{ color: C.text, fontWeight: 700, fontSize: 13, marginBottom: 8 }}>Map each column</div>
+          <div className="grid gap-2" style={{ gridTemplateColumns: `repeat(${parsed.columnCount}, minmax(120px, 1fr))`, marginBottom: 14, overflowX: "auto" }}>
+            {mapping.map((field, i) => (
+              <div key={i}>
+                <div style={{ color: C.muted, fontSize: 10.5, marginBottom: 3 }}>
+                  Column {i + 1}{hasHeaders && parsed.rows[0][i] ? ` (${parsed.rows[0][i]})` : ""}
+                </div>
+                <Select value={field} onChange={(e) => setMapping((m) => m.map((f, j) => (j === i ? e.target.value : f)))} style={{ fontSize: 12 }}>
+                  {PLAYER_FIELD_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                </Select>
+              </div>
+            ))}
+          </div>
+
+          {!mapping.includes("name") && (
+            <div className="flex items-center gap-2" style={{ marginBottom: 10, color: C.red, fontSize: 12.5 }}>
+              <AlertTriangle size={13} /> You need to map one column as "Player Name" before importing.
+            </div>
+          )}
+
+          {preview.length > 0 && (
+            <div style={{ marginBottom: 14 }}>
+              <Label>Preview ({dataRows.length} rows total)</Label>
+              <Table dense head={["Name", "Pos", "Rating", "Club", "Age", "Value", "Wage"]}
+                rows={preview.map((p) => [p.name, p.position || "—", p.rating || "—", p.club || "—", p.age || "—", p.value ? money(roundUpTo250k(p.value)) : "—", p.wage ? `£${p.wage}k` : "—"])} />
+            </div>
+          )}
+
+          <div className="flex items-end gap-2 flex-wrap">
+            <Field label="Admin PIN">
+              <TextInput type="password" value={pin} onChange={(e) => setPin(e.target.value)} style={{ width: 140 }} />
+            </Field>
+            <Btn icon={Upload} onClick={() => doImport("merge")} disabled={!mapping.includes("name")}>Merge into database</Btn>
+            <Btn variant="outline" onClick={() => doImport("replace")} disabled={!mapping.includes("name")}>Replace entire database</Btn>
+          </div>
+        </>
+      )}
+
+      <div style={{ marginTop: 18, paddingTop: 14, borderTop: `1px solid ${C.border}` }}>
+        <Btn variant="danger" size="sm" icon={Trash2} onClick={doClear}>Clear player database</Btn>
       </div>
 
       {msg && (
