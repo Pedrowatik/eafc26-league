@@ -1169,10 +1169,64 @@ function SyncIndicator({ syncState, lastSyncedAt, onRefresh }) {
 }
 
 /* ------------------------------- Dashboard -------------------------------- */
+/* ---- FIFA-menu-inspired HUD styling, previewed on the Dashboard only ---- */
+const hudStadiumBg = {
+  background: `
+    radial-gradient(ellipse 900px 500px at 50% 100%, rgba(70,140,90,0.16) 0%, rgba(70,140,90,0) 60%),
+    radial-gradient(circle at 15% 0%, rgba(231,197,104,0.10) 0%, rgba(231,197,104,0) 40%),
+    radial-gradient(circle at 85% 0%, rgba(231,197,104,0.10) 0%, rgba(231,197,104,0) 40%),
+    linear-gradient(180deg, #05070c 0%, #0a1424 35%, #0c1c30 100%)
+  `,
+  margin: "-20px -18px -60px",
+  padding: "20px 18px 60px",
+};
+
+function HudPanel({ children, style, accent }) {
+  return (
+    <div style={{
+      background: "rgba(8, 18, 32, 0.82)",
+      backdropFilter: "blur(6px)",
+      border: "1px solid rgba(231,197,104,0.22)",
+      borderTop: `3px solid ${accent || C.gold}`,
+      borderRadius: 6,
+      boxShadow: "0 8px 24px rgba(0,0,0,0.35)",
+      padding: 18,
+      ...style,
+    }}>
+      {children}
+    </div>
+  );
+}
+
+function HudHeading({ children, right }) {
+  return (
+    <div className="flex items-center justify-between" style={{ marginBottom: 14 }}>
+      <div className="flex items-center gap-2">
+        <div style={{ width: 4, height: 16, background: C.gold }} />
+        <div style={{ color: "#fff", fontWeight: 800, fontSize: 12.5, letterSpacing: "0.12em", textTransform: "uppercase" }}>
+          {children}
+        </div>
+      </div>
+      {right}
+    </div>
+  );
+}
+
+function HudStatChip({ label, value, tone }) {
+  return (
+    <div style={{ flex: 1, minWidth: 140, padding: "10px 16px", borderRight: `1px solid rgba(231,197,104,0.18)` }}>
+      <div style={{ color: "rgba(255,255,255,0.55)", fontSize: 10, letterSpacing: "0.14em", textTransform: "uppercase", marginBottom: 3 }}>{label}</div>
+      <div style={{ color: tone === "gold" ? C.gold : "#fff", fontSize: 21, fontWeight: 800, fontVariantNumeric: "tabular-nums" }}>{value}</div>
+    </div>
+  );
+}
+
 function Dashboard({ teams, squads, standings, budgetStats, prizeTotal, taxCollected, events, setEvents, setTab, activity, myTeamId, season }) {
   const [newEvent, setNewEvent] = useState({ title: "", type: "League", date: "" });
   const leader = standings[0];
   const leaderTeam = teams.find((t) => t.id === leader?.id);
+  const myTeam = myTeamId && teams.find((t) => t.id === myTeamId);
+  const myStanding = myTeam && standings.find((s) => s.id === myTeamId);
 
   const addEvent = () => {
     if (!newEvent.title.trim()) return;
@@ -1181,83 +1235,121 @@ function Dashboard({ teams, squads, standings, budgetStats, prizeTotal, taxColle
   };
 
   return (
-    <div className="grid gap-4">
-      <div className="grid gap-4" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))" }}>
-        <StatCard label="Number of Teams" value={teams.length} />
-        <StatCard label="Season" value={season} />
-        <StatCard label="Tax Collected" value={money(taxCollected)} tone="gold" />
-        <StatCard label="Total Prize Pool" value={money(prizeTotal)} tone="gold" />
-      </div>
+    <div style={hudStadiumBg}>
+      <div className="grid gap-4">
+        {/* HUD stat strip — mirrors the top-right level/XP/currency bar from the reference */}
+        <HudPanel style={{ padding: 0 }} accent={C.gold}>
+          <div className="flex flex-wrap">
+            <HudStatChip label="Teams" value={teams.length} />
+            <HudStatChip label="Season" value={season} />
+            <HudStatChip label="Tax Collected" value={money(taxCollected)} tone="gold" />
+            <HudStatChip label="Prize Pool" value={money(prizeTotal)} tone="gold" />
+          </div>
+        </HudPanel>
 
-      {myTeamId && teams.find((t) => t.id === myTeamId) && (
-        <MyTeamCard team={teams.find((t) => t.id === myTeamId)} budgetStats={budgetStats} setTab={setTab} />
-      )}
+        {myTeam && (
+          <HudPanel accent={C.gold}>
+            <div className="flex items-center justify-between flex-wrap gap-3">
+              <div className="flex items-center gap-3">
+                <div style={{ width: 40, height: 40, borderRadius: 6, background: `linear-gradient(135deg, ${C.gold}, ${C.goldDim})`, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 900, color: "#0B1220", fontSize: 15 }}>
+                  {myTeam.name.slice(0, 2).toUpperCase()}
+                </div>
+                <div>
+                  <div style={{ color: "rgba(255,255,255,0.5)", fontSize: 10, letterSpacing: "0.12em", textTransform: "uppercase" }}>Your Club</div>
+                  <div style={{ color: "#fff", fontWeight: 800, fontSize: 16 }}>{myTeam.name}</div>
+                </div>
+              </div>
+              {myStanding && (
+                <div className="flex items-center gap-6">
+                  <div style={{ textAlign: "center" }}>
+                    <div style={{ color: "rgba(255,255,255,0.5)", fontSize: 10, letterSpacing: "0.1em", textTransform: "uppercase" }}>Position</div>
+                    <div style={{ color: C.gold, fontWeight: 800, fontSize: 18 }}>{myStanding.position}{myStanding.position === 1 ? "st" : myStanding.position === 2 ? "nd" : myStanding.position === 3 ? "rd" : "th"}</div>
+                  </div>
+                  <div style={{ textAlign: "center" }}>
+                    <div style={{ color: "rgba(255,255,255,0.5)", fontSize: 10, letterSpacing: "0.1em", textTransform: "uppercase" }}>Points</div>
+                    <div style={{ color: "#fff", fontWeight: 800, fontSize: 18 }}>{myStanding.points}</div>
+                  </div>
+                  <div style={{ textAlign: "center" }}>
+                    <div style={{ color: "rgba(255,255,255,0.5)", fontSize: 10, letterSpacing: "0.1em", textTransform: "uppercase" }}>Budget</div>
+                    <div style={{ color: "#fff", fontWeight: 800, fontSize: 18 }}>{money(budgetStats[myTeamId]?.current)}</div>
+                  </div>
+                  <Btn size="sm" onClick={() => setTab("squads")}>View Squad</Btn>
+                </div>
+              )}
+            </div>
+          </HudPanel>
+        )}
 
-      <div className="grid gap-4" style={{ gridTemplateColumns: "2fr 1fr" }}>
-        <Panel style={{ padding: 18 }}>
-          <SectionTitle icon={Trophy} right={<Btn variant="ghost" size="sm" icon={ChevronRight} onClick={() => setTab("standings")}>Full table</Btn>}>
-            Current Standings — Top 5
-          </SectionTitle>
+        <div className="grid gap-4" style={{ gridTemplateColumns: "2fr 1fr" }}>
+          <HudPanel>
+            <HudHeading right={<Btn variant="ghost" size="sm" icon={ChevronRight} onClick={() => setTab("standings")}>Full Table</Btn>}>
+              League Table — Top 5
+            </HudHeading>
+            <Table
+              head={["Pos", "Team", "Manager", "P", "GD", "Pts"]}
+              rows={standings.slice(0, 5).map((r) => {
+                const t = teams.find((x) => x.id === r.id);
+                return [r.position, t?.name, t?.manager, r.played, r.gd, r.points];
+              })}
+            />
+            {leader && (
+              <div style={{ marginTop: 10, color: "rgba(255,255,255,0.6)", fontSize: 12.5 }}>
+                Leading: <b style={{ color: C.gold }}>{leaderTeam?.name}</b> ({leaderTeam?.manager}) — {leader.points} pts
+              </div>
+            )}
+          </HudPanel>
+
+          <HudPanel>
+            <HudHeading>Next Events</HudHeading>
+            <div className="grid gap-2" style={{ marginBottom: 12 }}>
+              {events.length === 0 && <div style={{ color: "rgba(255,255,255,0.5)", fontSize: 13 }}>No events added yet.</div>}
+              {events.map((e) => (
+                <div key={e.id} className="flex items-center justify-between" style={{ background: "rgba(255,255,255,0.04)", borderLeft: `2px solid ${C.gold}`, borderRadius: 4, padding: "8px 10px" }}>
+                  <div>
+                    <div style={{ color: "#fff", fontSize: 13, fontWeight: 600 }}>{e.title}</div>
+                    <div style={{ color: "rgba(255,255,255,0.5)", fontSize: 11.5 }}>{e.type}{e.date ? ` · ${e.date}` : ""}</div>
+                  </div>
+                  <Btn variant="ghost" size="sm" icon={X} onClick={() => setEvents((ev) => ev.filter((x) => x.id !== e.id))} />
+                </div>
+              ))}
+            </div>
+            <div className="grid gap-2">
+              <TextInput placeholder="Event title (e.g. Matchday 5 fixtures)" value={newEvent.title}
+                onChange={(e) => setNewEvent((v) => ({ ...v, title: e.target.value }))} />
+              <div className="flex gap-2">
+                <Select value={newEvent.type} onChange={(e) => setNewEvent((v) => ({ ...v, type: e.target.value }))}>
+                  {["League", "Transfer", "Cup", "Admin"].map((o) => <option key={o}>{o}</option>)}
+                </Select>
+                <TextInput type="date" value={newEvent.date} onChange={(e) => setNewEvent((v) => ({ ...v, date: e.target.value }))} />
+              </div>
+              <Btn icon={Plus} onClick={addEvent}>Add Event</Btn>
+            </div>
+          </HudPanel>
+        </div>
+
+        <div className="grid gap-4" style={{ gridTemplateColumns: "1fr 1fr" }}>
+          <HudPanel>
+            <HudHeading>Find a Player</HudHeading>
+            <PlayerSearchInner teams={teams} squads={squads} />
+          </HudPanel>
+          <HudPanel>
+            <HudHeading>Recent Activity</HudHeading>
+            <RecentActivityInner activity={activity} />
+          </HudPanel>
+        </div>
+
+        <HudPanel>
+          <HudHeading>Budget Snapshot</HudHeading>
           <Table
-            head={["Pos", "Team", "Manager", "P", "GD", "Pts"]}
-            rows={standings.slice(0, 5).map((r) => {
-              const t = teams.find((x) => x.id === r.id);
-              return [
-                r.position, t?.name, t?.manager, r.played, r.gd, r.points,
-              ];
+            head={["Team", "Manager", "Current Budget", "Wages", "Compliance"]}
+            rows={teams.map((t) => {
+              const b = budgetStats[t.id];
+              return [t.name, t.manager, money(b.current), money(b.wages),
+                <Pill tone={b.compliant ? "green" : "red"}>{b.compliant ? "OK" : "Over"}</Pill>];
             })}
           />
-          {leader && (
-            <div style={{ marginTop: 10, color: C.muted, fontSize: 12.5 }}>
-              Leading: <b style={{ color: C.gold }}>{leaderTeam?.name}</b> ({leaderTeam?.manager}) — {leader.points} pts
-            </div>
-          )}
-        </Panel>
-
-        <Panel style={{ padding: 18 }}>
-          <SectionTitle icon={Swords}>Next Events</SectionTitle>
-          <div className="grid gap-2" style={{ marginBottom: 12 }}>
-            {events.length === 0 && <div style={{ color: C.muted, fontSize: 13 }}>No events added yet.</div>}
-            {events.map((e) => (
-              <div key={e.id} className="flex items-center justify-between" style={{ background: C.panelAlt, borderRadius: 8, padding: "8px 10px" }}>
-                <div>
-                  <div style={{ color: C.text, fontSize: 13, fontWeight: 600 }}>{e.title}</div>
-                  <div style={{ color: C.muted, fontSize: 11.5 }}>{e.type}{e.date ? ` · ${e.date}` : ""}</div>
-                </div>
-                <Btn variant="ghost" size="sm" icon={X} onClick={() => setEvents((ev) => ev.filter((x) => x.id !== e.id))} />
-              </div>
-            ))}
-          </div>
-          <div className="grid gap-2">
-            <TextInput placeholder="Event title (e.g. Matchday 5 fixtures)" value={newEvent.title}
-              onChange={(e) => setNewEvent((v) => ({ ...v, title: e.target.value }))} />
-            <div className="flex gap-2">
-              <Select value={newEvent.type} onChange={(e) => setNewEvent((v) => ({ ...v, type: e.target.value }))}>
-                {["League", "Transfer", "Cup", "Admin"].map((o) => <option key={o}>{o}</option>)}
-              </Select>
-              <TextInput type="date" value={newEvent.date} onChange={(e) => setNewEvent((v) => ({ ...v, date: e.target.value }))} />
-            </div>
-            <Btn icon={Plus} onClick={addEvent}>Add event</Btn>
-          </div>
-        </Panel>
+        </HudPanel>
       </div>
-
-      <div className="grid gap-4" style={{ gridTemplateColumns: "1fr 1fr" }}>
-        <PlayerSearch teams={teams} squads={squads} />
-        <RecentActivity activity={activity} />
-      </div>
-
-      <Panel style={{ padding: 18 }}>
-        <SectionTitle icon={Wallet}>Budget Snapshot</SectionTitle>
-        <Table
-          head={["Team", "Manager", "Current Budget", "Wages", "Compliance"]}
-          rows={teams.map((t) => {
-            const b = budgetStats[t.id];
-            return [t.name, t.manager, money(b.current), money(b.wages),
-              <Pill tone={b.compliant ? "green" : "red"}>{b.compliant ? "OK" : "Over"}</Pill>];
-          })}
-        />
-      </Panel>
     </div>
   );
 }
@@ -1293,7 +1385,7 @@ function MyTeamCard({ team, budgetStats, setTab }) {
   );
 }
 
-function PlayerSearch({ teams, squads }) {
+function PlayerSearchInner({ teams, squads }) {
   const [query, setQuery] = useState("");
   const results = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -1310,12 +1402,11 @@ function PlayerSearch({ teams, squads }) {
   }, [query, teams, squads]);
 
   return (
-    <Panel style={{ padding: 18 }}>
-      <SectionTitle icon={Search}>Find a Player</SectionTitle>
+    <>
       <TextInput placeholder="Search every squad by player name…" value={query} onChange={(e) => setQuery(e.target.value)} />
       <div style={{ marginTop: 12 }}>
-        {query.trim() === "" && <div style={{ color: C.muted, fontSize: 12.5 }}>Handy before starting an auction — check who already owns a player.</div>}
-        {query.trim() !== "" && results.length === 0 && <div style={{ color: C.muted, fontSize: 12.5 }}>No players matching "{query}".</div>}
+        {query.trim() === "" && <div style={{ color: "rgba(255,255,255,0.5)", fontSize: 12.5 }}>Handy before starting an auction — check who already owns a player.</div>}
+        {query.trim() !== "" && results.length === 0 && <div style={{ color: "rgba(255,255,255,0.5)", fontSize: 12.5 }}>No players matching "{query}".</div>}
         {results.length > 0 && (
           <Table
             dense
@@ -1324,11 +1415,20 @@ function PlayerSearch({ teams, squads }) {
           />
         )}
       </div>
+    </>
+  );
+}
+
+function PlayerSearch({ teams, squads }) {
+  return (
+    <Panel style={{ padding: 18 }}>
+      <SectionTitle icon={Search}>Find a Player</SectionTitle>
+      <PlayerSearchInner teams={teams} squads={squads} />
     </Panel>
   );
 }
 
-function RecentActivity({ activity }) {
+function RecentActivityInner({ activity }) {
   const timeAgo = (t) => {
     const diff = Date.now() - t;
     const mins = Math.floor(diff / 60000);
@@ -1339,17 +1439,25 @@ function RecentActivity({ activity }) {
     return `${Math.floor(hrs / 24)}d ago`;
   };
   return (
-    <Panel style={{ padding: 18 }}>
-      <SectionTitle icon={CalendarClock}>Recent Activity</SectionTitle>
-      {activity.length === 0 && <div style={{ color: C.muted, fontSize: 12.5 }}>Nothing's happened yet — actions across the league will show up here.</div>}
+    <>
+      {activity.length === 0 && <div style={{ color: "rgba(255,255,255,0.5)", fontSize: 12.5 }}>Nothing's happened yet — actions across the league will show up here.</div>}
       <div className="grid gap-2" style={{ maxHeight: 260, overflowY: "auto" }}>
         {activity.slice(0, 30).map((a) => (
-          <div key={a.id} style={{ fontSize: 12.5, color: C.text, borderBottom: `1px solid ${C.border}33`, paddingBottom: 6 }}>
+          <div key={a.id} style={{ fontSize: 12.5, color: "#fff", borderBottom: "1px solid rgba(231,197,104,0.15)", paddingBottom: 6 }}>
             {a.text}
-            <div style={{ color: C.muted, fontSize: 10.5 }}>{timeAgo(a.time)}</div>
+            <div style={{ color: "rgba(255,255,255,0.5)", fontSize: 10.5 }}>{timeAgo(a.time)}</div>
           </div>
         ))}
       </div>
+    </>
+  );
+}
+
+function RecentActivity({ activity }) {
+  return (
+    <Panel style={{ padding: 18 }}>
+      <SectionTitle icon={CalendarClock}>Recent Activity</SectionTitle>
+      <RecentActivityInner activity={activity} />
     </Panel>
   );
 }
