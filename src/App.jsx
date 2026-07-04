@@ -2444,6 +2444,37 @@ function BackupTools({ exportBackup, restoreBackup }) {
   );
 }
 
+// Sofifa's official position codes (from their API docs), mapped down to this app's simpler
+// position set used everywhere else (POSITIONS array).
+const SOFIFA_POSITION_MAP = {
+  0: "GK", 1: "CB", 2: "RWB", 3: "RB", 4: "CB", 5: "CB", 6: "CB", 7: "LB", 8: "LWB",
+  9: "CDM", 10: "CDM", 11: "CDM", 12: "RM", 13: "CM", 14: "CM", 15: "CM", 16: "LM",
+  17: "CAM", 18: "CAM", 19: "CAM", 20: "CF", 21: "CF", 22: "CF", 23: "RW", 24: "ST",
+  25: "ST", 26: "ST", 27: "LW", 28: "ST", 29: "ST",
+};
+const sofifaPosition = (code) => SOFIFA_POSITION_MAP[code] ?? "ST";
+
+const SOFIFA_API = "https://api.sofifa.net";
+
+async function sofifaFetch(path) {
+  const res = await fetch(`${SOFIFA_API}${path}`);
+  if (!res.ok) throw new Error(`Sofifa API returned ${res.status}`);
+  const json = await res.json();
+  return json.data;
+}
+
+function mapSofifaPlayer(p, clubName) {
+  return {
+    name: p.commonName || `${p.firstName} ${p.lastName}`,
+    position: sofifaPosition(p.position1),
+    rating: p.overallRating,
+    club: clubName,
+    age: p.age,
+    value: (p.price || 0) / 1000000, // Sofifa returns raw £, we track £M
+    wage: (p.wage || 0) / 1000,      // Sofifa returns raw £/week, we track £k/week
+  };
+}
+
 const PLAYER_FIELD_OPTIONS = [
   { value: "ignore", label: "Ignore this column" },
   { value: "name", label: "Player Name" },
@@ -2474,6 +2505,158 @@ function guessFieldForColumn(headerText) {
   if (/\bage\b/.test(h)) return "age";
   if (/value|transfer|price|worth/.test(h)) return "value";
   return "ignore";
+}
+
+function SofifaImport({ importPlayerDatabase }) {
+  const [mode, setMode] = useState("league"); // "league" | "club"
+  const [leagues, setLeagues] = useState([]); // {id, name}
+  const [teams, setTeams] = useState([]); // {id, name, league}
+  const [roster, setRoster] = useState(null);
+  const [loadingData, setLoadingData] = useState(false);
+
+  const [query, setQuery] = useState("");
+  const [selected, setSelected] = useState(null);
+  const [pin, setPin] = useState("");
+  const [msg, setMsg] = useState(null);
+
+  const [progress, setProgress] = useState(null); // { current, total, label }
+  const busy = progress !== null;
+
+  const loadData = async () => {
+    setLoadingData(true);
+    setMsg(null);
+    try {
+      const leagueList = await sofifaFetch("/leagues");
+      const latestRoster = leagueList.reduce((max, l) => (l.latestRoster > max ? l.latestRoster : max), "0");
+      setRoster(latestRoster);
+      // Leagues can repeat across game years — keep one entry per league id, using its own latestRoster.
+      const seen = new Map();
+      leagueList.forEach((l) => { if (!seen.has(l.id)) seen.set(l.id, { id: l.id, name: l.name, roster: l.latestRoster }); });
+      setLeagues(Array.from(seen.values()));
+      const teamList = await sofifaFetch(`/teams/${latestRoster}`);
+      setTeams(teamList.map((t) => ({ id: t.id, name: t.name, league: t.league?.name || "" })));
+    } catch (e) {
+      setMsg({
+        text: "Couldn't reach Sofifa's API from the browser (likely blocked by their server's cross-origin policy). This needs a small server-side helper instead — let me know and I'll build that version.",
+        tone: "red",
+      });
+    } finally {
+      setLoadingData(false);
+    }
+  };
+
+  const matches = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    const list = mode === "league" ? leagues : teams;
+    if (!q) return [];
+    return list.filter((t) => t.name.toLowerCase().includes(q)).slice(0, 8);
+  }, [query, mode, leagues, teams]);
+
+  const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
+
+  const importClub = async () => {
+    setProgress({ current: 0, total: 1, label: selected.name });
+    setMsg(null);
+    try {
+      const team = await sofifaFetch(`/team/${selected.id}/${roster}`);
+      const players = (team.players || []).map((p) => mapSofifaPlayer(p, team.name));
+      const err = importPlayerDatabase(pin, players, "merge");
+      if (err) setMsg({ text: err, tone: "red" });
+      else setMsg({ text: `Imported ${players.length} players from ${team.name}.`, tone: "green" });
+    } catch (e) {
+      setMsg({ text: "Couldn't load that squad from Sofifa — try again in a moment.", tone: "red" });
+    } finally {
+      setProgress(null);
+    }
+  };
+
+  const importLeague = async () => {
+    setMsg(null);
+    try {
+      const clubTeams = await sofifaFetch(`/league/${selected.id}/${selected.roster}`);
+      const allPlayers = [];
+      for (let i = 0; i < clubTeams.length; i++) {
+        const t = clubTeams[i];
+        setProgress({ current: i + 1, total: clubTeams.length, label: t.name });
+        try {
+          const full = await sofifaFetch(`/team/${t.id}/${selected.roster}`);
+          (full.players || []).forEach((p) => allPlayers.push(mapSofifaPlayer(p, full.name)));
+        } catch (e) {
+          // one club failing shouldn't kill the whole league import — just skip it and keep going
+        }
+        await sleep(250); // stay comfortably under Sofifa's 60 requests/minute limit
+      }
+      const err = importPlayerDatabase(pin, allPlayers, "merge");
+      if (err) setMsg({ text: err, tone: "red" });
+      else setMsg({ text: `Imported ${allPlayers.length} players from ${clubTeams.length} clubs in ${selected.name}.`, tone: "green" });
+    } catch (e) {
+      setMsg({ text: "Couldn't load that league from Sofifa — try again in a moment.", tone: "red" });
+    } finally {
+      setProgress(null);
+    }
+  };
+
+  const hasData = mode === "league" ? leagues.length > 0 : teams.length > 0;
+
+  return (
+    <div style={{ background: C.panelAlt, border: `1px solid ${C.border}`, borderRadius: 10, padding: 14 }}>
+      <div className="flex items-center justify-between flex-wrap gap-2" style={{ marginBottom: 10 }}>
+        <div style={{ color: C.text, fontWeight: 700, fontSize: 13 }}>Import from Sofifa</div>
+        <div className="flex gap-2">
+          <Btn size="sm" variant={mode === "league" ? "primary" : "outline"} onClick={() => { setMode("league"); setSelected(null); setQuery(""); }}>Whole league</Btn>
+          <Btn size="sm" variant={mode === "club" ? "primary" : "outline"} onClick={() => { setMode("club"); setSelected(null); setQuery(""); }}>Single club</Btn>
+        </div>
+      </div>
+
+      {!hasData ? (
+        <Btn onClick={loadData} disabled={loadingData}>{loadingData ? "Loading…" : "Load leagues & clubs from Sofifa"}</Btn>
+      ) : (
+        <div className="grid gap-3">
+          <Field label={mode === "league" ? `Search leagues (${leagues.length} loaded)` : `Search clubs (${teams.length} loaded)`}>
+            <TextInput placeholder={mode === "league" ? "e.g. Premier League" : "e.g. Arsenal"} value={query}
+              onChange={(e) => { setQuery(e.target.value); setSelected(null); }} disabled={busy} />
+          </Field>
+          {matches.length > 0 && !selected && (
+            <div className="grid gap-1">
+              {matches.map((t) => (
+                <button key={t.id} onClick={() => { setSelected(t); setQuery(t.name); }}
+                  style={{ textAlign: "left", background: "transparent", border: `1px solid ${C.border}`, borderRadius: 6, padding: "6px 10px", cursor: "pointer", color: C.text, fontSize: 12.5 }}>
+                  {t.name}{t.league ? <span style={{ color: C.muted }}> · {t.league}</span> : null}
+                </button>
+              ))}
+            </div>
+          )}
+          {selected && !busy && (
+            <div className="flex items-end gap-2 flex-wrap">
+              <Field label="Admin PIN">
+                <TextInput type="password" value={pin} onChange={(e) => setPin(e.target.value)} style={{ width: 140 }} />
+              </Field>
+              <Btn onClick={mode === "league" ? importLeague : importClub}>
+                Import {selected.name}{mode === "league" ? " (all clubs)" : "'s squad"}
+              </Btn>
+              <Btn variant="outline" size="sm" onClick={() => { setSelected(null); setQuery(""); }}>Change {mode === "league" ? "league" : "club"}</Btn>
+            </div>
+          )}
+          {busy && (
+            <div style={{ color: C.muted, fontSize: 12.5 }}>
+              Importing… {progress.current}/{progress.total} — {progress.label}
+              {progress.total > 1 && (
+                <div style={{ background: C.border, borderRadius: 6, height: 6, marginTop: 6, overflow: "hidden" }}>
+                  <div style={{ background: C.gold, height: "100%", width: `${(progress.current / progress.total) * 100}%`, transition: "width .2s" }} />
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
+      {msg && (
+        <div className="flex items-center gap-2" style={{ marginTop: 10, color: msg.tone === "green" ? C.green : C.red, fontSize: 12.5 }}>
+          {msg.tone === "green" ? <CheckCircle2 size={14} /> : <AlertTriangle size={14} />} {msg.text}
+        </div>
+      )}
+    </div>
+  );
 }
 
 function PlayerDatabaseTools({ playerDatabase, importPlayerDatabase, clearPlayerDatabase }) {
@@ -2528,14 +2711,20 @@ function PlayerDatabaseTools({ playerDatabase, importPlayerDatabase, clearPlayer
     <Panel style={{ padding: 18 }}>
       <SectionTitle icon={Search}>Player Database (for autocomplete)</SectionTitle>
       <div style={{ color: C.muted, fontSize: 12.5, marginBottom: 14, lineHeight: 1.6 }}>
-        Player data is sourced from{" "}
+        Pull real club squads directly from{" "}
+        <a href="https://sofifa.com/" target="_blank" rel="noopener noreferrer" style={{ color: C.gold }}>Sofifa</a>
+        {" "}below, or paste a copied table from{" "}
         <a href="https://cmtracker.net/" target="_blank" rel="noopener noreferrer" style={{ color: C.gold }}>CMTracker.net</a>
-        {" "}— paste a copied table of players here (or from Sofifa, or a spreadsheet) with columns for
-        name, position, rating, club, age, value and wage. Map the columns below, then import.
-        Once imported, every "Player name" field in Transfers and Auctions will suggest matching players
-        as you type, and picking one auto-fills their position, rating, club, age, wage, and a suggested
-        bid (their value rounded up to the nearest £250,000). Currently{" "}
-        <b style={{ color: C.gold }}>{playerDatabase.length} players</b> in the database.
+        {" "}(or anywhere else) further down. Once imported, every "Player name" field in Transfers and
+        Auctions will suggest matching players as you type, and picking one auto-fills their position,
+        rating, club, age, wage, and a suggested bid (their value rounded up to the nearest £250,000).
+        Currently <b style={{ color: C.gold }}>{playerDatabase.length} players</b> in the database.
+      </div>
+
+      <SofifaImport importPlayerDatabase={importPlayerDatabase} />
+
+      <div style={{ margin: "20px 0", paddingTop: 6, borderTop: `1px solid ${C.border}` }}>
+        <div style={{ color: C.text, fontWeight: 700, fontSize: 13, marginBottom: 10 }}>Or Paste From Anywhere Else</div>
       </div>
 
       <Field label="Paste data here (tab or comma separated)">
