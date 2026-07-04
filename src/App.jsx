@@ -1077,6 +1077,13 @@ export default function EafcLeagueApp() {
             clearPlayerDatabase={clearPlayerDatabase} />
         )}
       </div>
+
+      <div style={{ textAlign: "center", padding: "18px 18px 28px", color: C.muted, fontSize: 11.5 }}>
+        Player data powered by{" "}
+        <a href="https://cmtracker.net/" target="_blank" rel="noopener noreferrer" style={{ color: C.gold, textDecoration: "underline" }}>
+          CMTracker.net
+        </a>
+      </div>
     </div>
   );
 }
@@ -2521,8 +2528,10 @@ function PlayerDatabaseTools({ playerDatabase, importPlayerDatabase, clearPlayer
     <Panel style={{ padding: 18 }}>
       <SectionTitle icon={Search}>Player Database (for autocomplete)</SectionTitle>
       <div style={{ color: C.muted, fontSize: 12.5, marginBottom: 14, lineHeight: 1.6 }}>
-        Paste player data copied from CM Tracker, Sofifa, or a spreadsheet — any table with columns for
-        name, position, rating, club, age, value and wage works. Map the columns below, then import.
+        Player data is sourced from{" "}
+        <a href="https://cmtracker.net/" target="_blank" rel="noopener noreferrer" style={{ color: C.gold }}>CMTracker.net</a>
+        {" "}— paste a copied table of players here (or from Sofifa, or a spreadsheet) with columns for
+        name, position, rating, club, age, value and wage. Map the columns below, then import.
         Once imported, every "Player name" field in Transfers and Auctions will suggest matching players
         as you type, and picking one auto-fills their position, rating, club, age, wage, and a suggested
         bid (their value rounded up to the nearest £250,000). Currently{" "}
