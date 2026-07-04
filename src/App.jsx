@@ -4,7 +4,7 @@ import {
   Plus, Trash2, Save, RotateCcw, AlertTriangle, CheckCircle2, X, ChevronRight, Lock, Unlock, KeyRound,
   Upload, Eye, Loader2, Pencil, Check, Download, MessageCircle, Search, UserCircle2, Send, CalendarClock
 } from "lucide-react";
-import { storage, subscribeToKey } from "./storage.js";
+import { storage, subscribeToKey, supabaseUrl, supabaseAnonKey } from "./storage.js";
 
 /* ----------------------------- design tokens ----------------------------- */
 const C = {
@@ -2454,11 +2454,14 @@ const SOFIFA_POSITION_MAP = {
 };
 const sofifaPosition = (code) => SOFIFA_POSITION_MAP[code] ?? "ST";
 
-const SOFIFA_API = "https://api.sofifa.net";
-
+// Sofifa's server blocks direct browser requests, so this goes through a small Supabase Edge
+// Function ("sofifa-proxy") that fetches from Sofifa server-side and hands the result back.
 async function sofifaFetch(path) {
-  const res = await fetch(`${SOFIFA_API}${path}`);
-  if (!res.ok) throw new Error(`Sofifa API returned ${res.status}`);
+  const url = `${supabaseUrl}/functions/v1/sofifa-proxy?path=${encodeURIComponent(path)}`;
+  const res = await fetch(url, {
+    headers: { Authorization: `Bearer ${supabaseAnonKey}` },
+  });
+  if (!res.ok) throw new Error(`Sofifa proxy returned ${res.status}`);
   const json = await res.json();
   return json.data;
 }
@@ -2537,7 +2540,7 @@ function SofifaImport({ importPlayerDatabase }) {
       setTeams(teamList.map((t) => ({ id: t.id, name: t.name, league: t.league?.name || "" })));
     } catch (e) {
       setMsg({
-        text: "Couldn't reach Sofifa's API from the browser (likely blocked by their server's cross-origin policy). This needs a small server-side helper instead — let me know and I'll build that version.",
+        text: "Couldn't reach the Sofifa proxy. Make sure the \"sofifa-proxy\" Edge Function is deployed in your Supabase project (Rules tab setup instructions cover this).",
         tone: "red",
       });
     } finally {
