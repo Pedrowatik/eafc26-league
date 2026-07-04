@@ -53,6 +53,17 @@ export const storage = {
   },
 };
 
+// Lists keys matching a prefix (used to find nightly auto-backups), newest first.
+export async function listByPrefix(prefix) {
+  const { data, error } = await supabase
+    .from(TABLE)
+    .select("key, updated_at")
+    .like("key", `${prefix}%`)
+    .order("updated_at", { ascending: false });
+  if (error) throw error;
+  return data || [];
+}
+
 // Real-time push updates: fires the instant anyone else's browser saves this key, instead of
 // waiting for the next poll. This is the "actual live sync" the artifact version couldn't do.
 export function subscribeToKey(key, onChange) {

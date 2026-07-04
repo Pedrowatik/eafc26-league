@@ -4,7 +4,7 @@ import {
   Plus, Trash2, Save, RotateCcw, AlertTriangle, CheckCircle2, X, ChevronRight, Lock, Unlock, KeyRound,
   Upload, Eye, Loader2, Pencil, Check, Download, MessageCircle, Search, UserCircle2, Send, CalendarClock
 } from "lucide-react";
-import { storage, subscribeToKey, supabaseUrl, supabaseAnonKey } from "./storage.js";
+import { storage, subscribeToKey, supabaseUrl, supabaseAnonKey, listByPrefix } from "./storage.js";
 
 /* ----------------------------- design tokens ----------------------------- */
 const C = {
@@ -130,6 +130,7 @@ const POSITIONS = ["GK", "CB", "LB", "RB", "LWB", "RWB", "CDM", "CM", "CAM", "LM
 
 const STORAGE_KEY = "eafc26-league-state-v1";
 const MY_TEAM_KEY = "eafc26-my-team"; // personal, per-device — not shared
+const NIGHTLY_BACKUP_PREFIX = "eafc26-nightly-backup-"; // written by the scheduled Edge Function
 
 /* ------------------------------- small UI -------------------------------- */
 function Panel({ children, style, ...rest }) {
@@ -586,10 +587,6 @@ export default function EafcLeagueApp() {
 
   /* ------------------------------- mutators -------------------------------- */
   const renameTeam = (id, patch) => {
-    if (patch.name) {
-      const old = teamById[id]?.name;
-      if (old && old !== patch.name) logActivity(`${old} renamed to ${patch.name}`);
-    }
     setTeams((ts) => ts.map((t) => (t.id === id ? { ...t, ...patch } : t)));
   };
 
@@ -615,10 +612,19 @@ export default function EafcLeagueApp() {
       buyerProcessed: false,
     };
     setTransfers((tx) => [record, ...tx]);
-    const fromName = form.from === "FA" ? "Free Agent Pool" : teamById[form.from]?.name || form.from;
-    const toName = form.to === "FA" ? "Free Agent Pool" : teamById[form.to]?.name || form.to;
+    const fromName = form.from === "FA" ? "Non OCM" : teamById[form.from]?.name || form.from;
+    const toName = form.to === "FA" ? "Non OCM" : teamById[form.to]?.name || form.to;
     logActivity(`Transfer logged: ${form.name} — ${fromName} → ${toName} (${money(price)})`, "transfer");
     return null;
+  };
+
+  // Admin-only: the "Instant Transfer" tool is for player rewards / manual awards outside the
+  // normal bidding process (no competing bids), so it's PIN-gated rather than open to everyone.
+  const logAdminReward = (pinAttempt, form) => {
+    if (pinAttempt !== adminPin) return "Incorrect PIN.";
+    if (!form.name || !form.name.trim()) return "Enter a player name.";
+    if (form.from === form.to) return "From and To can't be the same team.";
+    return logTransfer(form);
   };
 
   const AUCTION_DURATION_MS = 24 * 60 * 60 * 1000;
@@ -648,28 +654,23 @@ export default function EafcLeagueApp() {
       winningBid: null,
     };
     setAuctions((all) => [auction, ...all]);
-    logActivity(`${teamById[form.startingBidder]?.name} opened bidding on ${form.name} at ${money(minBid)}${needsApproval ? ` (awaiting ${teamById[form.seller]?.name}'s approval)` : ""}`, "auction");
     return null;
   };
 
   const respondToAuction = (auctionId, accept) => {
     let err = null;
-    let logMsg = null;
     setAuctions((all) => all.map((a) => {
       if (a.id !== auctionId) return a;
       if (a.status !== "pending") { err = "This auction isn't waiting for a decision."; return a; }
-      if (!accept) { logMsg = `${teamById[a.seller]?.name} declined the bid for ${a.player.name}`; return { ...a, status: "declined" }; }
-      logMsg = `${teamById[a.seller]?.name} accepted the opening bid — ${a.player.name} auction is live for 24h`;
+      if (!accept) { return { ...a, status: "declined" }; }
       return { ...a, status: "open", deadline: Date.now() + AUCTION_DURATION_MS };
     }));
-    if (logMsg) logActivity(logMsg, "auction");
     return err;
   };
 
   const placeBid = (auctionId, teamId, amount) => {
     const amt = Number(amount);
     let err = null;
-    let logMsg = null;
     setAuctions((all) => all.map((a) => {
       if (a.id !== auctionId) return a;
       if (a.status === "pending") { err = `Waiting on ${teamById[a.seller]?.name || "the seller"} to accept the opening bid before anyone else can bid.`; return a; }
@@ -680,7 +681,6 @@ export default function EafcLeagueApp() {
       const required = a.currentBid > 0 ? a.currentBid + 0.25 : Math.max(a.minBid, 0.25);
       if (!amt || amt < required - 0.001) { err = `Bid must be at least ${money(required)} (£250k above the current bid).`; return a; }
       const bidsByTeam = { ...a.bidsByTeam, [teamId]: Math.max(a.bidsByTeam[teamId] || 0, amt) };
-      logMsg = `${teamById[teamId]?.name} bid ${money(amt)} on ${a.player.name}, outbidding ${teamById[a.currentBidder]?.name}`;
       return {
         ...a,
         currentBid: amt,
@@ -690,7 +690,6 @@ export default function EafcLeagueApp() {
         deadline: Date.now() + AUCTION_DURATION_MS, // every new highest bid resets the 24h clock
       };
     }));
-    if (logMsg) logActivity(logMsg, "auction");
     return err;
   };
 
@@ -755,14 +754,14 @@ export default function EafcLeagueApp() {
     const winner = auction.currentBidder;
     const winningBid = auction.currentBid;
 
-    // Winning bid: normal transfer (moves the player, charges bid + tax)
+    // Winning bid: normal transfer (moves the player, charges bid + tax) — this already logs
+    // a "Transfer logged" activity entry, so no need for a separate auction-specific one.
     logTransfer({
       date: todayISO(), from: auction.seller, to: winner, name: auction.player.name,
       position: auction.player.position, rating: auction.player.rating, club: auction.player.club,
       age: auction.player.age, wage: auction.player.wage, price: winningBid,
       notes: `Won auction for ${auction.player.name}`,
     });
-    logActivity(`${teamById[winner]?.name} won the auction for ${auction.player.name} at ${money(winningBid)}`, "auction");
 
     // Every other bidder pays 10% tax (min £0.25M) on their own highest bid, no player received.
     // This tax-only charge feeds straight into the prize pool once ratified, same as any other transfer tax.
@@ -788,7 +787,6 @@ export default function EafcLeagueApp() {
       });
     if (losingCharges.length) {
       setTransfers((tx) => [...losingCharges, ...tx]);
-      losingCharges.forEach((c) => logActivity(`${teamById[c.to]?.name} pays ${money(c.tax)} losing-bid tax on ${auction.player.name}`, "auction"));
     }
 
     setAuctions((all) => all.map((a) => (a.id === auctionId ? { ...a, status: "closed", winner, winningBid } : a)));
@@ -807,7 +805,6 @@ export default function EafcLeagueApp() {
     setAuctions([]);
     setSeason(1);
     setSeasonHistory([]);
-    logActivity("League data was reset.", "admin");
     return null;
   };
 
@@ -847,7 +844,6 @@ export default function EafcLeagueApp() {
     setPrizes([]);
     setAuctions((all) => all.filter((a) => a.status !== "closed" && a.status !== "declined")); // clear resolved history
 
-    logActivity(`Season ${season} ended — leftover budgets carried over plus a position-based top-up (£${SEASON_BOOST_MAX}M for 1st to £${SEASON_BOOST_MIN}M for last). Season ${season + 1} begins with new wage caps.`, "admin");
     setSeason((s) => s + 1);
     return null;
   };
@@ -879,6 +875,16 @@ export default function EafcLeagueApp() {
     URL.revokeObjectURL(url);
   };
 
+  const applyBackupData = (data) => {
+    setTeams(data.teams || defaultTeams());
+    setSquads(data.squads || defaultSquads());
+    setTransfers(data.transfers || []);
+    setFixtures(data.fixtures || []);
+    setPrizes(data.prizes || []);
+    setEvents(data.events || []);
+    setAuctions(data.auctions || []);
+  };
+
   // Restores from a previously exported backup file. PIN-gated since it overwrites live data.
   const restoreBackup = (pinAttempt, fileText) => {
     if (pinAttempt !== adminPin) return "Incorrect PIN.";
@@ -894,14 +900,26 @@ export default function EafcLeagueApp() {
     if (!window.confirm("Restore this backup? It will replace all current league data for everyone using this app.")) {
       return null;
     }
-    setTeams(data.teams || defaultTeams());
-    setSquads(data.squads || defaultSquads());
-    setTransfers(data.transfers || []);
-    setFixtures(data.fixtures || []);
-    setPrizes(data.prizes || []);
-    setEvents(data.events || []);
-    setAuctions(data.auctions || []);
+    applyBackupData(data);
     return null;
+  };
+
+  // Restores from one of the automatic nightly backups (written server-side by a scheduled
+  // Edge Function). PIN-gated for the same reason as the manual restore.
+  const restoreFromNightlyBackup = async (pinAttempt, key) => {
+    if (pinAttempt !== adminPin) return "Incorrect PIN.";
+    if (!window.confirm(`Restore the backup from "${key.replace(NIGHTLY_BACKUP_PREFIX, "")}"? This replaces all current league data for everyone using this app.`)) {
+      return null;
+    }
+    try {
+      const res = await storage.get(key, true);
+      if (!res || !res.value) return "Couldn't find that backup.";
+      const data = JSON.parse(res.value);
+      applyBackupData(data);
+      return null;
+    } catch (e) {
+      return "Couldn't load that backup — try again.";
+    }
   };
 
   // Replaces or merges the imported player reference database (from CM Tracker, Sofifa, etc.)
@@ -928,7 +946,6 @@ export default function EafcLeagueApp() {
         return Array.from(byName.values());
       });
     }
-    logActivity(`Player database ${mode === "replace" ? "replaced" : "updated"} — ${cleaned.length} players imported.`, "admin");
     return null;
   };
 
@@ -944,7 +961,6 @@ export default function EafcLeagueApp() {
     if (!teamId) return "Choose a team.";
     if (!amt || isNaN(amt) || amt === 0) return "Enter a non-zero amount.";
     setTeams((ts) => ts.map((t) => (t.id === teamId ? { ...t, budget: +(t.budget + amt).toFixed(2) } : t)));
-    logActivity(`Admin ${amt > 0 ? "added" : "deducted"} ${money(Math.abs(amt))} ${amt > 0 ? "to" : "from"} ${teamById[teamId]?.name}'s budget`, "admin");
     return null;
   };
 
@@ -954,7 +970,6 @@ export default function EafcLeagueApp() {
     if (!teamId) return "Choose a team.";
     if (!amt || isNaN(amt) || amt === 0) return "Enter a non-zero number of slots.";
     setTeams((ts) => ts.map((t) => (t.id === teamId ? { ...t, earned86: Math.max(0, (t.earned86 || 0) + amt) } : t)));
-    logActivity(`Admin ${amt > 0 ? "awarded" : "removed"} ${Math.abs(amt)} × 86+ slot${Math.abs(amt) === 1 ? "" : "s"} ${amt > 0 ? "to" : "from"} ${teamById[teamId]?.name}`, "admin");
     return null;
   };
 
@@ -1049,6 +1064,7 @@ export default function EafcLeagueApp() {
         )}
         {tab === "transfers" && (
           <TransfersTab teams={teams} squads={squads} transfers={transfers} logTransfer={logTransfer}
+            logAdminReward={logAdminReward}
             setTransfers={setTransfers} auctions={auctions} createAuction={createAuction}
             placeBid={placeBid} finalizeAuction={finalizeAuction} respondToAuction={respondToAuction}
             deleteBid={deleteBid} editAuctionPlayerName={editAuctionPlayerName} nowTick={nowTick}
@@ -1071,7 +1087,7 @@ export default function EafcLeagueApp() {
         {tab === "rules" && (
           <RulesTab teams={teams} resetAll={resetAll} changeAdminPin={changeAdminPin}
             addFundsToTeam={addFundsToTeam} addEarned86Slot={addEarned86Slot}
-            exportBackup={exportBackup} restoreBackup={restoreBackup}
+            exportBackup={exportBackup} restoreBackup={restoreBackup} restoreFromNightlyBackup={restoreFromNightlyBackup}
             endSeason={endSeason} season={season} seasonHistory={seasonHistory} standings={standings}
             playerDatabase={playerDatabase} importPlayerDatabase={importPlayerDatabase}
             clearPlayerDatabase={clearPlayerDatabase} />
@@ -1594,7 +1610,7 @@ function AuctionsPanel({ teams, squads, auctions, createAuction, placeBid, final
         <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))" }}>
           <Field label="Seller">
             <Select value={form.seller} onChange={(e) => changeSeller(e.target.value)}>
-              <option value="FA">Free Agent Pool</option>
+              <option value="FA">Non OCM</option>
               {teams.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
             </Select>
           </Field>
@@ -1682,7 +1698,7 @@ function AuctionsPanel({ teams, squads, auctions, createAuction, placeBid, final
             head={["Player", "Seller", "Result", "Winning Bid"]}
             rows={closed.map((a) => [
               a.player.name,
-              a.seller === "FA" ? "Free Agent Pool" : teams.find((t) => t.id === a.seller)?.name || a.seller,
+              a.seller === "FA" ? "Non OCM" : teams.find((t) => t.id === a.seller)?.name || a.seller,
               a.status === "declined" ? "Declined by owner" : a.winner ? (teams.find((t) => t.id === a.winner)?.name || a.winner) : "No bids",
               a.status === "declined" ? "—" : a.winningBid ? money(a.winningBid) : "—",
             ])}
@@ -1789,7 +1805,7 @@ function AuctionCard({ auction, teams, now, placeBid, finalizeAuction, deleteBid
             <span style={{ color: C.muted, fontWeight: 400 }}> · {auction.player.position}, {auction.player.rating} OVR</span>
           </div>
           <div style={{ color: C.muted, fontSize: 11.5 }}>
-            {auction.player.club}{auction.player.club ? " · " : ""}Selling: {auction.seller === "FA" ? "Free Agent Pool" : teams.find((t) => t.id === auction.seller)?.name}
+            {auction.player.club}{auction.player.club ? " · " : ""}Selling: {auction.seller === "FA" ? "Non OCM" : teams.find((t) => t.id === auction.seller)?.name}
           </div>
         </div>
         <Pill tone={ended ? "red" : "gold"}>{formatCountdown(remaining)}</Pill>
@@ -1853,10 +1869,11 @@ function AuctionCard({ auction, teams, now, placeBid, finalizeAuction, deleteBid
   );
 }
 
-function TransfersTab({ teams, squads, transfers, logTransfer, setTransfers, auctions, createAuction, placeBid, finalizeAuction, respondToAuction, deleteBid, editAuctionPlayerName, nowTick, myTeamId, playerDatabase }) {
+function TransfersTab({ teams, squads, transfers, logTransfer, logAdminReward, setTransfers, auctions, createAuction, placeBid, finalizeAuction, respondToAuction, deleteBid, editAuctionPlayerName, nowTick, myTeamId, playerDatabase }) {
   const blank = { date: todayISO(), from: "FA", to: myTeamId || teams[0].id, name: "", position: "ST", rating: 75, club: "", age: 25, wage: 0, price: 0, notes: "" };
   const [form, setForm] = useState(blank);
   const [warning, setWarning] = useState("");
+  const [pin, setPin] = useState("");
 
   const sellerSquadPlayers = form.from !== "FA" ? [...(squads[form.from]?.starters || []), ...(squads[form.from]?.reserves || [])].filter(Boolean) : [];
 
@@ -1868,11 +1885,9 @@ function TransfersTab({ teams, squads, transfers, logTransfer, setTransfers, auc
   const tax = form.price > 0 ? Math.max(Number(form.price) * 0.1, 0.25) : 0;
 
   const submit = () => {
-    if (!form.name.trim()) { setWarning("Enter a player name."); return; }
-    if (form.from === form.to) { setWarning("From and To can't be the same team."); return; }
-    const msg = logTransfer(form);
+    const msg = logAdminReward(pin, form);
     setWarning(msg || "");
-    setForm({ ...blank, to: form.to });
+    if (!msg) setForm({ ...blank, to: form.to });
   };
 
   return (
@@ -1882,11 +1897,12 @@ function TransfersTab({ teams, squads, transfers, logTransfer, setTransfers, auc
         deleteBid={deleteBid} editAuctionPlayerName={editAuctionPlayerName} myTeamId={myTeamId}
         playerDatabase={playerDatabase} />
 
-      <Panel style={{ padding: 18 }}>
-        <SectionTitle icon={Repeat}>Instant Transfer</SectionTitle>
+      <Panel style={{ padding: 18, border: `1px solid ${C.gold}55` }}>
+        <SectionTitle icon={Lock}>Admin: Player Rewards</SectionTitle>
         <div style={{ color: C.muted, fontSize: 11.5, marginBottom: 12 }}>
-          For deals with no bidding war — a straight signing, swap, or release. If multiple teams might compete for a
-          player, use Player Auctions above instead.
+          For giving a player to a team outside the normal bidding process — season rewards, prizes, corrections,
+          or anything with no competing bids. Requires the admin PIN. If multiple teams might compete for a player,
+          use Player Auctions above instead.
         </div>
         <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))" }}>
           <Field label="Date">
@@ -1894,14 +1910,14 @@ function TransfersTab({ teams, squads, transfers, logTransfer, setTransfers, auc
           </Field>
           <Field label="From (seller)">
             <Select value={form.from} onChange={(e) => setForm((f) => ({ ...f, from: e.target.value, name: "" }))}>
-              <option value="FA">Free Agent Pool</option>
+              <option value="FA">Non OCM</option>
               {teams.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
             </Select>
           </Field>
           <Field label="To (buyer)">
             <Select value={form.to} onChange={(e) => setForm((f) => ({ ...f, to: e.target.value }))}>
               {teams.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
-              <option value="FA">Free Agent Pool (release)</option>
+              <option value="FA">Non OCM (release)</option>
             </Select>
           </Field>
           <Field label="Bid (£M)">
@@ -1944,10 +1960,13 @@ function TransfersTab({ teams, squads, transfers, logTransfer, setTransfers, auc
           </div>
         )}
 
-        <div className="flex items-center gap-4 flex-wrap" style={{ marginTop: 14 }}>
+        <div className="flex items-end gap-4 flex-wrap" style={{ marginTop: 14 }}>
           <Pill tone="gold">Tax: {money(tax)}</Pill>
           <Pill tone="muted">Final cost to buyer: {money(Number(form.price || 0) + tax)}</Pill>
-          <Btn icon={Plus} onClick={submit}>Log transfer</Btn>
+          <Field label="Admin PIN">
+            <TextInput type="password" value={pin} onChange={(e) => setPin(e.target.value)} style={{ width: 140 }} />
+          </Field>
+          <Btn icon={Plus} onClick={submit}>Give player</Btn>
         </div>
         {warning && (
           <div className="flex items-center gap-2" style={{ marginTop: 10, color: C.red, fontSize: 12.5 }}>
@@ -1976,8 +1995,8 @@ function TransfersTab({ teams, squads, transfers, logTransfer, setTransfers, auc
             const st = transferStatus(tx, nowTick);
             return [
               tx.date, tx.player,
-              tx.from === "FA" ? "Free Agent Pool" : tx.from === "AUCTION_LOSS" ? "— (losing bid)" : teams.find((t) => t.id === tx.from)?.name || tx.from,
-              tx.to === "FA" ? "Free Agent Pool" : teams.find((t) => t.id === tx.to)?.name || tx.to,
+              tx.from === "FA" ? "Non OCM" : tx.from === "AUCTION_LOSS" ? "— (losing bid)" : teams.find((t) => t.id === tx.from)?.name || tx.from,
+              tx.to === "FA" ? "Non OCM" : teams.find((t) => t.id === tx.to)?.name || tx.to,
               money(tx.price), money(tx.tax), money(tx.finalCost),
               <Pill tone={st.tone}>{st.label}</Pill>,
               <button onClick={() => setTransfers((all) => all.filter((x) => x.id !== tx.id))} style={{ background: "transparent", border: "none", cursor: "pointer", color: C.red }}>
@@ -1993,21 +2012,33 @@ function TransfersTab({ teams, squads, transfers, logTransfer, setTransfers, auc
 
 /* -------------------------------- Fixtures ---------------------------------- */
 function FixturesTab({ teams, fixtures, setFixtures, logActivity, myTeamId }) {
-  const blank = { matchday: 1, team1: myTeamId || teams[0].id, team2: teams.find((t) => t.id !== myTeamId)?.id || teams[1].id, date: todayISO(), score1: "", score2: "", proof: "" };
+  const blank = { matchday: 1, team1: myTeamId || teams[0].id, team2: teams.find((t) => t.id !== myTeamId)?.id || teams[1].id, date: todayISO(), proof: "" };
   const [form, setForm] = useState(blank);
   const [warning, setWarning] = useState("");
   const [uploadingId, setUploadingId] = useState(null);
   const [uploadError, setUploadError] = useState(null);
   const [viewingFixture, setViewingFixture] = useState(null); // fixture object or null
+  const [enteringResultFor, setEnteringResultFor] = useState(null); // fixture id
+  const [resultForm, setResultForm] = useState({ score1: "", score2: "" });
 
   const add = () => {
     if (form.team1 === form.team2) { setWarning("Team 1 and Team 2 can't be the same."); return; }
-    setFixtures((f) => [{ ...form, id: uid(), hasProofImage: false }, ...f]);
+    setFixtures((f) => [{ ...form, score1: "", score2: "", id: uid(), hasProofImage: false }, ...f]);
     setWarning("");
-    const t1 = teams.find((t) => t.id === form.team1)?.name, t2 = teams.find((t) => t.id === form.team2)?.name;
-    const played = form.score1 !== "" && form.score2 !== "";
-    logActivity(`Matchday ${form.matchday}: ${t1} vs ${t2}${played ? ` (${form.score1}–${form.score2})` : " added"}`, "fixture");
     setForm({ ...blank, matchday: Number(form.matchday) + 0 });
+  };
+
+  const startResult = (f) => {
+    setEnteringResultFor(f.id);
+    setResultForm({ score1: "", score2: "" });
+  };
+
+  const saveResult = (f) => {
+    if (resultForm.score1 === "" || resultForm.score2 === "") return;
+    setFixtures((all) => all.map((x) => (x.id === f.id ? { ...x, score1: resultForm.score1, score2: resultForm.score2 } : x)));
+    const t1 = teams.find((t) => t.id === f.team1)?.name, t2 = teams.find((t) => t.id === f.team2)?.name;
+    logActivity(`Result: ${t1} ${resultForm.score1} – ${resultForm.score2} ${t2} (Matchday ${f.matchday})`, "fixture");
+    setEnteringResultFor(null);
   };
 
   const removeFixture = async (f) => {
@@ -2037,7 +2068,11 @@ function FixturesTab({ teams, fixtures, setFixtures, logActivity, myTeamId }) {
   return (
     <div className="grid gap-4">
       <Panel style={{ padding: 18 }}>
-        <SectionTitle icon={Swords}>Add Fixture / Result</SectionTitle>
+        <SectionTitle icon={Swords}>Post a Fixture</SectionTitle>
+        <div style={{ color: C.muted, fontSize: 11.5, marginBottom: 12 }}>
+          Post the fixture first — add the score afterward once the match has actually been played,
+          using "Add Result" in the list below.
+        </div>
         <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))" }}>
           <Field label="Matchday"><TextInput type="number" min={1} value={form.matchday} onChange={(e) => setForm((f) => ({ ...f, matchday: e.target.value }))} /></Field>
           <Field label="Team 1">
@@ -2051,14 +2086,9 @@ function FixturesTab({ teams, fixtures, setFixtures, logActivity, myTeamId }) {
             </Select>
           </Field>
           <Field label="Date"><TextInput type="date" value={form.date} onChange={(e) => setForm((f) => ({ ...f, date: e.target.value }))} /></Field>
-          <Field label="Team 1 score"><TextInput type="number" min={0} value={form.score1} onChange={(e) => setForm((f) => ({ ...f, score1: e.target.value }))} /></Field>
-          <Field label="Team 2 score"><TextInput type="number" min={0} value={form.score2} onChange={(e) => setForm((f) => ({ ...f, score2: e.target.value }))} /></Field>
-        </div>
-        <div style={{ marginTop: 12 }}>
-          <Field label="Proof notes (optional)"><TextInput value={form.proof} onChange={(e) => setForm((f) => ({ ...f, proof: e.target.value }))} placeholder="e.g. FT screenshot, no disputes" /></Field>
         </div>
         <div style={{ marginTop: 14 }}>
-          <Btn icon={Plus} onClick={add}>Add fixture</Btn>
+          <Btn icon={Plus} onClick={add}>Post fixture</Btn>
         </div>
         {warning && <div className="flex items-center gap-2" style={{ marginTop: 10, color: C.red, fontSize: 12.5 }}><AlertTriangle size={14} /> {warning}</div>}
         <div style={{ marginTop: 10, color: C.muted, fontSize: 11.5 }}>
@@ -2090,13 +2120,26 @@ function FixturesTab({ teams, fixtures, setFixtures, logActivity, myTeamId }) {
               {fixtures.map((f, i) => {
                 const t1 = teams.find((t) => t.id === f.team1)?.name || f.team1;
                 const t2 = teams.find((t) => t.id === f.team2)?.name || f.team2;
-                const played = f.score1 !== "" && f.score2 !== "";
+                const played = f.score1 !== "" && f.score2 !== "" && f.score1 != null && f.score2 != null;
                 const uploading = uploadingId === f.id;
+                const enteringResult = enteringResultFor === f.id;
                 return (
                   <tr key={f.id} style={{ background: i % 2 ? C.panelAlt : "transparent" }}>
                     <td style={{ textAlign: "center", color: C.text, padding: "7px 8px", borderBottom: `1px solid ${C.border}33` }}>{f.matchday}</td>
                     <td style={{ textAlign: "left", color: C.text, padding: "7px 8px", borderBottom: `1px solid ${C.border}33` }}>{t1}</td>
-                    <td style={{ textAlign: "center", color: C.text, padding: "7px 8px", borderBottom: `1px solid ${C.border}33` }}>{played ? `${f.score1} – ${f.score2}` : "Pending"}</td>
+                    <td style={{ textAlign: "center", color: C.text, padding: "7px 8px", borderBottom: `1px solid ${C.border}33` }}>
+                      {enteringResult ? (
+                        <div className="flex items-center justify-center gap-1">
+                          <TextInput type="number" min={0} value={resultForm.score1}
+                            onChange={(e) => setResultForm((r) => ({ ...r, score1: e.target.value }))}
+                            style={{ width: 46, padding: "3px 4px", textAlign: "center" }} />
+                          <span>–</span>
+                          <TextInput type="number" min={0} value={resultForm.score2}
+                            onChange={(e) => setResultForm((r) => ({ ...r, score2: e.target.value }))}
+                            style={{ width: 46, padding: "3px 4px", textAlign: "center" }} />
+                        </div>
+                      ) : played ? `${f.score1} – ${f.score2}` : "Pending"}
+                    </td>
                     <td style={{ textAlign: "left", color: C.text, padding: "7px 8px", borderBottom: `1px solid ${C.border}33` }}>{t2}</td>
                     <td style={{ textAlign: "center", color: C.text, padding: "7px 8px", borderBottom: `1px solid ${C.border}33` }}>{f.date}</td>
                     <td style={{ textAlign: "center", color: C.text, padding: "7px 8px", borderBottom: `1px solid ${C.border}33` }}>{f.proof || "—"}</td>
@@ -2119,9 +2162,19 @@ function FixturesTab({ teams, fixtures, setFixtures, logActivity, myTeamId }) {
                       )}
                     </td>
                     <td style={{ textAlign: "center", padding: "7px 8px", borderBottom: `1px solid ${C.border}33` }}>
-                      <button onClick={() => removeFixture(f)} style={{ background: "transparent", border: "none", cursor: "pointer", color: C.red }}>
-                        <Trash2 size={14} />
-                      </button>
+                      <div className="flex items-center justify-center gap-2">
+                        {enteringResult ? (
+                          <>
+                            <button onClick={() => saveResult(f)} title="Save result" style={{ background: "transparent", border: "none", cursor: "pointer", color: C.green }}><Check size={15} /></button>
+                            <button onClick={() => setEnteringResultFor(null)} title="Cancel" style={{ background: "transparent", border: "none", cursor: "pointer", color: C.muted }}><X size={15} /></button>
+                          </>
+                        ) : !played ? (
+                          <Btn size="sm" variant="outline" onClick={() => startResult(f)}>Add Result</Btn>
+                        ) : null}
+                        <button onClick={() => removeFixture(f)} style={{ background: "transparent", border: "none", cursor: "pointer", color: C.red }}>
+                          <Trash2 size={14} />
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 );
@@ -2213,7 +2266,6 @@ function PrizesTab({ prizes, setPrizes, taxCollected, prizeTotal, teams, logActi
   const add = () => {
     if (!form.category.trim()) return;
     setPrizes((p) => [...p, { ...form, id: uid() }]);
-    logActivity(`Prize added: ${form.category} — ${money(form.amount)}${form.recipient ? ` for ${form.recipient}` : ""}`, "prize");
     setForm(blank);
   };
 
@@ -2322,7 +2374,7 @@ function ChatTab({ chat, setChat, teams, myTeamId }) {
 }
 
 /* --------------------------------- Rules ---------------------------------- */
-function RulesTab({ teams, resetAll, changeAdminPin, addFundsToTeam, addEarned86Slot, exportBackup, restoreBackup, endSeason, season, seasonHistory, standings, playerDatabase, importPlayerDatabase, clearPlayerDatabase }) {
+function RulesTab({ teams, resetAll, changeAdminPin, addFundsToTeam, addEarned86Slot, exportBackup, restoreBackup, restoreFromNightlyBackup, endSeason, season, seasonHistory, standings, playerDatabase, importPlayerDatabase, clearPlayerDatabase }) {
   const n = teams.length;
   return (
     <div className="grid gap-4">
@@ -2364,7 +2416,7 @@ function RulesTab({ teams, resetAll, changeAdminPin, addFundsToTeam, addEarned86
         />
       </Panel>
 
-      <BackupTools exportBackup={exportBackup} restoreBackup={restoreBackup} />
+      <BackupTools exportBackup={exportBackup} restoreBackup={restoreBackup} restoreFromNightlyBackup={restoreFromNightlyBackup} />
 
       <PlayerDatabaseTools playerDatabase={playerDatabase} importPlayerDatabase={importPlayerDatabase}
         clearPlayerDatabase={clearPlayerDatabase} />
@@ -2377,10 +2429,13 @@ function RulesTab({ teams, resetAll, changeAdminPin, addFundsToTeam, addEarned86
   );
 }
 
-function BackupTools({ exportBackup, restoreBackup }) {
+function BackupTools({ exportBackup, restoreBackup, restoreFromNightlyBackup }) {
   const [pin, setPin] = useState("");
   const [msg, setMsg] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [nightlyBackups, setNightlyBackups] = useState(null); // null = not loaded yet
+  const [loadingList, setLoadingList] = useState(false);
+  const [restoringKey, setRestoringKey] = useState(null);
 
   const doExport = () => {
     exportBackup();
@@ -2402,13 +2457,33 @@ function BackupTools({ exportBackup, restoreBackup }) {
     reader.readAsText(file);
   };
 
+  const loadNightlyBackups = async () => {
+    setLoadingList(true);
+    setMsg(null);
+    try {
+      const list = await listByPrefix(NIGHTLY_BACKUP_PREFIX);
+      setNightlyBackups(list);
+    } catch (e) {
+      setMsg({ text: "Couldn't load the list of automatic backups.", tone: "red" });
+    } finally {
+      setLoadingList(false);
+    }
+  };
+
+  const doRestoreNightly = async (key) => {
+    setRestoringKey(key);
+    const err = await restoreFromNightlyBackup(pin, key);
+    setRestoringKey(null);
+    if (err) setMsg({ text: err, tone: "red" });
+    else setMsg({ text: "Restored from automatic backup.", tone: "green" });
+  };
+
   return (
     <Panel style={{ padding: 18 }}>
       <SectionTitle icon={Save}>Backup & Restore</SectionTitle>
       <div style={{ color: C.muted, fontSize: 12.5, marginBottom: 16, lineHeight: 1.6 }}>
-        Everything autosaves as you go, but it's all still only stored inside this app. Download a backup
-        occasionally (or before anything risky, like a season reset) and keep the file somewhere safe — you can
-        restore from it later if data ever gets lost or messed up.
+        The league also backs itself up automatically every night at 11:59pm (see setup note below) — download a
+        manual backup too occasionally, or before anything risky like a season reset, and keep the file somewhere safe.
       </div>
 
       <div className="flex items-center gap-2 flex-wrap" style={{ marginBottom: 18 }}>
@@ -2433,6 +2508,32 @@ function BackupTools({ exportBackup, restoreBackup }) {
               onChange={(e) => { handleFile(e.target.files?.[0]); e.target.value = ""; }} />
           </label>
         </div>
+      </div>
+
+      <div style={{ paddingTop: 16, marginTop: 16, borderTop: `1px solid ${C.border}` }}>
+        <div style={{ color: C.text, fontWeight: 700, fontSize: 13, marginBottom: 8 }}>Automatic Nightly Backups</div>
+        <div style={{ color: C.muted, fontSize: 11.5, marginBottom: 10 }}>
+          Written automatically every night at 11:59pm by a scheduled Supabase job (see the setup note in the
+          project README — this needs a one-time Edge Function + Cron Job setup to actually run).
+        </div>
+        {nightlyBackups === null ? (
+          <Btn variant="outline" size="sm" onClick={loadNightlyBackups} disabled={loadingList}>
+            {loadingList ? "Loading…" : "Check for automatic backups"}
+          </Btn>
+        ) : nightlyBackups.length === 0 ? (
+          <div style={{ color: C.muted, fontSize: 12.5 }}>No automatic backups found yet — they'll appear here after the nightly job has run at least once.</div>
+        ) : (
+          <div className="grid gap-2">
+            {nightlyBackups.slice(0, 14).map((b) => (
+              <div key={b.key} className="flex items-center justify-between" style={{ background: C.panelAlt, borderRadius: 8, padding: "7px 10px" }}>
+                <span style={{ color: C.text, fontSize: 12.5 }}>{b.key.replace(NIGHTLY_BACKUP_PREFIX, "")}</span>
+                <Btn size="sm" variant="outline" onClick={() => doRestoreNightly(b.key)} disabled={restoringKey === b.key}>
+                  {restoringKey === b.key ? "Restoring…" : "Restore this one"}
+                </Btn>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       {msg && (
