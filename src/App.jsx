@@ -1159,7 +1159,7 @@ export default function EafcLeagueApp() {
         {tab === "dashboard" && (
           <Dashboard teams={teams} squads={squads} standings={standings} budgetStats={budgetStats} prizeTotal={prizeTotal}
             taxCollected={taxCollected} events={events} setEvents={setEvents} setTab={setTab}
-            activity={activity} myTeamId={myTeamId} season={season} clearActivity={clearActivity} />
+            activity={activity} myTeamId={myTeamId} season={season} />
         )}
         {tab === "squads" && (
           <SquadsTab teams={teams} squads={squads} squadStats={squadStats} renameTeam={renameTeam}
@@ -1200,7 +1200,9 @@ export default function EafcLeagueApp() {
         )}
       </div>
 
-      <div style={{ textAlign: "center", padding: "18px 18px 28px", color: C.muted, fontSize: 11.5 }}>
+      <ActivityTicker activity={activity} clearActivity={clearActivity} />
+
+      <div style={{ textAlign: "center", padding: "10px 18px 20px", color: C.muted, fontSize: 11.5 }}>
         Player data powered by{" "}
         <a href="https://cmtracker.net/" target="_blank" rel="noopener noreferrer" style={{ color: C.gold, textDecoration: "underline" }}>
           CMTracker.net
@@ -1322,7 +1324,7 @@ function HudStatChip({ label, value, tone }) {
   );
 }
 
-function Dashboard({ teams, squads, standings, budgetStats, prizeTotal, taxCollected, events, setEvents, setTab, activity, myTeamId, season, clearActivity }) {
+function Dashboard({ teams, squads, standings, budgetStats, prizeTotal, taxCollected, events, setEvents, setTab, activity, myTeamId, season }) {
   const [newEvent, setNewEvent] = useState({ title: "", type: "League", date: "" });
   const leader = standings[0];
   const leaderTeam = teams.find((t) => t.id === leader?.id);
@@ -1434,15 +1436,10 @@ function Dashboard({ teams, squads, standings, budgetStats, prizeTotal, taxColle
           </Panel>
         </div>
 
-        <div className="grid gap-4" style={{ gridTemplateColumns: "1fr 1fr" }}>
-          <Panel>
-            <SectionTitle>Find a Player</SectionTitle>
-            <PlayerSearchInner teams={teams} squads={squads} />
-          </Panel>
-          <Panel>
-            <ActivityTicker activity={activity} clearActivity={clearActivity} />
-          </Panel>
-        </div>
+        <Panel>
+          <SectionTitle>Find a Player</SectionTitle>
+          <PlayerSearchInner teams={teams} squads={squads} />
+        </Panel>
 
         <Panel>
           <SectionTitle>Budget Snapshot</SectionTitle>
@@ -1585,25 +1582,31 @@ function ActivityTicker({ activity, clearActivity }) {
   const duration = Math.max(items.length * 6, 14);
 
   return (
-    <>
-      <SectionTitle right={
-        <Btn size="sm" variant="ghost" icon={Trash2} onClick={() => setClearing((c) => !c)}>Clear</Btn>
-      }>Recent Activity</SectionTitle>
+    <div style={{ background: "#050a13", borderTop: `1px solid rgba(231,197,104,0.25)` }}>
+      <div className="flex items-center gap-3" style={{ maxWidth: 1180, margin: "0 auto", padding: "0 18px", height: 34 }}>
+        <span className="hud-font" style={{ color: C.gold, fontSize: 10.5, fontWeight: 600, letterSpacing: "0.14em", textTransform: "uppercase", flexShrink: 0 }}>
+          Live
+        </span>
+        <div style={{ flex: 1, overflow: "hidden", whiteSpace: "nowrap" }}>
+          <div style={{ display: "inline-block", paddingLeft: "100%", animation: `ticker-scroll ${duration}s linear infinite` }}>
+            <span className="hud-font" style={{ color: "rgba(255,255,255,0.75)", fontSize: 12.5 }}>{tickerText}</span>
+          </div>
+        </div>
+        <button onClick={() => setClearing((c) => !c)} title="Clear activity log"
+          style={{ background: "transparent", border: "none", cursor: "pointer", color: "rgba(255,255,255,0.4)", flexShrink: 0 }}>
+          <Trash2 size={12} />
+        </button>
+      </div>
 
       {clearing && (
-        <div className="flex items-center gap-2 flex-wrap" style={{ marginBottom: 10 }}>
+        <div className="flex items-center gap-2 flex-wrap" style={{ maxWidth: 1180, margin: "0 auto", padding: "8px 18px" }}>
           <TextInput type="password" placeholder="Admin PIN" value={pin} onChange={(e) => setPin(e.target.value)} style={{ width: 120 }} />
           <Btn size="sm" variant="danger" onClick={doClear}>Clear all activity</Btn>
+          <Btn size="sm" variant="outline" onClick={() => setClearing(false)}>Cancel</Btn>
           {err && <span style={{ color: C.red, fontSize: 11.5 }}>{err}</span>}
         </div>
       )}
-
-      <div style={{ overflow: "hidden", whiteSpace: "nowrap", borderTop: `1px solid ${C.border}`, borderBottom: `1px solid ${C.border}`, padding: "12px 0" }}>
-        <div style={{ display: "inline-block", paddingLeft: "100%", animation: `ticker-scroll ${duration}s linear infinite` }}>
-          <span className="hud-font" style={{ color: C.text, fontSize: 14, letterSpacing: "0.02em" }}>{tickerText}</span>
-        </div>
-      </div>
-    </>
+    </div>
   );
 }
 
