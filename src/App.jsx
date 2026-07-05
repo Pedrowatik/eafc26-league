@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo, useCallback, useRef, Fragment } from "react";
 import {
   Home, Users, Wallet, Repeat, Trophy, Swords, Coins, BookOpen,
-  Plus, Trash2, Save, RotateCcw, AlertTriangle, CheckCircle2, X, ChevronRight, Lock, Unlock, KeyRound,
+  Plus, Trash2, Save, RotateCcw, AlertTriangle, CheckCircle2, X, ChevronRight, ChevronUp, ChevronDown, Lock, Unlock, KeyRound,
   Upload, Eye, Loader2, Pencil, Check, Download, MessageCircle, Search, UserCircle2, Send, CalendarClock
 } from "lucide-react";
 import { storage, subscribeToKey, supabaseUrl, supabaseAnonKey, listByPrefix } from "./storage.js";
@@ -666,6 +666,35 @@ export default function EafcLeagueApp() {
     setTeams((ts) => ts.map((t) => (t.id === id ? { ...t, ...patch } : t)));
   };
 
+  // Moves a player from one group (starters/reserves) to the other, into the first free slot.
+  // Doesn't touch player data itself — purely reorganizing an existing squad.
+  const movePlayerToGroup = (teamId, fromGroup, index, toGroup) => {
+    const sq = squads[teamId];
+    const player = sq[fromGroup][index];
+    if (!player) return "No player in that slot.";
+    const freeIdx = sq[toGroup].findIndex((p) => !p);
+    if (freeIdx === -1) return `No free slot in ${toGroup === "starters" ? "the starting squad" : "reserves"}.`;
+    setSquads((all) => {
+      const next = { ...all, [teamId]: { starters: [...all[teamId].starters], reserves: [...all[teamId].reserves] } };
+      next[teamId][fromGroup][index] = null;
+      next[teamId][toGroup][freeIdx] = player;
+      return next;
+    });
+    return null;
+  };
+
+  // Swaps a player with the one above/below them in the same list — for arranging a starting XI.
+  const reorderPlayer = (teamId, group, index, direction) => {
+    const target = index + direction;
+    const sq = squads[teamId];
+    if (target < 0 || target >= sq[group].length) return;
+    setSquads((all) => {
+      const list = [...all[teamId][group]];
+      [list[index], list[target]] = [list[target], list[index]];
+      return { ...all, [teamId]: { ...all[teamId], [group]: list } };
+    });
+  };
+
   const logTransfer = (form) => {
     const price = Number(form.price) || 0;
     const tax = price > 0 ? Math.max(price * 0.1, 0.25) : 0;
@@ -1164,7 +1193,7 @@ export default function EafcLeagueApp() {
         )}
         {tab === "squads" && (
           <SquadsTab teams={teams} squads={squads} squadStats={squadStats} renameTeam={renameTeam}
-            setTab={setTab} />
+            setTab={setTab} movePlayerToGroup={movePlayerToGroup} reorderPlayer={reorderPlayer} />
         )}
         {tab === "budgets" && (
           <BudgetsTab teams={teams} budgetStats={budgetStats} renameTeam={renameTeam} />
@@ -1647,18 +1676,24 @@ function Table({ head, rows, dense }) {
 }
 
 /* -------------------------------- Squads ---------------------------------- */
-function SquadsTab({ teams, squads, squadStats, renameTeam, setTab }) {
+function SquadsTab({ teams, squads, squadStats, renameTeam, setTab, movePlayerToGroup, reorderPlayer }) {
   const [activeTeam, setActiveTeam] = useState(teams[0].id);
+  const [moveError, setMoveError] = useState("");
   const team = teams.find((t) => t.id === activeTeam);
   const sq = squads[activeTeam];
   const stat = squadStats[activeTeam];
+
+  const move = (fromGroup, index, toGroup) => {
+    const err = movePlayerToGroup(activeTeam, fromGroup, index, toGroup);
+    setMoveError(err || "");
+  };
 
   return (
     <div className="grid gap-4">
       <Panel style={{ padding: 14 }}>
         <div className="flex gap-2 flex-wrap">
           {teams.map((t) => (
-            <button key={t.id} onClick={() => setActiveTeam(t.id)}
+            <button key={t.id} onClick={() => { setActiveTeam(t.id); setMoveError(""); }}
               style={{
                 padding: "6px 12px", borderRadius: 999, cursor: "pointer", fontSize: 12.5, fontWeight: 700,
                 border: `1px solid ${activeTeam === t.id ? C.gold : C.border}`,
@@ -1699,35 +1734,93 @@ function SquadsTab({ teams, squads, squadStats, renameTeam, setTab }) {
         </div>
 
         <div style={{ color: C.muted, fontSize: 11.5, marginBottom: 14, lineHeight: 1.6 }}>
-          This list is read-only. Player details (name, position, rating, club, age, value, wage) are only entered
-          once, on the Transfers tab — logging a transfer there adds the player here automatically, and releasing or
-          selling them removes them from here too.
+          Player details (name, position, rating, club, age, value, wage) are only entered once, on the Transfers
+          tab. Here you can reorganize who's already signed: click a column header to sort, use the arrows to move
+          a player between the starting squad and reserves, or reorder players within a list (only available when
+          not sorted) to arrange your starting XI.
         </div>
 
-        <SquadTable title={`Starting Squad (${STARTER_SLOTS} slots)`} players={sq.starters} labelForIdx={(i) => i + 1} />
+        {moveError && (
+          <div className="flex items-center gap-2" style={{ marginBottom: 10, color: C.red, fontSize: 12.5 }}>
+            <AlertTriangle size={14} /> {moveError}
+          </div>
+        )}
+
+        <SquadTable title={`Starting Squad (${STARTER_SLOTS} slots)`} players={sq.starters} labelForIdx={(i) => i + 1}
+          group="starters" onMove={(index) => move("starters", index, "reserves")} moveLabel="Bench" moveIcon={ChevronDown}
+          reorderPlayer={(index, dir) => reorderPlayer(activeTeam, "starters", index, dir)} />
         <div style={{ height: 18 }} />
-        <SquadTable title={`Reserves (${RESERVE_SLOTS} slots)`} players={sq.reserves} labelForIdx={(i) => `R${i + 1}`} />
+        <SquadTable title={`Reserves (${RESERVE_SLOTS} slots)`} players={sq.reserves} labelForIdx={(i) => `R${i + 1}`}
+          group="reserves" onMove={(index) => move("reserves", index, "starters")} moveLabel="Start" moveIcon={ChevronUp}
+          reorderPlayer={(index, dir) => reorderPlayer(activeTeam, "reserves", index, dir)} />
       </Panel>
     </div>
   );
 }
 
-function SquadTable({ title, players, labelForIdx }) {
+const SORTABLE_COLUMNS = [
+  { key: null, label: "#" },
+  { key: "name", label: "Player" },
+  { key: "position", label: "Pos" },
+  { key: "rating", label: "Rating" },
+  { key: "club", label: "Club" },
+  { key: "age", label: "Age" },
+  { key: "value", label: "Value" },
+  { key: "wage", label: "Wage (£k)" },
+];
+
+function SquadTable({ title, players, labelForIdx, group, onMove, moveLabel, moveIcon: MoveIcon, reorderPlayer }) {
+  const [sortKey, setSortKey] = useState(null);
+  const [sortDir, setSortDir] = useState(1); // 1 = asc, -1 = desc
+
+  const indexed = players.map((p, i) => ({ player: p, index: i }));
+  const sorted = sortKey
+    ? [...indexed].sort((a, b) => {
+        // empty slots always sink to the bottom regardless of sort direction
+        if (!a.player && !b.player) return 0;
+        if (!a.player) return 1;
+        if (!b.player) return -1;
+        const av = a.player[sortKey], bv = b.player[sortKey];
+        if (typeof av === "string") return av.localeCompare(bv) * sortDir;
+        return ((av || 0) - (bv || 0)) * sortDir;
+      })
+    : indexed;
+
+  const toggleSort = (key) => {
+    if (!key) return;
+    if (sortKey !== key) { setSortKey(key); setSortDir(1); return; }
+    if (sortDir === 1) { setSortDir(-1); return; }
+    setSortKey(null);
+    setSortDir(1);
+  };
+
   return (
     <div>
       <div style={{ color: C.gold, fontWeight: 700, fontSize: 13, marginBottom: 8 }}>{title}</div>
       <div style={{ overflowX: "auto" }}>
-        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5, minWidth: 700 }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5, minWidth: 780 }}>
           <thead>
             <tr>
-              {["#", "Player", "Pos", "Rating", "Club", "Age", "Value", "Wage (£k)"].map((h, i) => (
-                <th key={i} style={{ color: C.muted, fontSize: 10.5, textTransform: "uppercase", padding: "5px 6px", textAlign: i === 1 ? "left" : "center", borderBottom: `1px solid ${C.border}` }}>{h}</th>
+              {SORTABLE_COLUMNS.map((col, i) => (
+                <th key={i} onClick={() => col.key && toggleSort(col.key)}
+                  style={{
+                    color: sortKey === col.key ? C.gold : C.muted, fontSize: 10.5, textTransform: "uppercase",
+                    padding: "5px 6px", textAlign: i === 1 ? "left" : "center", borderBottom: `1px solid ${C.border}`,
+                    cursor: col.key ? "pointer" : "default", userSelect: "none", whiteSpace: "nowrap",
+                  }}>
+                  {col.label}{sortKey === col.key ? (sortDir === 1 ? " ▲" : " ▼") : ""}
+                </th>
               ))}
+              <th style={{ padding: "5px 6px", borderBottom: `1px solid ${C.border}` }}></th>
             </tr>
           </thead>
           <tbody>
-            {players.map((p, i) => (
-              <SquadRow key={i} label={labelForIdx(i)} player={p} />
+            {sorted.map(({ player, index }, rowPos) => (
+              <SquadRow key={index} label={labelForIdx(index)} player={player}
+                onMove={() => onMove(index)} moveLabel={moveLabel} moveIcon={MoveIcon}
+                canReorder={sortKey === null}
+                onMoveUp={rowPos > 0 ? () => reorderPlayer(index, -1) : null}
+                onMoveDown={rowPos < players.length - 1 ? () => reorderPlayer(index, 1) : null} />
             ))}
           </tbody>
         </table>
@@ -1736,17 +1829,31 @@ function SquadTable({ title, players, labelForIdx }) {
   );
 }
 
-function SquadRow({ label, player }) {
+function SquadRow({ label, player, onMove, moveLabel, moveIcon: MoveIcon, canReorder, onMoveUp, onMoveDown }) {
   const filled = !!player;
   const cellPad = { padding: "6px 8px", borderBottom: `1px solid ${C.border}33` };
   const highlight = filled && Number(player.rating) >= 86 ? { background: `${C.gold}1a` } : {};
   const emptyStyle = { color: C.muted, fontStyle: "italic" };
+
+  const reorderControls = canReorder && filled && (
+    <div className="flex items-center gap-1">
+      <button onClick={onMoveUp} disabled={!onMoveUp} title="Move up"
+        style={{ background: "transparent", border: "none", cursor: onMoveUp ? "pointer" : "default", color: onMoveUp ? C.muted : C.border, padding: 0 }}>
+        <ChevronUp size={13} />
+      </button>
+      <button onClick={onMoveDown} disabled={!onMoveDown} title="Move down"
+        style={{ background: "transparent", border: "none", cursor: onMoveDown ? "pointer" : "default", color: onMoveDown ? C.muted : C.border, padding: 0 }}>
+        <ChevronDown size={13} />
+      </button>
+    </div>
+  );
 
   if (!filled) {
     return (
       <tr style={highlight}>
         <td style={{ ...cellPad, textAlign: "center", color: C.muted }}>{label}</td>
         <td colSpan={7} style={{ ...cellPad, ...emptyStyle }}>Empty slot</td>
+        <td style={cellPad}></td>
       </tr>
     );
   }
@@ -1761,6 +1868,15 @@ function SquadRow({ label, player }) {
       <td style={{ ...cellPad, textAlign: "center", color: C.text }}>{player.age}</td>
       <td style={{ ...cellPad, textAlign: "center", color: C.text }}>{money(player.value)}</td>
       <td style={{ ...cellPad, textAlign: "center", color: C.text }}>{moneyK(player.wage)}</td>
+      <td style={{ ...cellPad, textAlign: "center" }}>
+        <div className="flex items-center justify-center gap-2">
+          {reorderControls}
+          <button onClick={onMove} title={`Move to ${moveLabel}`}
+            style={{ background: "transparent", border: `1px solid ${C.border}`, borderRadius: 6, padding: "3px 7px", cursor: "pointer", color: C.gold, display: "inline-flex", alignItems: "center", gap: 3, fontSize: 11 }}>
+            <MoveIcon size={12} /> {moveLabel}
+          </button>
+        </div>
+      </td>
     </tr>
   );
 }
