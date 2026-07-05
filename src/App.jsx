@@ -116,8 +116,17 @@ function defaultTeams() {
     notes: "",
     formation: "4-4-2",
     password: "",
+    crest: "",
   }));
 }
+
+// Curated set of emoji that read well as team crests — mostly animals/heraldic symbols in the
+// spirit of real football badges (lions, eagles, wolves, shields, crowns, etc.).
+const CREST_OPTIONS = [
+  "🦁", "🐺", "🦅", "🐉", "🐯", "🐻", "🦂", "🐍", "🦈", "🐗",
+  "⚔️", "🛡️", "👑", "⭐", "🔥", "⚡", "🏆", "🥇", "🔱", "☠️",
+  "🐴", "🦏", "🦬", "🐂", "🦍", "🦄", "🦊", "🦇", "🐲", "🎯",
+];
 
 function defaultSquads() {
   const squads = {};
@@ -771,23 +780,34 @@ export default function EafcLeagueApp() {
       return 4; // rare
     };
 
-    setInjuries((prev) => {
-      const next = { ...prev };
-      [fixture.team1, fixture.team2].forEach((teamId) => {
-        const squadPlayers = [...(squads[teamId]?.starters || []), ...(squads[teamId]?.reserves || [])].filter(Boolean);
-        const teamInjuries = { ...(next[teamId] || {}) };
-        const eligible = squadPlayers.filter((p) => !(teamInjuries[p.name] >= fixture.matchday));
-        const count = Math.floor(Math.random() * 4); // 0, 1, 2, or 3
-        const shuffled = [...eligible].sort(() => Math.random() - 0.5).slice(0, count);
-        shuffled.forEach((p) => {
-          teamInjuries[p.name] = fixture.matchday + pickDuration() - 1;
-        });
-        next[teamId] = teamInjuries;
+    const newlyInjuredByTeam = {};
+    const nextInjuries = { ...injuries };
+    [fixture.team1, fixture.team2].forEach((teamId) => {
+      const squadPlayers = [...(squads[teamId]?.starters || []), ...(squads[teamId]?.reserves || [])].filter(Boolean);
+      const teamInjuries = { ...(nextInjuries[teamId] || {}) };
+      const eligible = squadPlayers.filter((p) => !(teamInjuries[p.name] >= fixture.matchday));
+      const count = Math.floor(Math.random() * 4); // 0, 1, 2, or 3
+      const shuffled = [...eligible].sort(() => Math.random() - 0.5).slice(0, count);
+      newlyInjuredByTeam[teamId] = shuffled.map((p) => p.name);
+      shuffled.forEach((p) => {
+        teamInjuries[p.name] = fixture.matchday + pickDuration() - 1;
       });
-      return next;
+      nextInjuries[teamId] = teamInjuries;
     });
-
+    setInjuries(nextInjuries);
     setFixtures((all) => all.map((f) => (f.id === fixture.id ? { ...f, injuriesGenerated: true } : f)));
+
+    // Auto-post the report to League Chat, tagged to both teams so each gets notified — saves
+    // everyone having to go dig through the fixture to see who's unavailable.
+    const t1Name = teamById[fixture.team1]?.name || fixture.team1, t2Name = teamById[fixture.team2]?.name || fixture.team2;
+    const describe = (teamName, list) => `${teamName}: ${list.length ? list.join(", ") : "no injuries"}`;
+    const reportText = `🏥 Injury Report (MD${fixture.matchday}) — ${describe(t1Name, newlyInjuredByTeam[fixture.team1])}; ${describe(t2Name, newlyInjuredByTeam[fixture.team2])}`;
+    setChat((c) => [
+      ...c,
+      { id: uid(), author: "League", text: reportText, time: Date.now(), taggedTeam: fixture.team1 },
+      { id: uid(), author: "League", text: reportText, time: Date.now() + 1, taggedTeam: fixture.team2 },
+    ]);
+
     return null;
   };
 
@@ -1439,7 +1459,7 @@ export default function EafcLeagueApp() {
             setTransfers={setTransfers} auctions={auctions} createAuction={createAuction}
             placeBid={placeBid} finalizeAuction={finalizeAuction} respondToAuction={respondToAuction}
             deleteBid={deleteBid} deleteTransfer={deleteTransfer} editAuctionPlayerName={editAuctionPlayerName} nowTick={nowTick}
-            myTeamId={myTeamId} playerDatabase={playerDatabase}
+            myTeamId={myTeamId} playerDatabase={playerDatabase} squadStats={squadStats}
             transferListings={transferListings} wantedListings={wantedListings}
             addTransferListing={addTransferListing} removeTransferListing={removeTransferListing}
             addWantedListing={addWantedListing} removeWantedListing={removeWantedListing}
@@ -1477,7 +1497,7 @@ export default function EafcLeagueApp() {
             endSeason={endSeason} season={season} seasonHistory={seasonHistory} standings={standings}
             importPlayerDatabase={importPlayerDatabase} clearPlayerDatabase={clearPlayerDatabase}
             teamLockOverride={teamLockOverride} toggleTeamLockOverride={toggleTeamLockOverride} clearChat={clearChat}
-            resetTeamPassword={resetTeamPassword} />
+            resetTeamPassword={resetTeamPassword} squadStats={squadStats} />
         )}
       </div>
 
@@ -1667,10 +1687,10 @@ function Dashboard({ teams, squads, standings, budgetStats, prizeTotal, taxColle
                   width: 64, height: 64, borderRadius: 4,
                   background: `linear-gradient(135deg, ${C.gold}, ${C.goldDim})`,
                   display: "flex", alignItems: "center", justifyContent: "center",
-                  fontWeight: 700, color: "#0B1220", fontSize: 24,
+                  fontWeight: 700, color: "#0B1220", fontSize: myTeam.crest ? 32 : 24,
                   boxShadow: `0 0 24px ${C.gold}66`,
                 }} className="hud-font">
-                  {myTeam.name.slice(0, 2).toUpperCase()}
+                  {myTeam.crest || myTeam.name.slice(0, 2).toUpperCase()}
                 </div>
                 <div>
                   <div className="hud-font" style={{ color: "rgba(255,255,255,0.5)", fontSize: 11, letterSpacing: "0.18em", textTransform: "uppercase" }}>Your Club</div>
@@ -2086,7 +2106,7 @@ function SquadsTab({ teams, squads, squadStats, renameTeam, setTab, movePlayerTo
                 background: activeTeam === t.id ? `${C.gold}22` : "transparent",
                 color: activeTeam === t.id ? C.gold : C.muted,
               }}>
-              {t.name}
+              {t.crest ? `${t.crest} ` : ""}{t.name}
             </button>
           ))}
         </div>
@@ -2095,7 +2115,7 @@ function SquadsTab({ teams, squads, squadStats, renameTeam, setTab, movePlayerTo
       <Panel style={{ padding: 18 }}>
         <SectionTitle icon={Users}
           right={<Btn size="sm" icon={Repeat} onClick={() => setTab("transfers")}>Add / release players via Transfers</Btn>}>
-          {team.name} — {team.manager}
+          {team.crest ? `${team.crest} ` : ""}{team.name} — {team.manager}
         </SectionTitle>
         <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", marginBottom: 16 }}>
           <Field label="Team name">
@@ -2133,7 +2153,33 @@ function SquadsTab({ teams, squads, squadStats, renameTeam, setTab, movePlayerTo
         </div>
         {activeTeam !== myTeamId && (
           <div style={{ color: C.muted, fontSize: 11, marginBottom: 12 }}>
-            {myTeamId ? "You can only edit your own team's name, manager, and formation." : "Pick your team (top right) to edit its name, manager, and formation."}
+            {myTeamId ? "You can only edit your own team's name, manager, formation, and crest." : "Pick your team (top right) to edit its name, manager, formation, and crest."}
+          </div>
+        )}
+
+        {activeTeam === myTeamId && (
+          <div style={{ marginBottom: 16 }}>
+            <Label>Crest</Label>
+            <div className="flex flex-wrap gap-1">
+              <button onClick={() => renameTeam(team.id, { crest: "" })} title="Use initials instead"
+                style={{
+                  width: 34, height: 34, borderRadius: 6, fontSize: 14, cursor: "pointer",
+                  border: `1px solid ${!team.crest ? C.gold : C.border}`, background: !team.crest ? `${C.gold}22` : C.panelAlt,
+                  color: C.muted, display: "flex", alignItems: "center", justifyContent: "center",
+                }}>
+                {team.name.slice(0, 2).toUpperCase()}
+              </button>
+              {CREST_OPTIONS.map((c) => (
+                <button key={c} onClick={() => renameTeam(team.id, { crest: c })}
+                  style={{
+                    width: 34, height: 34, borderRadius: 6, fontSize: 17, cursor: "pointer",
+                    border: `1px solid ${team.crest === c ? C.gold : C.border}`, background: team.crest === c ? `${C.gold}22` : C.panelAlt,
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                  }}>
+                  {c}
+                </button>
+              ))}
+            </div>
           </div>
         )}
 
@@ -2348,7 +2394,7 @@ function formatCountdown(ms) {
   return `${m}m ${s}s left`;
 }
 
-function AuctionsPanel({ teams, squads, auctions, createAuction, placeBid, finalizeAuction, respondToAuction, deleteBid, editAuctionPlayerName, myTeamId, playerDatabase }) {
+function AuctionsPanel({ teams, squads, auctions, createAuction, placeBid, finalizeAuction, respondToAuction, deleteBid, editAuctionPlayerName, myTeamId, playerDatabase, squadStats }) {
   const firstBidderFor = (sellerId) => {
     if (myTeamId && myTeamId !== sellerId) return myTeamId;
     return teams.find((t) => t.id !== sellerId)?.id || teams[0].id;
@@ -2479,7 +2525,7 @@ function AuctionsPanel({ teams, squads, auctions, createAuction, placeBid, final
           <div style={{ color: C.gold, fontWeight: 700, fontSize: 13, marginBottom: 10 }}>Live Auctions ({open.length})</div>
           <div className="grid gap-3">
             {open.map((a) => (
-              <AuctionCard key={a.id} auction={a} teams={teams} now={now} placeBid={placeBid} finalizeAuction={finalizeAuction} deleteBid={deleteBid} editAuctionPlayerName={editAuctionPlayerName} myTeamId={myTeamId} />
+              <AuctionCard key={a.id} auction={a} teams={teams} now={now} placeBid={placeBid} finalizeAuction={finalizeAuction} deleteBid={deleteBid} editAuctionPlayerName={editAuctionPlayerName} myTeamId={myTeamId} squadStats={squadStats} />
             ))}
           </div>
         </div>
@@ -2566,7 +2612,7 @@ function PendingAuctionCard({ auction, teams, respondToAuction, editAuctionPlaye
   );
 }
 
-function AuctionCard({ auction, teams, now, placeBid, finalizeAuction, deleteBid, editAuctionPlayerName, myTeamId }) {
+function AuctionCard({ auction, teams, now, placeBid, finalizeAuction, deleteBid, editAuctionPlayerName, myTeamId, squadStats }) {
   const [bidTeam, setBidTeam] = useState(
     (myTeamId && myTeamId !== auction.currentBidder) ? myTeamId : (teams.find((t) => t.id !== auction.currentBidder)?.id || teams[0].id)
   );
@@ -2580,6 +2626,11 @@ function AuctionCard({ auction, teams, now, placeBid, finalizeAuction, deleteBid
   const ended = remaining <= 0;
   const requiredMin = auction.currentBid > 0 ? auction.currentBid + 0.25 : Math.max(auction.minBid, 0.25);
   const bidderCount = Object.keys(auction.bidsByTeam).length;
+
+  const bidTeamObj = teams.find((t) => t.id === bidTeam);
+  const bidTeamCurrentWage = squadStats[bidTeam]?.wageM || 0;
+  const projectedWage = bidTeamCurrentWage + (Number(auction.player.wage) || 0) / 1000;
+  const wageCapBreach = bidTeamObj && projectedWage > bidTeamObj.wageCap;
 
   const submitBid = () => {
     const e = placeBid(auction.id, bidTeam, bidAmount || requiredMin);
@@ -2629,6 +2680,9 @@ function AuctionCard({ auction, teams, now, placeBid, finalizeAuction, deleteBid
             <TextInput type="number" step="0.25" placeholder={String(requiredMin)} value={bidAmount} onChange={(e) => setBidAmount(e.target.value)} />
           </Field>
           <Btn onClick={submitBid}>Place bid</Btn>
+          {wageCapBreach && (
+            <Pill tone="red">Would breach {bidTeamObj.name}'s wage cap ({money(projectedWage)} / {money(bidTeamObj.wageCap)})</Pill>
+          )}
         </div>
       ) : (
         <Btn variant="danger" onClick={() => finalizeAuction(auction.id)}>Finalize auction</Btn>
@@ -2665,7 +2719,7 @@ function AuctionCard({ auction, teams, now, placeBid, finalizeAuction, deleteBid
   );
 }
 
-function AdminPlayerRewards({ teams, squads, logAdminReward, myTeamId, playerDatabase }) {
+function AdminPlayerRewards({ teams, squads, logAdminReward, myTeamId, playerDatabase, squadStats }) {
   const blank = { date: todayISO(), from: "FA", to: myTeamId || teams[0].id, name: "", position: "ST", rating: 75, club: "", age: 25, wage: 0, price: 0, notes: "" };
   const [form, setForm] = useState(blank);
   const [warning, setWarning] = useState("");
@@ -2679,6 +2733,11 @@ function AdminPlayerRewards({ teams, squads, logAdminReward, myTeamId, playerDat
   };
 
   const tax = form.price > 0 ? Math.max(Number(form.price) * 0.1, 0.25) : 0;
+
+  const buyerTeam = teams.find((t) => t.id === form.to);
+  const buyerCurrentWage = squadStats[form.to]?.wageM || 0;
+  const projectedWage = buyerCurrentWage + (Number(form.wage) || 0) / 1000;
+  const wageCapBreach = buyerTeam && projectedWage > buyerTeam.wageCap;
 
   const submit = () => {
     const msg = logAdminReward(pin, form);
@@ -2753,11 +2812,21 @@ function AdminPlayerRewards({ teams, squads, logAdminReward, myTeamId, playerDat
       <div className="flex items-end gap-4 flex-wrap" style={{ marginTop: 14 }}>
         <Pill tone="gold">Tax: {money(tax)}</Pill>
         <Pill tone="muted">Final cost to buyer: {money(Number(form.price || 0) + tax)}</Pill>
+        {form.to !== "FA" && form.wage > 0 && (
+          <Pill tone={wageCapBreach ? "red" : "green"}>
+            {wageCapBreach ? "Would breach wage cap" : "Wage cap OK"}: {money(projectedWage)} / {money(buyerTeam?.wageCap)}
+          </Pill>
+        )}
         <Field label="Admin PIN">
           <TextInput type="password" value={pin} onChange={(e) => setPin(e.target.value)} style={{ width: 140 }} />
         </Field>
         <Btn icon={Plus} onClick={submit}>Give player</Btn>
       </div>
+      {wageCapBreach && (
+        <div className="flex items-center gap-2" style={{ marginTop: 10, color: C.red, fontSize: 12.5 }}>
+          <AlertTriangle size={14} /> Signing this player would push {buyerTeam?.name} to {money(projectedWage)}, over their {money(buyerTeam?.wageCap)} wage cap. You can still go ahead — this is a heads-up, not a block.
+        </div>
+      )}
       {warning && (
         <div className="flex items-center gap-2" style={{ marginTop: 10, color: C.red, fontSize: 12.5 }}>
           <AlertTriangle size={14} /> {warning}
@@ -2960,7 +3029,7 @@ function PlayerMarket({ teams, squads, myTeamId, transferListings, wantedListing
   );
 }
 
-function TransfersTab({ teams, squads, transfers, logTransfer, logAdminReward, setTransfers, auctions, createAuction, placeBid, finalizeAuction, respondToAuction, deleteBid, deleteTransfer, editAuctionPlayerName, nowTick, myTeamId, playerDatabase, transferListings, wantedListings, addTransferListing, removeTransferListing, addWantedListing, removeWantedListing, sendMarketMessage }) {
+function TransfersTab({ teams, squads, transfers, logTransfer, logAdminReward, setTransfers, auctions, createAuction, placeBid, finalizeAuction, respondToAuction, deleteBid, deleteTransfer, editAuctionPlayerName, nowTick, myTeamId, playerDatabase, squadStats, transferListings, wantedListings, addTransferListing, removeTransferListing, addWantedListing, removeWantedListing, sendMarketMessage }) {
   const [deletingId, setDeletingId] = useState(null);
   const [deletePin, setDeletePin] = useState("");
   const [deleteErr, setDeleteErr] = useState("");
@@ -2976,7 +3045,7 @@ function TransfersTab({ teams, squads, transfers, logTransfer, logAdminReward, s
       <AuctionsPanel teams={teams} squads={squads} auctions={auctions} createAuction={createAuction}
         placeBid={placeBid} finalizeAuction={finalizeAuction} respondToAuction={respondToAuction}
         deleteBid={deleteBid} editAuctionPlayerName={editAuctionPlayerName} myTeamId={myTeamId}
-        playerDatabase={playerDatabase} />
+        playerDatabase={playerDatabase} squadStats={squadStats} />
 
       <PlayerMarket teams={teams} squads={squads} myTeamId={myTeamId}
         transferListings={transferListings} wantedListings={wantedListings}
@@ -3503,8 +3572,43 @@ function ProofModal({ fixture, teams, onClose }) {
 }
 
 /* -------------------------------- Standings ---------------------------------- */
+function FormDots({ results }) {
+  if (results.length === 0) return <span style={{ color: C.muted, fontSize: 11 }}>—</span>;
+  const colorFor = (r) => (r === "W" ? C.green : r === "L" ? C.red : C.muted);
+  return (
+    <div className="flex items-center justify-center gap-1">
+      {results.map((r, i) => (
+        <span key={i} title={r === "W" ? "Win" : r === "L" ? "Loss" : "Draw"} style={{
+          width: 16, height: 16, borderRadius: "50%", background: colorFor(r),
+          color: "#0B1220", fontSize: 9, fontWeight: 800, display: "flex", alignItems: "center", justifyContent: "center",
+        }}>
+          {r}
+        </span>
+      ))}
+    </div>
+  );
+}
+
 function StandingsTab({ teams, standings, fixtures }) {
   const teamById = useMemo(() => Object.fromEntries(teams.map((t) => [t.id, t])), [teams]);
+
+  // Last 5 completed results per team, oldest to newest (left to right), ordered by matchday since
+  // fixtures aren't necessarily entered in strict chronological order.
+  const formGuide = useMemo(() => {
+    const played = fixtures.filter((f) => f.score1 !== "" && f.score1 != null && f.score2 !== "" && f.score2 != null);
+    const sorted = [...played].sort((a, b) => a.matchday - b.matchday);
+    const guide = {};
+    teams.forEach((t) => {
+      const teamFixtures = sorted.filter((f) => f.team1 === t.id || f.team2 === t.id);
+      const results = teamFixtures.slice(-5).map((f) => {
+        const isTeam1 = f.team1 === t.id;
+        const gf = Number(isTeam1 ? f.score1 : f.score2), ga = Number(isTeam1 ? f.score2 : f.score1);
+        return gf > ga ? "W" : gf < ga ? "L" : "D";
+      });
+      guide[t.id] = results;
+    });
+    return guide;
+  }, [fixtures, teams]);
 
   const seasonAwards = useMemo(() => {
     const goals = {}, assists = {}, motmCounts = {};
@@ -3539,12 +3643,13 @@ function StandingsTab({ teams, standings, fixtures }) {
       <Panel style={{ padding: 18 }}>
         <SectionTitle icon={Trophy}>Standings</SectionTitle>
         <Table
-          head={["Pos", "Team", "Manager", "P", "W", "D", "L", "GF", "GA", "GD", "Pts", "Next Season Cap"]}
+          head={["Pos", "Team", "Manager", "P", "W", "D", "L", "GF", "GA", "GD", "Pts", "Form", "Next Season Cap"]}
           rows={standings.map((r) => {
             const t = teams.find((x) => x.id === r.id);
             return [
-              r.position === 1 ? <Pill tone="gold">1</Pill> : r.position, t?.name, t?.manager,
-              r.played, r.w, r.d, r.l, r.gf, r.ga, r.gd, <b>{r.points}</b>, money(r.nextCap),
+              r.position === 1 ? <Pill tone="gold">1</Pill> : r.position, t?.crest ? `${t.crest} ${t.name}` : t?.name, t?.manager,
+              r.played, r.w, r.d, r.l, r.gf, r.ga, r.gd, <b>{r.points}</b>,
+              <FormDots results={formGuide[r.id] || []} />, money(r.nextCap),
             ];
           })}
         />
@@ -3907,7 +4012,7 @@ function RulesTab({ teams, standings }) {
   );
 }
 
-function AdminTab({ teams, squads, myTeamId, playerDatabase, adminPin, logAdminReward, resetAll, changeAdminPin, addFundsToTeam, addEarned86Slot, exportBackup, restoreBackup, restoreFromNightlyBackup, endSeason, season, seasonHistory, standings, importPlayerDatabase, clearPlayerDatabase, teamLockOverride, toggleTeamLockOverride, clearChat, resetTeamPassword }) {
+function AdminTab({ teams, squads, myTeamId, playerDatabase, adminPin, logAdminReward, resetAll, changeAdminPin, addFundsToTeam, addEarned86Slot, exportBackup, restoreBackup, restoreFromNightlyBackup, endSeason, season, seasonHistory, standings, importPlayerDatabase, clearPlayerDatabase, teamLockOverride, toggleTeamLockOverride, clearChat, resetTeamPassword, squadStats }) {
   const [unlocked, setUnlocked] = useState(false);
   const [pinInput, setPinInput] = useState("");
   const [err, setErr] = useState("");
@@ -3937,7 +4042,7 @@ function AdminTab({ teams, squads, myTeamId, playerDatabase, adminPin, logAdminR
 
   return (
     <div className="grid gap-4">
-      <AdminPlayerRewards teams={teams} squads={squads} logAdminReward={logAdminReward} myTeamId={myTeamId} playerDatabase={playerDatabase} />
+      <AdminPlayerRewards teams={teams} squads={squads} logAdminReward={logAdminReward} myTeamId={myTeamId} playerDatabase={playerDatabase} squadStats={squadStats} />
 
       <BackupTools exportBackup={exportBackup} restoreBackup={restoreBackup} restoreFromNightlyBackup={restoreFromNightlyBackup} />
 
