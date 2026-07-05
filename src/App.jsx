@@ -3620,7 +3620,9 @@ function MessagesTab({ teams, myTeamId, privateMessages, sendPrivateMessage, dmL
     }).sort((a, b) => b.lastMessage.time - a.lastMessage.time);
   }, [privateMessages, myTeamId, dmLastSeen, conversationIdFor]);
 
-  const activeThread = conversations.find((c) => c.partnerId === activeTeamId);
+  const activeThread = activeTeamId
+    ? (conversations.find((c) => c.partnerId === activeTeamId) || { partnerId: activeTeamId, messages: [] })
+    : null;
 
   const openConversation = (partnerId) => {
     setActiveTeamId(partnerId);
@@ -3705,6 +3707,11 @@ function MessagesTab({ teams, myTeamId, privateMessages, sendPrivateMessage, dmL
               </div>
               <div style={{ flex: 1, overflowY: "auto", padding: 16, maxHeight: 400 }}>
                 <div className="grid gap-3">
+                  {activeThread.messages.length === 0 && (
+                    <div style={{ color: C.muted, fontSize: 12.5, textAlign: "center", padding: 20 }}>
+                      No messages yet — say hello to {teamName(activeTeamId)}.
+                    </div>
+                  )}
                   {activeThread.messages.map((m) => {
                     const mine = m.fromTeamId === myTeamId;
                     return (
