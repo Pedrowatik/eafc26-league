@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useCallback, useRef } from "react";
+import { useState, useEffect, useMemo, useCallback, useRef, Fragment } from "react";
 import {
   Home, Users, Wallet, Repeat, Trophy, Swords, Coins, BookOpen,
   Plus, Trash2, Save, RotateCcw, AlertTriangle, CheckCircle2, X, ChevronRight, Lock, Unlock, KeyRound,
@@ -130,6 +130,7 @@ const POSITIONS = ["GK", "CB", "LB", "RB", "LWB", "RWB", "CDM", "CM", "CAM", "LM
 
 const STORAGE_KEY = "eafc26-league-state-v1";
 const MY_TEAM_KEY = "eafc26-my-team"; // personal, per-device — not shared
+const CHAT_SEEN_KEY = "eafc26-chat-last-seen"; // personal — for the unread-mentions badge
 const NIGHTLY_BACKUP_PREFIX = "eafc26-nightly-backup-"; // written by the scheduled Edge Function
 
 /* ------------------------------- small UI -------------------------------- */
@@ -299,6 +300,9 @@ export default function EafcLeagueApp() {
   const [activity, setActivity] = useState([]);
   const [chat, setChat] = useState([]);
   const [playerDatabase, setPlayerDatabase] = useState([]); // imported from CM Tracker/Sofifa for autocomplete
+  const [claimedTeams, setClaimedTeams] = useState({}); // { [teamId]: true } — which teams are already picked by someone
+  const [chatLastSeen, setChatLastSeen] = useState(0); // personal — timestamp of last time this device checked chat
+  const [mentionToasts, setMentionToasts] = useState([]); // ephemeral "flash" alerts for @team mentions
   const [myTeamId, setMyTeamId] = useState(null); // personal — which team is "me" on this device
   const [tab, setTab] = useState("dashboard");
   const [loaded, setLoaded] = useState(false);
@@ -326,6 +330,7 @@ export default function EafcLeagueApp() {
     if (data.activity) setActivity(data.activity);
     if (data.chat) setChat(data.chat);
     if (data.playerDatabase) setPlayerDatabase(data.playerDatabase);
+    if (data.claimedTeams) setClaimedTeams(data.claimedTeams);
   }, []);
 
   // load once
@@ -348,6 +353,12 @@ export default function EafcLeagueApp() {
       } catch (e) {
         // no personal team picked yet
       }
+      try {
+        const seen = await storage.get(CHAT_SEEN_KEY, false);
+        if (seen && seen.value) setChatLastSeen(Number(seen.value) || 0);
+      } catch (e) {
+        // never checked chat yet
+      }
       setLoaded(true);
     })();
   }, [applyRemoteData]);
@@ -361,7 +372,7 @@ export default function EafcLeagueApp() {
         const savedAt = Date.now();
         await storage.set(
           STORAGE_KEY,
-          JSON.stringify({ teams, squads, transfers, fixtures, prizes, events, auctions, adminPin, season, seasonHistory, activity, chat, playerDatabase, savedAt }),
+          JSON.stringify({ teams, squads, transfers, fixtures, prizes, events, auctions, adminPin, season, seasonHistory, activity, chat, playerDatabase, claimedTeams, savedAt }),
           true
         );
         knownSavedAtRef.current = savedAt;
@@ -372,7 +383,7 @@ export default function EafcLeagueApp() {
       }
     }, 500);
     return () => clearTimeout(t);
-  }, [teams, squads, transfers, fixtures, prizes, events, auctions, adminPin, season, seasonHistory, activity, chat, playerDatabase, loaded]);
+  }, [teams, squads, transfers, fixtures, prizes, events, auctions, adminPin, season, seasonHistory, activity, chat, playerDatabase, claimedTeams, loaded]);
 
   // live sync: poll for other people's changes and pull them in automatically. Skipped while we
   // have our own unsaved edit in flight, so we don't clobber it with a slightly stale copy.
@@ -424,8 +435,18 @@ export default function EafcLeagueApp() {
   }, [loaded, applyRemoteData]);
 
   const chooseMyTeam = async (teamId) => {
+    if (teamId && claimedTeams[teamId] && teamId !== myTeamId) {
+      return "That team's already been picked by someone else.";
+    }
+    setClaimedTeams((prev) => {
+      const next = { ...prev };
+      if (myTeamId) delete next[myTeamId]; // release whatever we had before
+      if (teamId) next[teamId] = true;
+      return next;
+    });
     setMyTeamId(teamId);
     try { await storage.set(MY_TEAM_KEY, teamId || "", false); } catch (e) { /* best effort */ }
+    return null;
   };
 
   // Shared activity log — kept short so it stays useful rather than becoming noise.
@@ -434,6 +455,51 @@ export default function EafcLeagueApp() {
   }, []);
 
   const teamById = useMemo(() => Object.fromEntries(teams.map((t) => [t.id, t])), [teams]);
+
+  const markChatSeen = useCallback(async () => {
+    const now = Date.now();
+    setChatLastSeen(now);
+    try { await storage.set(CHAT_SEEN_KEY, String(now), false); } catch (e) { /* best effort */ }
+  }, []);
+
+  const unreadMentions = useMemo(
+    () => (myTeamId ? chat.filter((m) => m.taggedTeam === myTeamId && m.time > chatLastSeen) : []),
+    [chat, myTeamId, chatLastSeen]
+  );
+
+  // Flash a toast the moment a new message tagging your team arrives, regardless of which tab
+  // you're on — this is the "notification" half; the nav badge (via unreadMentions) is the other.
+  const seenChatIdsRef = useRef(null);
+  useEffect(() => {
+    if (!loaded) return;
+    if (seenChatIdsRef.current === null) {
+      // first run after load — remember what's already there so we don't toast for old messages
+      seenChatIdsRef.current = new Set(chat.map((m) => m.id));
+      return;
+    }
+    const freshMentions = chat.filter((m) => !seenChatIdsRef.current.has(m.id) && m.taggedTeam === myTeamId);
+    chat.forEach((m) => seenChatIdsRef.current.add(m.id));
+    if (freshMentions.length > 0 && myTeamId) {
+      setMentionToasts((all) => [...all, ...freshMentions.map((m) => ({ id: uid(), text: m.text, author: m.author }))]);
+    }
+  }, [chat, loaded, myTeamId]);
+
+  const dismissToast = (id) => setMentionToasts((all) => all.filter((t) => t.id !== id));
+
+  useEffect(() => {
+    if (mentionToasts.length === 0) return;
+    const timers = mentionToasts.map((t) => setTimeout(() => dismissToast(t.id), 8000));
+    return () => timers.forEach(clearTimeout);
+  }, [mentionToasts]);
+
+  // If someone picked a team before this feature existed, register their existing pick so it
+  // shows as taken for everyone else too, without needing them to re-pick.
+  useEffect(() => {
+    if (!loaded || !myTeamId) return;
+    if (!claimedTeams[myTeamId]) {
+      setClaimedTeams((prev) => ({ ...prev, [myTeamId]: true }));
+    }
+  }, [loaded, myTeamId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Ticking clock so budgets/statuses recompute live as the 12h/24h ratification windows pass.
   const [nowTick, setNowTick] = useState(Date.now());
@@ -1040,7 +1106,7 @@ export default function EafcLeagueApp() {
             </div>
           </div>
           <div className="flex items-center gap-3">
-            <MyTeamPicker teams={teams} myTeamId={myTeamId} chooseMyTeam={chooseMyTeam} />
+            <MyTeamPicker teams={teams} myTeamId={myTeamId} chooseMyTeam={chooseMyTeam} claimedTeams={claimedTeams} />
             <SyncIndicator syncState={syncState} lastSyncedAt={lastSyncedAt} onRefresh={() => pullLatest(true)} />
             <SaveIndicator state={saveState} />
           </div>
@@ -1055,10 +1121,10 @@ export default function EafcLeagueApp() {
             return (
               <button
                 key={t.id}
-                onClick={() => setTab(t.id)}
+                onClick={() => { setTab(t.id); if (t.id === "chat") markChatSeen(); }}
                 className="flex items-center gap-1.5"
                 style={{
-                  padding: "13px 16px", background: "transparent", border: "none", cursor: "pointer",
+                  padding: "13px 16px", background: "transparent", border: "none", cursor: "pointer", position: "relative",
                   color: active ? C.gold : "rgba(255,255,255,0.55)", fontWeight: 500, fontSize: 14,
                   letterSpacing: "0.04em", textTransform: "uppercase",
                   borderBottom: active ? `3px solid ${C.gold}` : "3px solid transparent",
@@ -1068,6 +1134,15 @@ export default function EafcLeagueApp() {
               >
                 <t.icon size={15} />
                 {t.label}
+                {t.id === "chat" && unreadMentions.length > 0 && (
+                  <span style={{
+                    position: "absolute", top: 6, right: 4, background: C.red, color: "#fff",
+                    borderRadius: 999, fontSize: 10, fontWeight: 700, minWidth: 16, height: 16,
+                    display: "flex", alignItems: "center", justifyContent: "center", padding: "0 4px",
+                  }}>
+                    {unreadMentions.length}
+                  </span>
+                )}
               </button>
             );
           })}
@@ -1097,7 +1172,7 @@ export default function EafcLeagueApp() {
         )}
         {tab === "fixtures" && (
           <FixturesTab teams={teams} fixtures={fixtures} setFixtures={setFixtures} logActivity={logActivity}
-            myTeamId={myTeamId} />
+            myTeamId={myTeamId} squads={squads} />
         )}
         {tab === "standings" && (
           <StandingsTab teams={teams} standings={standings} />
@@ -1107,7 +1182,7 @@ export default function EafcLeagueApp() {
             teams={teams} logActivity={logActivity} />
         )}
         {tab === "chat" && (
-          <ChatTab chat={chat} setChat={setChat} teams={teams} myTeamId={myTeamId} />
+          <ChatTab chat={chat} setChat={setChat} teams={teams} myTeamId={myTeamId} markChatSeen={markChatSeen} />
         )}
         {tab === "rules" && (
           <RulesTab teams={teams} resetAll={resetAll} changeAdminPin={changeAdminPin}
@@ -1125,13 +1200,41 @@ export default function EafcLeagueApp() {
           CMTracker.net
         </a>
       </div>
+
+      {mentionToasts.length > 0 && (
+        <div style={{ position: "fixed", bottom: 20, right: 20, zIndex: 100, display: "grid", gap: 10, maxWidth: 320 }}>
+          {mentionToasts.map((t) => (
+            <div key={t.id} className="flex items-start gap-2" style={{
+              background: "#0d1a2e", border: `1px solid ${C.gold}`, borderRadius: 8, padding: "12px 14px",
+              boxShadow: "0 12px 32px rgba(0,0,0,0.5)", cursor: "pointer",
+            }} onClick={() => { setTab("chat"); markChatSeen(); dismissToast(t.id); }}>
+              <MessageCircle size={16} color={C.gold} style={{ marginTop: 2, flexShrink: 0 }} />
+              <div style={{ flex: 1 }}>
+                <div style={{ color: C.gold, fontWeight: 700, fontSize: 12.5 }}>{t.author} mentioned your team</div>
+                <div style={{ color: C.text, fontSize: 12.5 }}>{t.text}</div>
+              </div>
+              <button onClick={(e) => { e.stopPropagation(); dismissToast(t.id); }} style={{ background: "transparent", border: "none", cursor: "pointer", color: C.muted, flexShrink: 0 }}>
+                <X size={14} />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
 
-function MyTeamPicker({ teams, myTeamId, chooseMyTeam }) {
+function MyTeamPicker({ teams, myTeamId, chooseMyTeam, claimedTeams }) {
   const [open, setOpen] = useState(false);
+  const [err, setErr] = useState("");
   const mine = teams.find((t) => t.id === myTeamId);
+
+  const pick = async (teamId) => {
+    setErr("");
+    const error = await chooseMyTeam(teamId);
+    if (error) setErr(error);
+    else setOpen(false);
+  };
 
   return (
     <div style={{ position: "relative" }}>
@@ -1141,22 +1244,32 @@ function MyTeamPicker({ teams, myTeamId, chooseMyTeam }) {
         {mine ? mine.name : "Which team am I?"}
       </button>
       {open && (
-        <div style={{ position: "absolute", right: 0, top: "calc(100% + 6px)", background: C.panel, border: `1px solid ${C.border}`, borderRadius: 10, padding: 8, zIndex: 30, minWidth: 180, boxShadow: "0 8px 24px rgba(0,0,0,0.4)" }}>
+        <div style={{ position: "absolute", right: 0, top: "calc(100% + 6px)", background: C.panel, border: `1px solid ${C.border}`, borderRadius: 10, padding: 8, zIndex: 30, minWidth: 200, boxShadow: "0 8px 24px rgba(0,0,0,0.4)" }}>
           <div style={{ color: C.muted, fontSize: 10.5, textTransform: "uppercase", padding: "4px 8px" }}>This device only — not shared</div>
-          {teams.map((t) => (
-            <button key={t.id} onClick={() => { chooseMyTeam(t.id); setOpen(false); }}
-              className="flex items-center justify-between"
-              style={{ width: "100%", textAlign: "left", background: t.id === myTeamId ? `${C.gold}22` : "transparent", border: "none", borderRadius: 7, padding: "7px 8px", cursor: "pointer", color: t.id === myTeamId ? C.gold : C.text, fontSize: 13 }}>
-              {t.name}
-              {t.id === myTeamId && <Check size={13} />}
-            </button>
-          ))}
+          {teams.map((t) => {
+            const takenByOther = claimedTeams[t.id] && t.id !== myTeamId;
+            return (
+              <button key={t.id} onClick={() => !takenByOther && pick(t.id)} disabled={takenByOther}
+                className="flex items-center justify-between"
+                style={{
+                  width: "100%", textAlign: "left", background: t.id === myTeamId ? `${C.gold}22` : "transparent",
+                  border: "none", borderRadius: 7, padding: "7px 8px", cursor: takenByOther ? "not-allowed" : "pointer",
+                  color: takenByOther ? C.muted : (t.id === myTeamId ? C.gold : C.text), fontSize: 13,
+                  opacity: takenByOther ? 0.55 : 1,
+                }}>
+                {t.name}
+                {t.id === myTeamId && <Check size={13} />}
+                {takenByOther && <span style={{ fontSize: 10.5, textTransform: "uppercase" }}>Taken</span>}
+              </button>
+            );
+          })}
           {myTeamId && (
             <button onClick={() => { chooseMyTeam(null); setOpen(false); }}
               style={{ width: "100%", textAlign: "left", background: "transparent", border: "none", borderRadius: 7, padding: "7px 8px", cursor: "pointer", color: C.muted, fontSize: 12 }}>
               Clear selection
             </button>
           )}
+          {err && <div style={{ color: C.red, fontSize: 11.5, padding: "6px 8px" }}>{err}</div>}
         </div>
       )}
     </div>
@@ -2106,7 +2219,83 @@ function TransfersTab({ teams, squads, transfers, logTransfer, logAdminReward, s
 }
 
 /* -------------------------------- Fixtures ---------------------------------- */
-function FixturesTab({ teams, fixtures, setFixtures, logActivity, myTeamId }) {
+function MatchStatsPanel({ team1Name, team2Name, team1Players, team2Players, resultForm, togglePlayed, updateStat, setMotm, error }) {
+  const playedList = (side, players) => players.filter((p) => resultForm[side][p.name]?.played);
+  const motmOptions = [
+    ...playedList("team1Stats", team1Players).map((p) => ({ name: p.name, team: team1Name })),
+    ...playedList("team2Stats", team2Players).map((p) => ({ name: p.name, team: team2Name })),
+  ];
+
+  const TeamStatBlock = ({ side, teamName, players }) => (
+    <div>
+      <div style={{ color: C.gold, fontWeight: 700, fontSize: 12.5, marginBottom: 6 }}>{teamName}</div>
+      <div style={{ maxHeight: 220, overflowY: "auto", border: `1px solid ${C.border}`, borderRadius: 8 }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11.5 }}>
+          <thead>
+            <tr style={{ position: "sticky", top: 0, background: C.panel }}>
+              {["Played", "Player", "G", "A", "Y", "R"].map((h, i) => (
+                <th key={i} style={{ padding: "4px 6px", color: C.muted, fontSize: 10, textTransform: "uppercase", borderBottom: `1px solid ${C.border}` }}>{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {players.map((p) => {
+              const s = resultForm[side][p.name];
+              return (
+                <tr key={p.name}>
+                  <td style={{ textAlign: "center", padding: "3px 6px" }}>
+                    <input type="checkbox" checked={s.played} onChange={() => togglePlayed(side, p.name)} />
+                  </td>
+                  <td style={{ padding: "3px 6px", color: s.played ? C.text : C.muted }}>{p.name}</td>
+                  <td style={{ padding: "2px" }}>
+                    <input type="number" min={0} disabled={!s.played} value={s.goals}
+                      onChange={(e) => updateStat(side, p.name, "goals", Number(e.target.value) || 0)}
+                      style={{ width: 34, background: C.panelAlt, color: C.text, border: `1px solid ${C.border}`, borderRadius: 4, padding: "2px 4px", textAlign: "center" }} />
+                  </td>
+                  <td style={{ padding: "2px" }}>
+                    <input type="number" min={0} disabled={!s.played} value={s.assists}
+                      onChange={(e) => updateStat(side, p.name, "assists", Number(e.target.value) || 0)}
+                      style={{ width: 34, background: C.panelAlt, color: C.text, border: `1px solid ${C.border}`, borderRadius: 4, padding: "2px 4px", textAlign: "center" }} />
+                  </td>
+                  <td style={{ textAlign: "center", padding: "2px" }}>
+                    <input type="checkbox" disabled={!s.played} checked={s.yellow} onChange={(e) => updateStat(side, p.name, "yellow", e.target.checked)} />
+                  </td>
+                  <td style={{ textAlign: "center", padding: "2px" }}>
+                    <input type="checkbox" disabled={!s.played} checked={s.red} onChange={(e) => updateStat(side, p.name, "red", e.target.checked)} />
+                  </td>
+                </tr>
+              );
+            })}
+            {players.length === 0 && (
+              <tr><td colSpan={6} style={{ padding: 10, color: C.muted, textAlign: "center" }}>No players in this squad yet.</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+
+  return (
+    <div style={{ background: C.panelAlt, border: `1px solid ${C.gold}55`, borderRadius: 10, padding: 14, marginTop: 6 }}>
+      <div style={{ color: C.text, fontWeight: 700, fontSize: 13, marginBottom: 10 }}>Match Stats — required before saving</div>
+      <div className="grid gap-3" style={{ gridTemplateColumns: "1fr 1fr" }}>
+        <TeamStatBlock side="team1Stats" teamName={team1Name} players={team1Players} />
+        <TeamStatBlock side="team2Stats" teamName={team2Name} players={team2Players} />
+      </div>
+      <div style={{ marginTop: 12 }}>
+        <Field label="Man of the Match">
+          <Select value={resultForm.motm} onChange={(e) => setMotm(e.target.value)} style={{ maxWidth: 260 }}>
+            <option value="">Select a player who played…</option>
+            {motmOptions.map((p) => <option key={p.name} value={p.name}>{p.name} ({p.team})</option>)}
+          </Select>
+        </Field>
+      </div>
+      {error && <div className="flex items-center gap-2" style={{ marginTop: 10, color: C.red, fontSize: 12 }}><AlertTriangle size={13} /> {error}</div>}
+    </div>
+  );
+}
+
+function FixturesTab({ teams, fixtures, setFixtures, logActivity, myTeamId, squads }) {
   const blank = { matchday: 1, team1: myTeamId || teams[0].id, team2: teams.find((t) => t.id !== myTeamId)?.id || teams[1].id, date: todayISO(), proof: "" };
   const [form, setForm] = useState(blank);
   const [warning, setWarning] = useState("");
@@ -2114,7 +2303,8 @@ function FixturesTab({ teams, fixtures, setFixtures, logActivity, myTeamId }) {
   const [uploadError, setUploadError] = useState(null);
   const [viewingFixture, setViewingFixture] = useState(null); // fixture object or null
   const [enteringResultFor, setEnteringResultFor] = useState(null); // fixture id
-  const [resultForm, setResultForm] = useState({ score1: "", score2: "" });
+  const [resultForm, setResultForm] = useState(null); // { score1, score2, team1Stats, team2Stats, motm }
+  const [resultError, setResultError] = useState("");
 
   const add = () => {
     if (form.team1 === form.team2) { setWarning("Team 1 and Team 2 can't be the same."); return; }
@@ -2123,17 +2313,54 @@ function FixturesTab({ teams, fixtures, setFixtures, logActivity, myTeamId }) {
     setForm({ ...blank, matchday: Number(form.matchday) + 0 });
   };
 
+  const squadPlayersFor = (teamId) => [...(squads[teamId]?.starters || []), ...(squads[teamId]?.reserves || [])].filter(Boolean);
+
   const startResult = (f) => {
     setEnteringResultFor(f.id);
-    setResultForm({ score1: "", score2: "" });
+    setResultError("");
+    const blankPlayerStats = (teamId) => Object.fromEntries(
+      squadPlayersFor(teamId).map((p) => [p.name, { played: false, goals: 0, assists: 0, yellow: false, red: false }])
+    );
+    setResultForm({
+      score1: "", score2: "",
+      team1Stats: blankPlayerStats(f.team1),
+      team2Stats: blankPlayerStats(f.team2),
+      motm: "",
+    });
+  };
+
+  const togglePlayed = (side, playerName) => {
+    setResultForm((rf) => ({
+      ...rf,
+      [side]: { ...rf[side], [playerName]: { ...rf[side][playerName], played: !rf[side][playerName].played } },
+    }));
+  };
+
+  const updateStat = (side, playerName, field, value) => {
+    setResultForm((rf) => ({
+      ...rf,
+      [side]: { ...rf[side], [playerName]: { ...rf[side][playerName], [field]: value } },
+    }));
   };
 
   const saveResult = (f) => {
-    if (resultForm.score1 === "" || resultForm.score2 === "") return;
-    setFixtures((all) => all.map((x) => (x.id === f.id ? { ...x, score1: resultForm.score1, score2: resultForm.score2 } : x)));
+    if (resultForm.score1 === "" || resultForm.score2 === "") { setResultError("Enter both scores."); return; }
+    const team1Played = Object.entries(resultForm.team1Stats).filter(([, s]) => s.played);
+    const team2Played = Object.entries(resultForm.team2Stats).filter(([, s]) => s.played);
+    if (team1Played.length === 0 || team2Played.length === 0) {
+      setResultError("Select at least one player who played for each team before saving.");
+      return;
+    }
+    const stats = {
+      team1: team1Played.map(([name, s]) => ({ name, ...s })),
+      team2: team2Played.map(([name, s]) => ({ name, ...s })),
+      motm: resultForm.motm || null,
+    };
+    setFixtures((all) => all.map((x) => (x.id === f.id ? { ...x, score1: resultForm.score1, score2: resultForm.score2, stats } : x)));
     const t1 = teams.find((t) => t.id === f.team1)?.name, t2 = teams.find((t) => t.id === f.team2)?.name;
     logActivity(`Result: ${t1} ${resultForm.score1} – ${resultForm.score2} ${t2} (Matchday ${f.matchday})`, "fixture");
     setEnteringResultFor(null);
+    setResultForm(null);
   };
 
   const removeFixture = async (f) => {
@@ -2219,7 +2446,8 @@ function FixturesTab({ teams, fixtures, setFixtures, logActivity, myTeamId }) {
                 const uploading = uploadingId === f.id;
                 const enteringResult = enteringResultFor === f.id;
                 return (
-                  <tr key={f.id} style={{ background: i % 2 ? C.panelAlt : "transparent" }}>
+                  <Fragment key={f.id}>
+                  <tr style={{ background: i % 2 ? C.panelAlt : "transparent" }}>
                     <td style={{ textAlign: "center", color: C.text, padding: "7px 8px", borderBottom: `1px solid ${C.border}33` }}>{f.matchday}</td>
                     <td style={{ textAlign: "left", color: C.text, padding: "7px 8px", borderBottom: `1px solid ${C.border}33` }}>{t1}</td>
                     <td style={{ textAlign: "center", color: C.text, padding: "7px 8px", borderBottom: `1px solid ${C.border}33` }}>
@@ -2261,10 +2489,12 @@ function FixturesTab({ teams, fixtures, setFixtures, logActivity, myTeamId }) {
                         {enteringResult ? (
                           <>
                             <button onClick={() => saveResult(f)} title="Save result" style={{ background: "transparent", border: "none", cursor: "pointer", color: C.green }}><Check size={15} /></button>
-                            <button onClick={() => setEnteringResultFor(null)} title="Cancel" style={{ background: "transparent", border: "none", cursor: "pointer", color: C.muted }}><X size={15} /></button>
+                            <button onClick={() => { setEnteringResultFor(null); setResultForm(null); }} title="Cancel" style={{ background: "transparent", border: "none", cursor: "pointer", color: C.muted }}><X size={15} /></button>
                           </>
                         ) : !played ? (
                           <Btn size="sm" variant="outline" onClick={() => startResult(f)}>Add Result</Btn>
+                        ) : f.stats ? (
+                          <Pill tone="gold">Stats logged</Pill>
                         ) : null}
                         <button onClick={() => removeFixture(f)} style={{ background: "transparent", border: "none", cursor: "pointer", color: C.red }}>
                           <Trash2 size={14} />
@@ -2272,6 +2502,20 @@ function FixturesTab({ teams, fixtures, setFixtures, logActivity, myTeamId }) {
                       </div>
                     </td>
                   </tr>
+                  {enteringResult && (
+                    <tr>
+                      <td colSpan={8} style={{ padding: "0 8px 14px" }}>
+                        <MatchStatsPanel
+                          team1Name={t1} team2Name={t2}
+                          team1Players={squadPlayersFor(f.team1)} team2Players={squadPlayersFor(f.team2)}
+                          resultForm={resultForm} togglePlayed={togglePlayed} updateStat={updateStat}
+                          setMotm={(name) => setResultForm((r) => ({ ...r, motm: name }))}
+                          error={resultError}
+                        />
+                      </td>
+                    </tr>
+                  )}
+                  </Fragment>
                 );
               })}
             </tbody>
@@ -2404,9 +2648,10 @@ function PrizesTab({ prizes, setPrizes, taxCollected, prizeTotal, teams, logActi
 }
 
 /* --------------------------------- Chat ---------------------------------- */
-function ChatTab({ chat, setChat, teams, myTeamId }) {
+function ChatTab({ chat, setChat, teams, myTeamId, markChatSeen }) {
   const [name, setName] = useState("");
   const [text, setText] = useState("");
+  const [tagTeam, setTagTeam] = useState("");
   const mine = teams.find((t) => t.id === myTeamId);
   const bottomRef = useRef(null);
 
@@ -2414,11 +2659,17 @@ function ChatTab({ chat, setChat, teams, myTeamId }) {
     bottomRef.current?.scrollIntoView({ block: "nearest" });
   }, [chat.length]);
 
+  // Mark seen whenever this tab is open and a new message arrives, not just on nav-click.
+  useEffect(() => {
+    markChatSeen();
+  }, [chat.length, markChatSeen]);
+
   const send = () => {
     if (!text.trim()) return;
     const author = mine ? mine.name : (name.trim() || "Anonymous");
-    setChat((c) => [...c, { id: uid(), author, text: text.trim(), time: Date.now() }]);
+    setChat((c) => [...c, { id: uid(), author, text: text.trim(), time: Date.now(), taggedTeam: tagTeam || null }]);
     setText("");
+    setTagTeam("");
   };
 
   const timeStr = (t) => new Date(t).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
@@ -2429,6 +2680,7 @@ function ChatTab({ chat, setChat, teams, myTeamId }) {
       <div style={{ color: C.muted, fontSize: 12.5, marginBottom: 14 }}>
         Shared with everyone using this app — good for bidding chatter, banter, or quick announcements without
         leaving the page. {!mine && "Pick your team (top right) and it'll sign your messages automatically."}
+        {" "}Tag a team to flash a notification for whoever's on it.
       </div>
 
       <div style={{
@@ -2441,6 +2693,11 @@ function ChatTab({ chat, setChat, teams, myTeamId }) {
             <div key={m.id}>
               <div className="flex items-baseline gap-2">
                 <span style={{ color: C.gold, fontWeight: 700, fontSize: 12.5 }}>{m.author}</span>
+                {m.taggedTeam && (
+                  <span style={{ background: `${C.gold}22`, color: C.gold, borderRadius: 999, padding: "1px 8px", fontSize: 10.5, fontWeight: 700 }}>
+                    @{teams.find((t) => t.id === m.taggedTeam)?.name || "team"}
+                  </span>
+                )}
                 <span style={{ color: C.muted, fontSize: 10.5 }}>{timeStr(m.time)}</span>
               </div>
               <div style={{ color: C.text, fontSize: 13.5 }}>{m.text}</div>
@@ -2456,11 +2713,17 @@ function ChatTab({ chat, setChat, teams, myTeamId }) {
             <TextInput placeholder="e.g. Alex" value={name} onChange={(e) => setName(e.target.value)} style={{ width: 140 }} />
           </Field>
         )}
+        <Field label="Tag a team (optional)">
+          <Select value={tagTeam} onChange={(e) => setTagTeam(e.target.value)} style={{ width: 150 }}>
+            <option value="">No tag</option>
+            {teams.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+          </Select>
+        </Field>
         <Field label={mine ? `Message (as ${mine.name})` : "Message"}>
           <TextInput placeholder="Type a message…" value={text}
             onChange={(e) => setText(e.target.value)}
             onKeyDown={(e) => { if (e.key === "Enter") send(); }}
-            style={{ width: 340 }} />
+            style={{ width: 300 }} />
         </Field>
         <Btn icon={Send} onClick={send}>Send</Btn>
       </div>
