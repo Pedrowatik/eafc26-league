@@ -306,6 +306,8 @@ export default function EafcLeagueApp() {
   const [teamLockOverride, setTeamLockOverride] = useState(false); // admin toggle to allow re-picks mid-season
   const [cardTally, setCardTally] = useState({}); // { [teamId]: { [playerName]: seasonYellowCount } }
   const [suspensions, setSuspensions] = useState({}); // { [teamId]: { [playerName]: true } } — cleared once that team completes one more fixture
+  const [transferListings, setTransferListings] = useState([]); // players a team has put up for sale
+  const [wantedListings, setWantedListings] = useState([]); // "looking for" ads posted by a team
   const [chatLastSeen, setChatLastSeen] = useState(0); // personal — timestamp of last time this device checked chat
   const [mentionToasts, setMentionToasts] = useState([]); // ephemeral "flash" alerts for @team mentions
   const [myTeamId, setMyTeamId] = useState(null); // personal — which team is "me" on this device
@@ -340,6 +342,8 @@ export default function EafcLeagueApp() {
     if (data.teamLockOverride !== undefined) setTeamLockOverride(data.teamLockOverride);
     if (data.cardTally) setCardTally(data.cardTally);
     if (data.suspensions) setSuspensions(data.suspensions);
+    if (data.transferListings) setTransferListings(data.transferListings);
+    if (data.wantedListings) setWantedListings(data.wantedListings);
   }, []);
 
   // load once
@@ -381,7 +385,7 @@ export default function EafcLeagueApp() {
         const savedAt = Date.now();
         await storage.set(
           STORAGE_KEY,
-          JSON.stringify({ teams, squads, transfers, fixtures, prizes, events, auctions, adminPin, season, seasonHistory, activity, chat, playerDatabase, claimedTeams, injuries, teamLockOverride, cardTally, suspensions, savedAt }),
+          JSON.stringify({ teams, squads, transfers, fixtures, prizes, events, auctions, adminPin, season, seasonHistory, activity, chat, playerDatabase, claimedTeams, injuries, teamLockOverride, cardTally, suspensions, transferListings, wantedListings, savedAt }),
           true
         );
         knownSavedAtRef.current = savedAt;
@@ -392,7 +396,7 @@ export default function EafcLeagueApp() {
       }
     }, 500);
     return () => clearTimeout(t);
-  }, [teams, squads, transfers, fixtures, prizes, events, auctions, adminPin, season, seasonHistory, activity, chat, playerDatabase, claimedTeams, injuries, teamLockOverride, cardTally, suspensions, loaded]);
+  }, [teams, squads, transfers, fixtures, prizes, events, auctions, adminPin, season, seasonHistory, activity, chat, playerDatabase, claimedTeams, injuries, teamLockOverride, cardTally, suspensions, transferListings, wantedListings, loaded]);
 
   // live sync: poll for other people's changes and pull them in automatically. Skipped while we
   // have our own unsaved edit in flight, so we don't clobber it with a slightly stale copy.
@@ -461,9 +465,13 @@ export default function EafcLeagueApp() {
     return null;
   };
 
-  // Shared activity log — kept short so it stays useful rather than becoming noise.
+  // Shared activity log — kept short and fresh: anything older than 3 hours drops off, so the
+  // ticker never ends up stuck showing stale news from ages ago.
+  const ACTIVITY_MAX_AGE_MS = 3 * 60 * 60 * 1000;
   const logActivity = useCallback((text, type = "info") => {
-    setActivity((a) => [{ id: uid(), text, type, time: Date.now() }, ...a].slice(0, 200));
+    setActivity((a) => [{ id: uid(), text, type, time: Date.now() }, ...a]
+      .filter((item) => Date.now() - item.time < ACTIVITY_MAX_AGE_MS)
+      .slice(0, 200));
   }, []);
 
   const teamById = useMemo(() => Object.fromEntries(teams.map((t) => [t.id, t])), [teams]);
@@ -1183,6 +1191,59 @@ export default function EafcLeagueApp() {
     return null;
   };
 
+  /* ------------------------------- player market ------------------------------- */
+  const addTransferListing = (player, askingPrice, notes) => {
+    if (!myTeamId) return "Pick your team first (top right) before listing a player.";
+    if (!player) return "Choose a player from your squad.";
+    if (!askingPrice || Number(askingPrice) <= 0) return "Enter an asking price.";
+    if (transferListings.some((l) => l.teamId === myTeamId && l.playerName === player.name)) {
+      return "That player's already on the transfer list.";
+    }
+    setTransferListings((all) => [{
+      id: uid(), teamId: myTeamId, playerName: player.name, position: player.position,
+      rating: player.rating, club: player.club, age: player.age, wage: player.wage,
+      askingPrice: Number(askingPrice), notes: notes || "", postedAt: Date.now(),
+    }, ...all]);
+    return null;
+  };
+
+  const removeTransferListing = (id, pinAttempt) => {
+    const listing = transferListings.find((l) => l.id === id);
+    if (!listing) return "Listing not found.";
+    if (listing.teamId !== myTeamId && pinAttempt !== adminPin) {
+      return "Only the listing team (or an admin) can remove this.";
+    }
+    setTransferListings((all) => all.filter((l) => l.id !== id));
+    return null;
+  };
+
+  const addWantedListing = (position, notes) => {
+    if (!myTeamId) return "Pick your team first (top right) before posting a wanted ad.";
+    if (!position) return "Choose a position.";
+    setWantedListings((all) => [{ id: uid(), teamId: myTeamId, position, notes: notes || "", postedAt: Date.now() }, ...all]);
+    return null;
+  };
+
+  const removeWantedListing = (id, pinAttempt) => {
+    const listing = wantedListings.find((l) => l.id === id);
+    if (!listing) return "Listing not found.";
+    if (listing.teamId !== myTeamId && pinAttempt !== adminPin) {
+      return "Only the team that posted this (or an admin) can remove it.";
+    }
+    setWantedListings((all) => all.filter((l) => l.id !== id));
+    return null;
+  };
+
+  // Offers/interest don't have their own private inbox — they post a tagged chat message instead,
+  // reusing the same @team notification (badge + toast) that League Chat already has. Not a truly
+  // private DM, but it reaches the right team and starts a visible thread either side can reply to.
+  const sendMarketMessage = (toTeamId, text) => {
+    if (!myTeamId) return "Pick your team first (top right) before contacting another team.";
+    const mine = teamById[myTeamId];
+    setChat((c) => [...c, { id: uid(), author: mine?.name || "Anonymous", text, time: Date.now(), taggedTeam: toTeamId }]);
+    return null;
+  };
+
   /* --------------------------------- render --------------------------------- */
   const TABS = [
     { id: "dashboard", label: "Dashboard", icon: Home },
@@ -1302,7 +1363,11 @@ export default function EafcLeagueApp() {
             setTransfers={setTransfers} auctions={auctions} createAuction={createAuction}
             placeBid={placeBid} finalizeAuction={finalizeAuction} respondToAuction={respondToAuction}
             deleteBid={deleteBid} deleteTransfer={deleteTransfer} editAuctionPlayerName={editAuctionPlayerName} nowTick={nowTick}
-            myTeamId={myTeamId} playerDatabase={playerDatabase} />
+            myTeamId={myTeamId} playerDatabase={playerDatabase}
+            transferListings={transferListings} wantedListings={wantedListings}
+            addTransferListing={addTransferListing} removeTransferListing={removeTransferListing}
+            addWantedListing={addWantedListing} removeWantedListing={removeWantedListing}
+            sendMarketMessage={sendMarketMessage} />
         )}
         {tab === "fixtures" && (
           <FixturesTab teams={teams} fixtures={fixtures} setFixtures={setFixtures} logActivity={logActivity}
@@ -1709,10 +1774,11 @@ function ActivityTicker({ activity, clearActivity }) {
     else { setClearing(false); setPin(""); setErr(""); }
   };
 
-  const items = activity.slice(0, 20);
+  const THREE_HOURS_MS = 3 * 60 * 60 * 1000;
+  const items = activity.filter((a) => Date.now() - a.time < THREE_HOURS_MS).slice(0, 20);
   const tickerText = items.length > 0
     ? items.map((a) => a.text).join("     •     ")
-    : "Nothing's happened yet — actions across the league will show up here.";
+    : "Nothing in the last 3 hours — actions across the league will show up here.";
   const duration = Math.max(items.length * 6, 14);
 
   return (
@@ -1777,17 +1843,70 @@ function Table({ head, rows, dense }) {
 }
 
 /* -------------------------------- Squads ---------------------------------- */
-const FORMATIONS = {
-  "4-4-2": [1, 4, 4, 2],
-  "4-3-3": [1, 4, 3, 3],
-  "3-5-2": [1, 3, 5, 2],
-  "4-5-1": [1, 4, 5, 1],
-  "3-4-3": [1, 3, 4, 3],
-  "5-3-2": [1, 5, 3, 2],
+// Every formation is just parsed from its own name (e.g. "4-2-3-1 Wide" -> [4,2,3,1]) rather than
+// hand-mapped one by one — this lets us support the full named list below without maintaining a
+// separate shape entry for each. Labels per band are generated the same way.
+const FORMATION_GROUPS = {
+  "3-Back": ["3-1-4-2", "3-4-1-2", "3-4-2-1", "3-4-3", "3-4-3 Flat", "3-5-2"],
+  "4-Back": [
+    "4-1-2-1-2", "4-1-2-1-2 (2)", "4-1-2-1-2 Narrow",
+    "4-2-3-1 (2)", "4-2-3-1 Narrow", "4-2-3-1 Wide", "4-2-4",
+    "4-3-1-2", "4-3-2-1",
+    "4-3-3", "4-3-3 (2)", "4-3-3 (3)", "4-3-3 (4)", "4-3-3 Attack", "4-3-3 Defend", "4-3-3 Flat", "4-3-3 Holding",
+    "4-4-1-1 (2)", "4-4-1-1 Midfield",
+    "4-4-2", "4-4-2 (2)", "4-4-2 Flat", "4-4-2 Holding",
+    "4-5-1", "4-5-1 (2)", "4-5-1 Attack", "4-5-1 Flat",
+  ],
+  "5-Back": ["5-2-1-2", "5-2-3", "5-3-2", "5-3-2 Holding", "5-4-1", "5-4-1 Flat"],
 };
+const FORMATION_LIST = Object.values(FORMATION_GROUPS).flat();
+
+function parseFormationShape(name) {
+  const match = name.match(/^(\d(?:-\d)+)/);
+  const numPart = match ? match[1] : "4-4-2";
+  return numPart.split("-").map(Number); // e.g. "4-2-3-1" -> [4,2,3,1], excludes GK
+}
+
+function labelsForBand(count, type) {
+  if (type === "DEF") {
+    if (count === 1) return ["CB"];
+    if (count === 2) return ["CB", "CB"];
+    if (count === 3) return ["CB", "CB", "CB"];
+    if (count === 4) return ["LB", "CB", "CB", "RB"];
+    if (count === 5) return ["LWB", "CB", "CB", "CB", "RWB"];
+    return Array(count).fill("CB");
+  }
+  if (type === "FWD") {
+    if (count === 1) return ["ST"];
+    if (count === 2) return ["ST", "ST"];
+    if (count === 3) return ["LW", "ST", "RW"];
+    if (count === 4) return ["LW", "ST", "ST", "RW"];
+    return Array(count).fill("ST");
+  }
+  // MID — used for any middle band, whether it's the only midfield line or a DM/AM split
+  if (count === 1) return ["CDM"];
+  if (count === 2) return ["CM", "CM"];
+  if (count === 3) return ["CM", "CM", "CM"];
+  if (count === 4) return ["LM", "CM", "CM", "RM"];
+  if (count === 5) return ["LM", "CM", "CM", "CM", "RM"];
+  return Array(count).fill("CM");
+}
+
+// Position label for each of the first 11 starting slots, in order — used both on the pitch and
+// as the row labels in the Starting Squad table (replacing plain slot numbers).
+function formationPositions(name) {
+  const shape = parseFormationShape(name);
+  const labels = ["GK"];
+  shape.forEach((count, i) => {
+    const type = i === 0 ? "DEF" : i === shape.length - 1 ? "FWD" : "MID";
+    labels.push(...labelsForBand(count, type));
+  });
+  return labels;
+}
 
 function FormationPitch({ formation, starters }) {
-  const rows = FORMATIONS[formation] || FORMATIONS["4-4-2"];
+  const shape = parseFormationShape(formation);
+  const rows = [1, ...shape]; // prepend GK as its own band
   const xi = starters.slice(0, 11);
   let idx = 0;
   const rowPlayers = rows.map((count) => {
@@ -1833,7 +1952,7 @@ function FormationPitch({ formation, starters }) {
 }
 
 function SquadsTab({ teams, squads, squadStats, renameTeam, setTab, movePlayerToGroup, reorderPlayer, myTeamId }) {
-  const [activeTeam, setActiveTeam] = useState(teams[0].id);
+  const [activeTeam, setActiveTeam] = useState(myTeamId || teams[0].id);
   const [moveError, setMoveError] = useState("");
   const team = teams.find((t) => t.id === activeTeam);
   const sq = squads[activeTeam];
@@ -1890,7 +2009,11 @@ function SquadsTab({ teams, squads, squadStats, renameTeam, setTab, movePlayerTo
           <Field label="Formation">
             {activeTeam === myTeamId ? (
               <Select value={team.formation || "4-4-2"} onChange={(e) => renameTeam(team.id, { formation: e.target.value })}>
-                {Object.keys(FORMATIONS).map((f) => <option key={f} value={f}>{f}</option>)}
+                {Object.entries(FORMATION_GROUPS).map(([group, names]) => (
+                  <optgroup key={group} label={group}>
+                    {names.map((f) => <option key={f} value={f}>{f}</option>)}
+                  </optgroup>
+                ))}
               </Select>
             ) : (
               <div style={{ ...inputStyle, opacity: 0.7 }}>{team.formation || "4-4-2"}</div>
@@ -1926,7 +2049,11 @@ function SquadsTab({ teams, squads, squadStats, renameTeam, setTab, movePlayerTo
         )}
 
         <div className="grid gap-4" style={{ gridTemplateColumns: "1.7fr 1fr", alignItems: "start" }}>
-          <SquadTable title={`Starting Squad (${STARTER_SLOTS} slots)`} players={sq.starters} labelForIdx={(i) => i + 1}
+          <SquadTable title={`Starting Squad (${STARTER_SLOTS} slots)`} players={sq.starters}
+            labelForIdx={(i) => {
+              const positions = formationPositions(team.formation || "4-4-2");
+              return i < 11 ? positions[i] : i + 1;
+            }}
             group="starters" onMove={(index) => move("starters", index, "reserves")} moveLabel="Bench" moveIcon={ChevronDown}
             reorderPlayer={(index, dir) => reorderPlayer(activeTeam, "starters", index, dir)} minWidth={600} />
           <FormationPitch formation={team.formation || "4-4-2"} starters={sq.starters} />
@@ -2535,7 +2662,194 @@ function AdminPlayerRewards({ teams, squads, logAdminReward, myTeamId, playerDat
   );
 }
 
-function TransfersTab({ teams, squads, transfers, logTransfer, logAdminReward, setTransfers, auctions, createAuction, placeBid, finalizeAuction, respondToAuction, deleteBid, deleteTransfer, editAuctionPlayerName, nowTick, myTeamId, playerDatabase }) {
+function PlayerMarket({ teams, squads, myTeamId, transferListings, wantedListings, addTransferListing, removeTransferListing, addWantedListing, removeWantedListing, sendMarketMessage }) {
+  const mySquadPlayers = myTeamId ? [...(squads[myTeamId]?.starters || []), ...(squads[myTeamId]?.reserves || [])].filter(Boolean) : [];
+  const teamName = (id) => teams.find((t) => t.id === id)?.name || id;
+
+  // --- Transfer List (for sale) ---
+  const [listPlayerName, setListPlayerName] = useState("");
+  const [askingPrice, setAskingPrice] = useState("");
+  const [listNotes, setListNotes] = useState("");
+  const [listMsg, setListMsg] = useState(null);
+  const [offering, setOffering] = useState(null); // listing id currently composing an offer for
+  const [offerAmount, setOfferAmount] = useState("");
+  const [offerNote, setOfferNote] = useState("");
+  const [removePin, setRemovePin] = useState({}); // { [listingId]: pinValue } for non-owners removing
+
+  const submitListing = () => {
+    const player = mySquadPlayers.find((p) => p.name === listPlayerName);
+    const err = addTransferListing(player, askingPrice, listNotes);
+    setListMsg(err ? { text: err, tone: "red" } : { text: "Player listed for transfer.", tone: "green" });
+    if (!err) { setListPlayerName(""); setAskingPrice(""); setListNotes(""); }
+  };
+
+  const sendOffer = (listing) => {
+    const text = `💰 Offer for ${listing.playerName}: ${money(Number(offerAmount) || 0)}${offerNote ? ` — ${offerNote}` : ""}`;
+    sendMarketMessage(listing.teamId, text);
+    setOffering(null); setOfferAmount(""); setOfferNote("");
+  };
+
+  const doRemoveListing = (id) => {
+    const err = removeTransferListing(id, removePin[id] || "");
+    if (!err) setRemovePin((p) => ({ ...p, [id]: "" }));
+    else setListMsg({ text: err, tone: "red" });
+  };
+
+  // --- Players Wanted ---
+  const [wantPosition, setWantPosition] = useState("ST");
+  const [wantNotes, setWantNotes] = useState("");
+  const [wantMsg, setWantMsg] = useState(null);
+  const [messaging, setMessaging] = useState(null); // wanted-listing id currently composing a message for
+  const [messageText, setMessageText] = useState("");
+  const [wantRemovePin, setWantRemovePin] = useState({});
+
+  const submitWanted = () => {
+    const err = addWantedListing(wantPosition, wantNotes);
+    setWantMsg(err ? { text: err, tone: "red" } : { text: "Wanted ad posted.", tone: "green" });
+    if (!err) setWantNotes("");
+  };
+
+  const sendWantedMessage = (listing) => {
+    sendMarketMessage(listing.teamId, `📋 Re: your ${listing.position} wanted ad — ${messageText}`);
+    setMessaging(null); setMessageText("");
+  };
+
+  const doRemoveWanted = (id) => {
+    const err = removeWantedListing(id, wantRemovePin[id] || "");
+    if (!err) setWantRemovePin((p) => ({ ...p, [id]: "" }));
+    else setWantMsg({ text: err, tone: "red" });
+  };
+
+  return (
+    <div className="grid gap-4">
+      <Panel style={{ padding: 18 }}>
+        <SectionTitle icon={Repeat}>Transfer List</SectionTitle>
+        <div style={{ color: C.muted, fontSize: 11.5, marginBottom: 12 }}>
+          Put one of your own players up for sale with an asking price. Other teams can make an offer, which posts
+          a tagged message to you in League Chat to start the conversation.
+        </div>
+
+        {myTeamId ? (
+          <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", marginBottom: 12 }}>
+            <Field label="Player (from your squad)">
+              <Select value={listPlayerName} onChange={(e) => setListPlayerName(e.target.value)}>
+                <option value="">Select a player…</option>
+                {mySquadPlayers
+                  .filter((p) => !transferListings.some((l) => l.teamId === myTeamId && l.playerName === p.name))
+                  .map((p) => <option key={p.name} value={p.name}>{p.name} ({p.position}, {p.rating})</option>)}
+              </Select>
+            </Field>
+            <Field label="Asking price (£M)">
+              <TextInput type="number" step="0.25" value={askingPrice} onChange={(e) => setAskingPrice(e.target.value)} />
+            </Field>
+            <Field label="Notes (optional)">
+              <TextInput value={listNotes} onChange={(e) => setListNotes(e.target.value)} placeholder="e.g. open to swaps" />
+            </Field>
+            <div style={{ alignSelf: "end" }}>
+              <Btn icon={Plus} onClick={submitListing}>List Player</Btn>
+            </div>
+          </div>
+        ) : (
+          <div style={{ color: C.muted, fontSize: 12, marginBottom: 12 }}>Pick your team (top right) to list a player.</div>
+        )}
+        {listMsg && <div style={{ color: listMsg.tone === "green" ? C.green : C.red, fontSize: 12, marginBottom: 10 }}>{listMsg.text}</div>}
+
+        {transferListings.length === 0 ? (
+          <div style={{ color: C.muted, fontSize: 12.5 }}>No players currently listed.</div>
+        ) : (
+          <div className="grid gap-2">
+            {transferListings.map((l) => (
+              <div key={l.id} style={{ background: C.panelAlt, borderRadius: 8, padding: 10 }}>
+                <div className="flex items-center justify-between flex-wrap gap-2">
+                  <div style={{ fontSize: 12.5 }}>
+                    <b style={{ color: C.text }}>{l.playerName}</b>{" "}
+                    <span style={{ color: C.muted }}>{l.position} · {l.rating} · {l.club} · {l.age}y — listed by {teamName(l.teamId)}</span>
+                    <div style={{ color: C.gold, fontWeight: 700 }}>Asking {money(l.askingPrice)}</div>
+                    {l.notes && <div style={{ color: C.muted, fontSize: 11.5 }}>{l.notes}</div>}
+                  </div>
+                  <div className="flex items-center gap-2">
+                    {l.teamId === myTeamId ? (
+                      <Btn size="sm" variant="outline" icon={Trash2} onClick={() => doRemoveListing(l.id)}>Remove</Btn>
+                    ) : (
+                      <Btn size="sm" onClick={() => setOffering(offering === l.id ? null : l.id)}>Make Offer</Btn>
+                    )}
+                  </div>
+                </div>
+                {offering === l.id && (
+                  <div className="flex items-end gap-2 flex-wrap" style={{ marginTop: 10 }}>
+                    <Field label="Offer (£M)"><TextInput type="number" step="0.25" value={offerAmount} onChange={(e) => setOfferAmount(e.target.value)} style={{ width: 110 }} /></Field>
+                    <Field label="Message (optional)"><TextInput value={offerNote} onChange={(e) => setOfferNote(e.target.value)} style={{ width: 220 }} /></Field>
+                    <Btn size="sm" icon={Send} onClick={() => sendOffer(l)}>Send Offer</Btn>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </Panel>
+
+      <Panel style={{ padding: 18 }}>
+        <SectionTitle icon={Search}>Players Wanted</SectionTitle>
+        <div style={{ color: C.muted, fontSize: 11.5, marginBottom: 12 }}>
+          Post what you're after — position plus any specifics (pace, height, playstyle, whatever matters to you) —
+          so other teams know what to offer you.
+        </div>
+
+        {myTeamId ? (
+          <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", marginBottom: 12 }}>
+            <Field label="Position">
+              <Select value={wantPosition} onChange={(e) => setWantPosition(e.target.value)}>
+                {POSITIONS.map((pos) => <option key={pos}>{pos}</option>)}
+              </Select>
+            </Field>
+            <Field label="Notes">
+              <TextInput value={wantNotes} onChange={(e) => setWantNotes(e.target.value)} placeholder="e.g. 90+ pace, box crasher" />
+            </Field>
+            <div style={{ alignSelf: "end" }}>
+              <Btn icon={Plus} onClick={submitWanted}>Post Wanted Ad</Btn>
+            </div>
+          </div>
+        ) : (
+          <div style={{ color: C.muted, fontSize: 12, marginBottom: 12 }}>Pick your team (top right) to post a wanted ad.</div>
+        )}
+        {wantMsg && <div style={{ color: wantMsg.tone === "green" ? C.green : C.red, fontSize: 12, marginBottom: 10 }}>{wantMsg.text}</div>}
+
+        {wantedListings.length === 0 ? (
+          <div style={{ color: C.muted, fontSize: 12.5 }}>No wanted ads posted yet.</div>
+        ) : (
+          <div className="grid gap-2">
+            {wantedListings.map((w) => (
+              <div key={w.id} style={{ background: C.panelAlt, borderRadius: 8, padding: 10 }}>
+                <div className="flex items-center justify-between flex-wrap gap-2">
+                  <div style={{ fontSize: 12.5 }}>
+                    <Pill tone="gold">{w.position}</Pill>{" "}
+                    <span style={{ color: C.muted }}>wanted by {teamName(w.teamId)}</span>
+                    {w.notes && <div style={{ color: C.text, marginTop: 2 }}>{w.notes}</div>}
+                  </div>
+                  <div className="flex items-center gap-2">
+                    {w.teamId === myTeamId ? (
+                      <Btn size="sm" variant="outline" icon={Trash2} onClick={() => doRemoveWanted(w.id)}>Remove</Btn>
+                    ) : (
+                      <Btn size="sm" onClick={() => setMessaging(messaging === w.id ? null : w.id)}>Message Them</Btn>
+                    )}
+                  </div>
+                </div>
+                {messaging === w.id && (
+                  <div className="flex items-end gap-2 flex-wrap" style={{ marginTop: 10 }}>
+                    <Field label="Message"><TextInput value={messageText} onChange={(e) => setMessageText(e.target.value)} style={{ width: 280 }} /></Field>
+                    <Btn size="sm" icon={Send} onClick={() => sendWantedMessage(w)}>Send</Btn>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </Panel>
+    </div>
+  );
+}
+
+function TransfersTab({ teams, squads, transfers, logTransfer, logAdminReward, setTransfers, auctions, createAuction, placeBid, finalizeAuction, respondToAuction, deleteBid, deleteTransfer, editAuctionPlayerName, nowTick, myTeamId, playerDatabase, transferListings, wantedListings, addTransferListing, removeTransferListing, addWantedListing, removeWantedListing, sendMarketMessage }) {
   const [deletingId, setDeletingId] = useState(null);
   const [deletePin, setDeletePin] = useState("");
   const [deleteErr, setDeleteErr] = useState("");
@@ -2552,6 +2866,12 @@ function TransfersTab({ teams, squads, transfers, logTransfer, logAdminReward, s
         placeBid={placeBid} finalizeAuction={finalizeAuction} respondToAuction={respondToAuction}
         deleteBid={deleteBid} editAuctionPlayerName={editAuctionPlayerName} myTeamId={myTeamId}
         playerDatabase={playerDatabase} />
+
+      <PlayerMarket teams={teams} squads={squads} myTeamId={myTeamId}
+        transferListings={transferListings} wantedListings={wantedListings}
+        addTransferListing={addTransferListing} removeTransferListing={removeTransferListing}
+        addWantedListing={addWantedListing} removeWantedListing={removeWantedListing}
+        sendMarketMessage={sendMarketMessage} />
 
       <Panel style={{ padding: 18 }}>
         <SectionTitle icon={Repeat}>Transfer History</SectionTitle>
