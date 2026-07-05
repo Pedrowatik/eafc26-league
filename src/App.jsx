@@ -301,6 +301,8 @@ export default function EafcLeagueApp() {
   const [chat, setChat] = useState([]);
   const [playerDatabase, setPlayerDatabase] = useState([]); // imported from CM Tracker/Sofifa for autocomplete
   const [claimedTeams, setClaimedTeams] = useState({}); // { [teamId]: true } — which teams are already picked by someone
+  const [injuries, setInjuries] = useState({}); // { [teamId]: { [playerName]: lastInjuredMatchday } }
+  const [teamLockOverride, setTeamLockOverride] = useState(false); // admin toggle to allow re-picks mid-season
   const [chatLastSeen, setChatLastSeen] = useState(0); // personal — timestamp of last time this device checked chat
   const [mentionToasts, setMentionToasts] = useState([]); // ephemeral "flash" alerts for @team mentions
   const [myTeamId, setMyTeamId] = useState(null); // personal — which team is "me" on this device
@@ -331,6 +333,8 @@ export default function EafcLeagueApp() {
     if (data.chat) setChat(data.chat);
     if (data.playerDatabase) setPlayerDatabase(data.playerDatabase);
     if (data.claimedTeams) setClaimedTeams(data.claimedTeams);
+    if (data.injuries) setInjuries(data.injuries);
+    if (data.teamLockOverride !== undefined) setTeamLockOverride(data.teamLockOverride);
   }, []);
 
   // load once
@@ -372,7 +376,7 @@ export default function EafcLeagueApp() {
         const savedAt = Date.now();
         await storage.set(
           STORAGE_KEY,
-          JSON.stringify({ teams, squads, transfers, fixtures, prizes, events, auctions, adminPin, season, seasonHistory, activity, chat, playerDatabase, claimedTeams, savedAt }),
+          JSON.stringify({ teams, squads, transfers, fixtures, prizes, events, auctions, adminPin, season, seasonHistory, activity, chat, playerDatabase, claimedTeams, injuries, teamLockOverride, savedAt }),
           true
         );
         knownSavedAtRef.current = savedAt;
@@ -383,7 +387,7 @@ export default function EafcLeagueApp() {
       }
     }, 500);
     return () => clearTimeout(t);
-  }, [teams, squads, transfers, fixtures, prizes, events, auctions, adminPin, season, seasonHistory, activity, chat, playerDatabase, claimedTeams, loaded]);
+  }, [teams, squads, transfers, fixtures, prizes, events, auctions, adminPin, season, seasonHistory, activity, chat, playerDatabase, claimedTeams, injuries, teamLockOverride, loaded]);
 
   // live sync: poll for other people's changes and pull them in automatically. Skipped while we
   // have our own unsaved edit in flight, so we don't clobber it with a slightly stale copy.
@@ -435,6 +439,9 @@ export default function EafcLeagueApp() {
   }, [loaded, applyRemoteData]);
 
   const chooseMyTeam = async (teamId) => {
+    if (myTeamId && teamId !== myTeamId && !allMatchdaysComplete && !teamLockOverride) {
+      return "You've already picked your team for this season — that's locked in until all matchdays are complete (or an admin unlocks it).";
+    }
     if (teamId && claimedTeams[teamId] && teamId !== myTeamId) {
       return "That team's already been picked by someone else.";
     }
@@ -594,10 +601,10 @@ export default function EafcLeagueApp() {
     const out = {};
     for (const t of teams) {
       const boughtFromOthers = transfers.filter(
-        (tx) => tx.to === t.id && tx.from !== t.id && nowTick - (tx.createdAt || 0) >= BUYER_RATIFY_MS
+        (tx) => tx.to === t.id && tx.from !== t.id && (tx.instant || nowTick - (tx.createdAt || 0) >= BUYER_RATIFY_MS)
       );
       const soldToOthersOrFA = transfers.filter(
-        (tx) => tx.from === t.id && tx.to !== t.id && nowTick - (tx.createdAt || 0) >= SELLER_CREDIT_MS
+        (tx) => tx.from === t.id && tx.to !== t.id && (tx.instant || nowTick - (tx.createdAt || 0) >= SELLER_CREDIT_MS)
       );
       const spent = boughtFromOthers.reduce((s, tx) => s + Number(tx.price || 0), 0);
       const tax = boughtFromOthers.reduce((s, tx) => s + Number(tx.tax || 0), 0);
@@ -626,6 +633,11 @@ export default function EafcLeagueApp() {
     return out;
   }, [teams, transfers, teamById, squadStats, auctions, nowTick]);
 
+  const allMatchdaysComplete = useMemo(
+    () => fixtures.length > 0 && fixtures.every((f) => f.score1 !== "" && f.score1 != null && f.score2 !== "" && f.score2 != null),
+    [fixtures]
+  );
+
   const standings = useMemo(() => {
     const rows = teams.map((t) => ({ id: t.id, w: 0, d: 0, l: 0, gf: 0, ga: 0, played: 0 }));
     const byId = Object.fromEntries(rows.map((r) => [r.id, r]));
@@ -652,7 +664,7 @@ export default function EafcLeagueApp() {
 
   const taxCollected = useMemo(
     () => transfers
-      .filter((tx) => nowTick - (tx.createdAt || 0) >= BUYER_RATIFY_MS)
+      .filter((tx) => tx.instant || nowTick - (tx.createdAt || 0) >= BUYER_RATIFY_MS)
       .reduce((s, tx) => s + Number(tx.tax || 0), 0),
     [transfers, nowTick]
   );
@@ -695,7 +707,41 @@ export default function EafcLeagueApp() {
     });
   };
 
-  const logTransfer = (form) => {
+  // Randomly sidelines 0-3 players per team for this fixture (mostly 1-3 matchdays, rarely 4).
+  // One-time per fixture — either team can trigger it, and it has to happen before a result can
+  // be entered, so injured players are correctly excluded from the match stats player list.
+  const generateInjuries = (fixture) => {
+    if (fixture.injuriesGenerated) return "Injuries have already been generated for this fixture.";
+    const pickDuration = () => {
+      const r = Math.random();
+      if (r < 0.40) return 1;
+      if (r < 0.70) return 2;
+      if (r < 0.90) return 3;
+      return 4; // rare
+    };
+
+    setInjuries((prev) => {
+      const next = { ...prev };
+      [fixture.team1, fixture.team2].forEach((teamId) => {
+        const squadPlayers = [...(squads[teamId]?.starters || []), ...(squads[teamId]?.reserves || [])].filter(Boolean);
+        const teamInjuries = { ...(next[teamId] || {}) };
+        const eligible = squadPlayers.filter((p) => !(teamInjuries[p.name] >= fixture.matchday));
+        const count = Math.floor(Math.random() * 4); // 0, 1, 2, or 3
+        const shuffled = [...eligible].sort(() => Math.random() - 0.5).slice(0, count);
+        shuffled.forEach((p) => {
+          teamInjuries[p.name] = fixture.matchday + pickDuration() - 1;
+        });
+        next[teamId] = teamInjuries;
+      });
+      return next;
+    });
+
+    setFixtures((all) => all.map((f) => (f.id === fixture.id ? { ...f, injuriesGenerated: true } : f)));
+    return null;
+  };
+
+  const logTransfer = (form, options = {}) => {
+    const instant = !!options.instant;
     const price = Number(form.price) || 0;
     const tax = price > 0 ? Math.max(price * 0.1, 0.25) : 0;
     const record = {
@@ -713,23 +759,55 @@ export default function EafcLeagueApp() {
       finalCost: +(price + tax).toFixed(3),
       notes: form.notes || "",
       createdAt: Date.now(),
-      sellerProcessed: false,
-      buyerProcessed: false,
+      sellerProcessed: instant,
+      buyerProcessed: instant,
+      instant,
     };
     setTransfers((tx) => [record, ...tx]);
+
+    // Admin rewards apply immediately rather than waiting on the normal 12h/24h ratification —
+    // move the player between squads right now instead of leaving it to the background processor.
+    if (instant) {
+      setSquads((all) => {
+        let next = all;
+        if (teamById[form.from]) {
+          next = {
+            ...next,
+            [form.from]: {
+              starters: next[form.from].starters.map((p) => (p && p.name === form.name ? null : p)),
+              reserves: next[form.from].reserves.map((p) => (p && p.name === form.name ? null : p)),
+            },
+          };
+        }
+        if (teamById[form.to]) {
+          const team = next[form.to];
+          const si = team.starters.findIndex((p) => !p);
+          const group = si !== -1 ? "starters" : (team.reserves.findIndex((p) => !p) !== -1 ? "reserves" : null);
+          if (group) {
+            const idx = group === "starters" ? si : team.reserves.findIndex((p) => !p);
+            const playerObj = { name: form.name, position: form.position, rating: Number(form.rating) || 0, club: form.club, age: Number(form.age) || 0, value: price, wage: Number(form.wage) || 0 };
+            next = { ...next, [form.to]: { ...next[form.to], [group]: [...next[form.to][group]] } };
+            next[form.to][group][idx] = playerObj;
+          }
+        }
+        return next;
+      });
+    }
+
     const fromName = form.from === "FA" ? "Non OCM" : teamById[form.from]?.name || form.from;
     const toName = form.to === "FA" ? "Non OCM" : teamById[form.to]?.name || form.to;
-    logActivity(`Transfer logged: ${form.name} — ${fromName} → ${toName} (${money(price)})`, "transfer");
+    logActivity(`Transfer confirmed: ${form.name} — ${fromName} → ${toName} (${money(price)})`, "transfer");
     return null;
   };
 
   // Admin-only: the "Instant Transfer" tool is for player rewards / manual awards outside the
   // normal bidding process (no competing bids), so it's PIN-gated rather than open to everyone.
+  // Unlike normal transfers, this applies immediately — no 12h/24h wait.
   const logAdminReward = (pinAttempt, form) => {
     if (pinAttempt !== adminPin) return "Incorrect PIN.";
     if (!form.name || !form.name.trim()) return "Enter a player name.";
     if (form.from === form.to) return "From and To can't be the same team.";
-    return logTransfer(form);
+    return logTransfer(form, { instant: true });
   };
 
   const AUCTION_DURATION_MS = 24 * 60 * 60 * 1000;
@@ -1084,6 +1162,14 @@ export default function EafcLeagueApp() {
     return null;
   };
 
+  // Overrides the "locked once picked" rule for Which Team Am I, letting everyone freely re-pick
+  // mid-season if needed (e.g. correcting a mistake, or reshuffling managers).
+  const toggleTeamLockOverride = (pinAttempt) => {
+    if (pinAttempt !== adminPin) return "Incorrect PIN.";
+    setTeamLockOverride((v) => !v);
+    return null;
+  };
+
   /* --------------------------------- render --------------------------------- */
   const TABS = [
     { id: "dashboard", label: "Dashboard", icon: Home },
@@ -1207,7 +1293,7 @@ export default function EafcLeagueApp() {
         )}
         {tab === "fixtures" && (
           <FixturesTab teams={teams} fixtures={fixtures} setFixtures={setFixtures} logActivity={logActivity}
-            myTeamId={myTeamId} squads={squads} />
+            myTeamId={myTeamId} squads={squads} injuries={injuries} generateInjuries={generateInjuries} />
         )}
         {tab === "standings" && (
           <StandingsTab teams={teams} standings={standings} />
@@ -1229,7 +1315,8 @@ export default function EafcLeagueApp() {
             addFundsToTeam={addFundsToTeam} addEarned86Slot={addEarned86Slot}
             exportBackup={exportBackup} restoreBackup={restoreBackup} restoreFromNightlyBackup={restoreFromNightlyBackup}
             endSeason={endSeason} season={season} seasonHistory={seasonHistory} standings={standings}
-            importPlayerDatabase={importPlayerDatabase} clearPlayerDatabase={clearPlayerDatabase} />
+            importPlayerDatabase={importPlayerDatabase} clearPlayerDatabase={clearPlayerDatabase}
+            teamLockOverride={teamLockOverride} toggleTeamLockOverride={toggleTeamLockOverride} />
         )}
       </div>
 
@@ -2391,7 +2478,7 @@ function TransfersTab({ teams, squads, transfers, logTransfer, logAdminReward, s
 }
 
 /* -------------------------------- Fixtures ---------------------------------- */
-function MatchStatsPanel({ team1Name, team2Name, team1Players, team2Players, resultForm, togglePlayed, updateStat, setMotm, error }) {
+function MatchStatsPanel({ team1Name, team2Name, team1Players, team2Players, team1Injured, team2Injured, resultForm, togglePlayed, updateStat, setMotm, error }) {
   const playedList = (side, players) => players.filter((p) => resultForm[side][p.name]?.played);
   const motmOptions = [
     ...playedList("team1Stats", team1Players).map((p) => ({ name: p.name, team: team1Name })),
@@ -2450,6 +2537,13 @@ function MatchStatsPanel({ team1Name, team2Name, team1Players, team2Players, res
   return (
     <div style={{ background: C.panelAlt, border: `1px solid ${C.gold}55`, borderRadius: 10, padding: 14, marginTop: 6 }}>
       <div style={{ color: C.text, fontWeight: 700, fontSize: 13, marginBottom: 10 }}>Match Stats — required before saving</div>
+      {(team1Injured?.length > 0 || team2Injured?.length > 0) && (
+        <div style={{ color: C.red, fontSize: 11.5, marginBottom: 10, lineHeight: 1.5 }}>
+          Unavailable through injury: {team1Injured?.length > 0 && <span>{team1Name} — {team1Injured.join(", ")}</span>}
+          {team1Injured?.length > 0 && team2Injured?.length > 0 && "; "}
+          {team2Injured?.length > 0 && <span>{team2Name} — {team2Injured.join(", ")}</span>}
+        </div>
+      )}
       <div className="grid gap-3" style={{ gridTemplateColumns: "1fr 1fr" }}>
         <TeamStatBlock side="team1Stats" teamName={team1Name} players={team1Players} />
         <TeamStatBlock side="team2Stats" teamName={team2Name} players={team2Players} />
@@ -2467,7 +2561,32 @@ function MatchStatsPanel({ team1Name, team2Name, team1Players, team2Players, res
   );
 }
 
-function FixturesTab({ teams, fixtures, setFixtures, logActivity, myTeamId, squads }) {
+// Standard "circle method" round-robin: everyone plays everyone once per leg, home/away
+// alternating fairly. doubleRound repeats it with fixtures reversed for a second half.
+function generateRoundRobin(teamIds, doubleRound) {
+  let arr = [...teamIds];
+  if (arr.length % 2 !== 0) arr.push(null); // odd team count gets a "bye" each round
+  const n = arr.length;
+  const rounds = n - 1;
+  const half = n / 2;
+  const legs = [];
+  for (let r = 0; r < rounds; r++) {
+    const round = [];
+    for (let i = 0; i < half; i++) {
+      const a = arr[i], b = arr[n - 1 - i];
+      if (a !== null && b !== null) round.push(r % 2 === 0 ? [a, b] : [b, a]);
+    }
+    legs.push(round);
+    arr = [arr[0], arr[n - 1], ...arr.slice(1, n - 1)];
+  }
+  if (doubleRound) {
+    const secondLeg = legs.map((round) => round.map(([h, a]) => [a, h]));
+    return [...legs, ...secondLeg];
+  }
+  return legs;
+}
+
+function FixturesTab({ teams, fixtures, setFixtures, logActivity, myTeamId, squads, injuries, generateInjuries }) {
   const blank = { matchday: 1, team1: myTeamId || teams[0].id, team2: teams.find((t) => t.id !== myTeamId)?.id || teams[1].id, date: todayISO(), proof: "" };
   const [form, setForm] = useState(blank);
   const [warning, setWarning] = useState("");
@@ -2485,13 +2604,41 @@ function FixturesTab({ teams, fixtures, setFixtures, logActivity, myTeamId, squa
     setForm({ ...blank, matchday: Number(form.matchday) + 0 });
   };
 
+  const generateSchedule = (doubleRound) => {
+    const msg = doubleRound
+      ? "Generate a full home-and-away season schedule? This replaces every fixture currently in the list."
+      : "Generate a single round (everyone plays everyone once)? This replaces every fixture currently in the list.";
+    if (!window.confirm(msg)) return;
+    const legs = generateRoundRobin(teams.map((t) => t.id), doubleRound);
+    const generated = [];
+    legs.forEach((round, i) => {
+      round.forEach(([team1, team2]) => {
+        generated.push({
+          id: uid(), matchday: i + 1, team1, team2, date: todayISO(),
+          score1: "", score2: "", proof: "", hasProofImage: false,
+        });
+      });
+    });
+    setFixtures(generated);
+  };
+
   const squadPlayersFor = (teamId) => [...(squads[teamId]?.starters || []), ...(squads[teamId]?.reserves || [])].filter(Boolean);
+
+  const injuredNamesFor = (teamId, matchday) => {
+    const teamInjuries = injuries[teamId] || {};
+    return new Set(Object.entries(teamInjuries).filter(([, until]) => until >= matchday).map(([name]) => name));
+  };
+
+  const eligiblePlayersFor = (teamId, matchday) => {
+    const hurt = injuredNamesFor(teamId, matchday);
+    return squadPlayersFor(teamId).filter((p) => !hurt.has(p.name));
+  };
 
   const startResult = (f) => {
     setEnteringResultFor(f.id);
     setResultError("");
     const blankPlayerStats = (teamId) => Object.fromEntries(
-      squadPlayersFor(teamId).map((p) => [p.name, { played: false, goals: 0, assists: 0, yellow: false, red: false }])
+      eligiblePlayersFor(teamId, f.matchday).map((p) => [p.name, { played: false, goals: 0, assists: 0, yellow: false, red: false }])
     );
     setResultForm({
       score1: "", score2: "",
@@ -2515,6 +2662,20 @@ function FixturesTab({ teams, fixtures, setFixtures, logActivity, myTeamId, squa
     }));
   };
 
+  const buildResultSummary = (t1, t2, score1, score2, matchday, stats) => {
+    const all = [...stats.team1, ...stats.team2];
+    const scorers = all.filter((p) => p.goals > 0).map((p) => (p.goals > 1 ? `${p.name} x${p.goals}` : p.name));
+    const assisters = all.filter((p) => p.assists > 0).map((p) => (p.assists > 1 ? `${p.name} x${p.assists}` : p.name));
+    const yellows = all.filter((p) => p.yellow).map((p) => p.name);
+    const reds = all.filter((p) => p.red).map((p) => p.name);
+    const parts = [`Result: ${t1} ${score1} – ${score2} ${t2} (MD${matchday})`];
+    if (scorers.length) parts.push(`⚽ ${scorers.join(", ")}`);
+    if (assisters.length) parts.push(`🅰 ${assisters.join(", ")}`);
+    if (yellows.length) parts.push(`🟨 ${yellows.join(", ")}`);
+    if (reds.length) parts.push(`🟥 ${reds.join(", ")}`);
+    return parts.join("  ·  ");
+  };
+
   const saveResult = (f) => {
     if (resultForm.score1 === "" || resultForm.score2 === "") { setResultError("Enter both scores."); return; }
     const team1Played = Object.entries(resultForm.team1Stats).filter(([, s]) => s.played);
@@ -2530,7 +2691,7 @@ function FixturesTab({ teams, fixtures, setFixtures, logActivity, myTeamId, squa
     };
     setFixtures((all) => all.map((x) => (x.id === f.id ? { ...x, score1: resultForm.score1, score2: resultForm.score2, stats } : x)));
     const t1 = teams.find((t) => t.id === f.team1)?.name, t2 = teams.find((t) => t.id === f.team2)?.name;
-    logActivity(`Result: ${t1} ${resultForm.score1} – ${resultForm.score2} ${t2} (Matchday ${f.matchday})`, "fixture");
+    logActivity(buildResultSummary(t1, t2, resultForm.score1, resultForm.score2, f.matchday, stats), "fixture");
     setEnteringResultFor(null);
     setResultForm(null);
   };
@@ -2562,6 +2723,18 @@ function FixturesTab({ teams, fixtures, setFixtures, logActivity, myTeamId, squa
   return (
     <div className="grid gap-4">
       <Panel style={{ padding: 18 }}>
+        <SectionTitle icon={CalendarClock}>Auto-Draft Season Schedule</SectionTitle>
+        <div style={{ color: C.muted, fontSize: 11.5, marginBottom: 12 }}>
+          Generates a full round-robin fixture list automatically — every team plays every other team.
+          This replaces whatever's currently in the Fixture List below, so use it before posting anything manually.
+        </div>
+        <div className="flex items-center gap-2 flex-wrap">
+          <Btn icon={Plus} onClick={() => generateSchedule(false)}>Single round (play once)</Btn>
+          <Btn icon={Plus} onClick={() => generateSchedule(true)}>Home & away (play twice)</Btn>
+        </div>
+      </Panel>
+
+      <Panel style={{ padding: 18 }}>
         <SectionTitle icon={Swords}>Post a Fixture</SectionTitle>
         <div style={{ color: C.muted, fontSize: 11.5, marginBottom: 12 }}>
           Post the fixture first — add the score afterward once the match has actually been played,
@@ -2579,7 +2752,6 @@ function FixturesTab({ teams, fixtures, setFixtures, logActivity, myTeamId, squa
               {teams.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
             </Select>
           </Field>
-          <Field label="Date"><TextInput type="date" value={form.date} onChange={(e) => setForm((f) => ({ ...f, date: e.target.value }))} /></Field>
         </div>
         <div style={{ marginTop: 14 }}>
           <Btn icon={Plus} onClick={add}>Post fixture</Btn>
@@ -2663,6 +2835,8 @@ function FixturesTab({ teams, fixtures, setFixtures, logActivity, myTeamId, squa
                             <button onClick={() => saveResult(f)} title="Save result" style={{ background: "transparent", border: "none", cursor: "pointer", color: C.green }}><Check size={15} /></button>
                             <button onClick={() => { setEnteringResultFor(null); setResultForm(null); }} title="Cancel" style={{ background: "transparent", border: "none", cursor: "pointer", color: C.muted }}><X size={15} /></button>
                           </>
+                        ) : !played && !f.injuriesGenerated ? (
+                          <Btn size="sm" variant="outline" onClick={() => generateInjuries(f)}>Generate Injuries</Btn>
                         ) : !played ? (
                           <Btn size="sm" variant="outline" onClick={() => startResult(f)}>Add Result</Btn>
                         ) : f.stats ? (
@@ -2679,7 +2853,8 @@ function FixturesTab({ teams, fixtures, setFixtures, logActivity, myTeamId, squa
                       <td colSpan={8} style={{ padding: "0 8px 14px" }}>
                         <MatchStatsPanel
                           team1Name={t1} team2Name={t2}
-                          team1Players={squadPlayersFor(f.team1)} team2Players={squadPlayersFor(f.team2)}
+                          team1Players={eligiblePlayersFor(f.team1, f.matchday)} team2Players={eligiblePlayersFor(f.team2, f.matchday)}
+                          team1Injured={[...injuredNamesFor(f.team1, f.matchday)]} team2Injured={[...injuredNamesFor(f.team2, f.matchday)]}
                           resultForm={resultForm} togglePlayed={togglePlayed} updateStat={updateStat}
                           setMotm={(name) => setResultForm((r) => ({ ...r, motm: name }))}
                           error={resultError}
@@ -2949,7 +3124,7 @@ function RulesTab({ teams, standings }) {
   );
 }
 
-function AdminTab({ teams, squads, myTeamId, playerDatabase, adminPin, logAdminReward, resetAll, changeAdminPin, addFundsToTeam, addEarned86Slot, exportBackup, restoreBackup, restoreFromNightlyBackup, endSeason, season, seasonHistory, standings, importPlayerDatabase, clearPlayerDatabase }) {
+function AdminTab({ teams, squads, myTeamId, playerDatabase, adminPin, logAdminReward, resetAll, changeAdminPin, addFundsToTeam, addEarned86Slot, exportBackup, restoreBackup, restoreFromNightlyBackup, endSeason, season, seasonHistory, standings, importPlayerDatabase, clearPlayerDatabase, teamLockOverride, toggleTeamLockOverride }) {
   const [unlocked, setUnlocked] = useState(false);
   const [pinInput, setPinInput] = useState("");
   const [err, setErr] = useState("");
@@ -2989,7 +3164,8 @@ function AdminTab({ teams, squads, myTeamId, playerDatabase, adminPin, logAdminR
       <EndSeasonTools endSeason={endSeason} season={season} seasonHistory={seasonHistory} standings={standings} teams={teams} />
 
       <AdminTools teams={teams} resetAll={resetAll} changeAdminPin={changeAdminPin}
-        addFundsToTeam={addFundsToTeam} addEarned86Slot={addEarned86Slot} />
+        addFundsToTeam={addFundsToTeam} addEarned86Slot={addEarned86Slot}
+        teamLockOverride={teamLockOverride} toggleTeamLockOverride={toggleTeamLockOverride} />
     </div>
   );
 }
@@ -3534,7 +3710,7 @@ function EndSeasonTools({ endSeason, season, seasonHistory, standings, teams }) 
   );
 }
 
-function AdminTools({ teams, resetAll, changeAdminPin, addFundsToTeam, addEarned86Slot }) {
+function AdminTools({ teams, resetAll, changeAdminPin, addFundsToTeam, addEarned86Slot, teamLockOverride, toggleTeamLockOverride }) {
   const [pin, setPin] = useState("");
   const [msg, setMsg] = useState(null); // { text, tone }
   const [showChangePin, setShowChangePin] = useState(false);
@@ -3654,6 +3830,21 @@ function AdminTools({ teams, resetAll, changeAdminPin, addFundsToTeam, addEarned
             <Btn icon={Unlock} onClick={doChangePin}>Save new PIN</Btn>
           </div>
         )}
+      </div>
+
+      {/* Team-pick lock override */}
+      <div style={{ paddingTop: 18, marginTop: 18, borderTop: `1px solid ${C.border}` }}>
+        <div style={{ color: C.text, fontWeight: 700, fontSize: 13, marginBottom: 6 }}>Team Selection Lock</div>
+        <div style={{ color: C.muted, fontSize: 11.5, marginBottom: 10 }}>
+          Once someone picks their team in "Which team am I?", it's locked in until every matchday has a result —
+          that's the normal rule. Turn this on to let everyone freely re-pick in the meantime (e.g. fixing a mistake,
+          swapping managers mid-season). Currently:{" "}
+          <b style={{ color: teamLockOverride ? C.red : C.green }}>{teamLockOverride ? "Unlocked for everyone" : "Locked as normal"}</b>
+        </div>
+        <Btn variant={teamLockOverride ? "danger" : "outline"} icon={teamLockOverride ? Lock : Unlock}
+          onClick={() => { const e = toggleTeamLockOverride(pin); if (e) show(e, "red"); else show(teamLockOverride ? "Team selection re-locked." : "Team selection unlocked for everyone.", "green"); }}>
+          {teamLockOverride ? "Re-lock team selection" : "Unlock team selection"}
+        </Btn>
       </div>
 
       {msg && (
