@@ -132,6 +132,7 @@ const POSITIONS = ["GK", "CB", "LB", "RB", "LWB", "RWB", "CDM", "CM", "CAM", "LM
 const STORAGE_KEY = "eafc26-league-state-v1";
 const MY_TEAM_KEY = "eafc26-my-team"; // personal, per-device — not shared
 const CHAT_SEEN_KEY = "eafc26-chat-last-seen"; // personal — for the unread-mentions badge
+const DM_SEEN_KEY = "eafc26-dm-last-seen"; // personal — per-conversation read timestamps
 const NIGHTLY_BACKUP_PREFIX = "eafc26-nightly-backup-"; // written by the scheduled Edge Function
 
 /* ------------------------------- small UI -------------------------------- */
@@ -308,6 +309,8 @@ export default function EafcLeagueApp() {
   const [suspensions, setSuspensions] = useState({}); // { [teamId]: { [playerName]: true } } — cleared once that team completes one more fixture
   const [transferListings, setTransferListings] = useState([]); // players a team has put up for sale
   const [wantedListings, setWantedListings] = useState([]); // "looking for" ads posted by a team
+  const [privateMessages, setPrivateMessages] = useState([]); // { id, conversationId, fromTeamId, toTeamId, text, time }
+  const [dmLastSeen, setDmLastSeen] = useState({}); // personal — { [conversationId]: timestamp }
   const [chatLastSeen, setChatLastSeen] = useState(0); // personal — timestamp of last time this device checked chat
   const [mentionToasts, setMentionToasts] = useState([]); // ephemeral "flash" alerts for @team mentions
   const [myTeamId, setMyTeamId] = useState(null); // personal — which team is "me" on this device
@@ -344,6 +347,7 @@ export default function EafcLeagueApp() {
     if (data.suspensions) setSuspensions(data.suspensions);
     if (data.transferListings) setTransferListings(data.transferListings);
     if (data.wantedListings) setWantedListings(data.wantedListings);
+    if (data.privateMessages) setPrivateMessages(data.privateMessages);
   }, []);
 
   // load once
@@ -372,6 +376,12 @@ export default function EafcLeagueApp() {
       } catch (e) {
         // never checked chat yet
       }
+      try {
+        const dmSeen = await storage.get(DM_SEEN_KEY, false);
+        if (dmSeen && dmSeen.value) setDmLastSeen(JSON.parse(dmSeen.value));
+      } catch (e) {
+        // no DMs checked yet
+      }
       setLoaded(true);
     })();
   }, [applyRemoteData]);
@@ -385,7 +395,7 @@ export default function EafcLeagueApp() {
         const savedAt = Date.now();
         await storage.set(
           STORAGE_KEY,
-          JSON.stringify({ teams, squads, transfers, fixtures, prizes, events, auctions, adminPin, season, seasonHistory, activity, chat, playerDatabase, claimedTeams, injuries, teamLockOverride, cardTally, suspensions, transferListings, wantedListings, savedAt }),
+          JSON.stringify({ teams, squads, transfers, fixtures, prizes, events, auctions, adminPin, season, seasonHistory, activity, chat, playerDatabase, claimedTeams, injuries, teamLockOverride, cardTally, suspensions, transferListings, wantedListings, privateMessages, savedAt }),
           true
         );
         knownSavedAtRef.current = savedAt;
@@ -396,7 +406,7 @@ export default function EafcLeagueApp() {
       }
     }, 500);
     return () => clearTimeout(t);
-  }, [teams, squads, transfers, fixtures, prizes, events, auctions, adminPin, season, seasonHistory, activity, chat, playerDatabase, claimedTeams, injuries, teamLockOverride, cardTally, suspensions, transferListings, wantedListings, loaded]);
+  }, [teams, squads, transfers, fixtures, prizes, events, auctions, adminPin, season, seasonHistory, activity, chat, playerDatabase, claimedTeams, injuries, teamLockOverride, cardTally, suspensions, transferListings, wantedListings, privateMessages, loaded]);
 
   // live sync: poll for other people's changes and pull them in automatically. Skipped while we
   // have our own unsaved edit in flight, so we don't clobber it with a slightly stale copy.
@@ -505,6 +515,35 @@ export default function EafcLeagueApp() {
   }, [chat, loaded, myTeamId]);
 
   const dismissToast = (id) => setMentionToasts((all) => all.filter((t) => t.id !== id));
+
+  const unreadConversations = useMemo(() => {
+    if (!myTeamId) return [];
+    const mine = privateMessages.filter((m) => m.toTeamId === myTeamId || m.fromTeamId === myTeamId);
+    const byConversation = {};
+    mine.forEach((m) => {
+      if (!byConversation[m.conversationId]) byConversation[m.conversationId] = [];
+      byConversation[m.conversationId].push(m);
+    });
+    return Object.entries(byConversation).filter(([cid, msgs]) => {
+      const lastSeen = dmLastSeen[cid] || 0;
+      return msgs.some((m) => m.toTeamId === myTeamId && m.time > lastSeen);
+    });
+  }, [privateMessages, myTeamId, dmLastSeen]);
+
+  // Flash a toast the moment a new private message arrives, same pattern as chat mentions above.
+  const seenDmIdsRef = useRef(null);
+  useEffect(() => {
+    if (!loaded) return;
+    if (seenDmIdsRef.current === null) {
+      seenDmIdsRef.current = new Set(privateMessages.map((m) => m.id));
+      return;
+    }
+    const fresh = privateMessages.filter((m) => !seenDmIdsRef.current.has(m.id) && m.toTeamId === myTeamId);
+    privateMessages.forEach((m) => seenDmIdsRef.current.add(m.id));
+    if (fresh.length > 0 && myTeamId) {
+      setMentionToasts((all) => [...all, ...fresh.map((m) => ({ id: uid(), text: m.text, author: teamById[m.fromTeamId]?.name || "Someone", isDm: true, fromTeamId: m.fromTeamId }))]);
+    }
+  }, [privateMessages, loaded, myTeamId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (mentionToasts.length === 0) return;
@@ -1234,15 +1273,28 @@ export default function EafcLeagueApp() {
     return null;
   };
 
-  // Offers/interest don't have their own private inbox — they post a tagged chat message instead,
-  // reusing the same @team notification (badge + toast) that League Chat already has. Not a truly
-  // private DM, but it reaches the right team and starts a visible thread either side can reply to.
-  const sendMarketMessage = (toTeamId, text) => {
-    if (!myTeamId) return "Pick your team first (top right) before contacting another team.";
-    const mine = teamById[myTeamId];
-    setChat((c) => [...c, { id: uid(), author: mine?.name || "Anonymous", text, time: Date.now(), taggedTeam: toTeamId }]);
+  /* ------------------------------- private messages ------------------------------- */
+  const conversationIdFor = (teamA, teamB) => [teamA, teamB].sort().join("::");
+
+  const sendPrivateMessage = (toTeamId, text) => {
+    if (!myTeamId) return "Pick your team first (top right) before messaging another team.";
+    if (!text || !text.trim()) return "Enter a message.";
+    if (toTeamId === myTeamId) return "You can't message yourself.";
+    setPrivateMessages((all) => [...all, {
+      id: uid(), conversationId: conversationIdFor(myTeamId, toTeamId),
+      fromTeamId: myTeamId, toTeamId, text: text.trim(), time: Date.now(),
+    }]);
     return null;
   };
+
+  const markConversationSeen = useCallback(async (conversationId) => {
+    const next = { ...dmLastSeen, [conversationId]: Date.now() };
+    setDmLastSeen(next);
+    try { await storage.set(DM_SEEN_KEY, JSON.stringify(next), false); } catch (e) { /* best effort */ }
+  }, [dmLastSeen]);
+
+  // Market offers/interest now send a real private message instead of a tagged public chat post.
+  const sendMarketMessage = (toTeamId, text) => sendPrivateMessage(toTeamId, text);
 
   /* --------------------------------- render --------------------------------- */
   const TABS = [
@@ -1254,6 +1306,7 @@ export default function EafcLeagueApp() {
     { id: "standings", label: "Standings", icon: Trophy },
     { id: "prizes", label: "Prize Pool", icon: Coins },
     { id: "chat", label: "League Chat", icon: MessageCircle },
+    { id: "messages", label: "Messages", icon: Send },
     { id: "rules", label: "Rules", icon: BookOpen },
     { id: "admin", label: "Admin", icon: Lock },
   ];
@@ -1339,6 +1392,15 @@ export default function EafcLeagueApp() {
                     {unreadMentions.length}
                   </span>
                 )}
+                {t.id === "messages" && unreadConversations.length > 0 && (
+                  <span style={{
+                    position: "absolute", top: 6, right: 4, background: C.red, color: "#fff",
+                    borderRadius: 999, fontSize: 10, fontWeight: 700, minWidth: 16, height: 16,
+                    display: "flex", alignItems: "center", justifyContent: "center", padding: "0 4px",
+                  }}>
+                    {unreadConversations.length}
+                  </span>
+                )}
               </button>
             );
           })}
@@ -1384,6 +1446,11 @@ export default function EafcLeagueApp() {
         {tab === "chat" && (
           <ChatTab chat={chat} setChat={setChat} teams={teams} myTeamId={myTeamId} markChatSeen={markChatSeen} />
         )}
+        {tab === "messages" && (
+          <MessagesTab teams={teams} myTeamId={myTeamId} privateMessages={privateMessages}
+            sendPrivateMessage={sendPrivateMessage} dmLastSeen={dmLastSeen} markConversationSeen={markConversationSeen}
+            conversationIdFor={conversationIdFor} />
+        )}
         {tab === "rules" && (
           <RulesTab teams={teams} standings={standings} />
         )}
@@ -1414,10 +1481,14 @@ export default function EafcLeagueApp() {
             <div key={t.id} className="flex items-start gap-2" style={{
               background: "#0d1a2e", border: `1px solid ${C.gold}`, borderRadius: 8, padding: "12px 14px",
               boxShadow: "0 12px 32px rgba(0,0,0,0.5)", cursor: "pointer",
-            }} onClick={() => { setTab("chat"); markChatSeen(); dismissToast(t.id); }}>
+            }} onClick={() => {
+              if (t.isDm) { setTab("messages"); markConversationSeen(conversationIdFor(myTeamId, t.fromTeamId)); }
+              else { setTab("chat"); markChatSeen(); }
+              dismissToast(t.id);
+            }}>
               <MessageCircle size={16} color={C.gold} style={{ marginTop: 2, flexShrink: 0 }} />
               <div style={{ flex: 1 }}>
-                <div style={{ color: C.gold, fontWeight: 700, fontSize: 12.5 }}>{t.author} mentioned your team</div>
+                <div style={{ color: C.gold, fontWeight: 700, fontSize: 12.5 }}>{t.author} {t.isDm ? "sent you a message" : "mentioned your team"}</div>
                 <div style={{ color: C.text, fontSize: 12.5 }}>{t.text}</div>
               </div>
               <button onClick={(e) => { e.stopPropagation(); dismissToast(t.id); }} style={{ background: "transparent", border: "none", cursor: "pointer", color: C.muted, flexShrink: 0 }}>
@@ -2725,8 +2796,8 @@ function PlayerMarket({ teams, squads, myTeamId, transferListings, wantedListing
       <Panel style={{ padding: 18 }}>
         <SectionTitle icon={Repeat}>Transfer List</SectionTitle>
         <div style={{ color: C.muted, fontSize: 11.5, marginBottom: 12 }}>
-          Put one of your own players up for sale with an asking price. Other teams can make an offer, which posts
-          a tagged message to you in League Chat to start the conversation.
+          Put one of your own players up for sale with an asking price. Other teams can make an offer, which starts
+          a private conversation with you (check the Messages tab).
         </div>
 
         {myTeamId ? (
@@ -3518,6 +3589,148 @@ function PrizesTab({ prizes, setPrizes, taxCollected, prizeTotal, teams, logActi
 }
 
 /* --------------------------------- Chat ---------------------------------- */
+function MessagesTab({ teams, myTeamId, privateMessages, sendPrivateMessage, dmLastSeen, markConversationSeen, conversationIdFor }) {
+  const [activeTeamId, setActiveTeamId] = useState(null); // team we're currently chatting with
+  const [text, setText] = useState("");
+  const [startWith, setStartWith] = useState("");
+  const bottomRef = useRef(null);
+
+  const teamName = (id) => teams.find((t) => t.id === id)?.name || id;
+
+  const conversations = useMemo(() => {
+    if (!myTeamId) return [];
+    const mine = privateMessages.filter((m) => m.toTeamId === myTeamId || m.fromTeamId === myTeamId);
+    const byPartner = {};
+    mine.forEach((m) => {
+      const partnerId = m.fromTeamId === myTeamId ? m.toTeamId : m.fromTeamId;
+      if (!byPartner[partnerId]) byPartner[partnerId] = [];
+      byPartner[partnerId].push(m);
+    });
+    return Object.entries(byPartner).map(([partnerId, msgs]) => {
+      const sorted = [...msgs].sort((a, b) => a.time - b.time);
+      const cid = conversationIdFor(myTeamId, partnerId);
+      const unread = sorted.some((m) => m.toTeamId === myTeamId && m.time > (dmLastSeen[cid] || 0));
+      return { partnerId, messages: sorted, lastMessage: sorted[sorted.length - 1], unread };
+    }).sort((a, b) => b.lastMessage.time - a.lastMessage.time);
+  }, [privateMessages, myTeamId, dmLastSeen, conversationIdFor]);
+
+  const activeThread = conversations.find((c) => c.partnerId === activeTeamId);
+
+  const openConversation = (partnerId) => {
+    setActiveTeamId(partnerId);
+    markConversationSeen(conversationIdFor(myTeamId, partnerId));
+  };
+
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ block: "nearest" });
+  }, [activeThread?.messages.length]);
+
+  const send = () => {
+    if (!activeTeamId || !text.trim()) return;
+    sendPrivateMessage(activeTeamId, text);
+    setText("");
+  };
+
+  const startNew = () => {
+    if (!startWith) return;
+    openConversation(startWith);
+    setStartWith("");
+  };
+
+  const timeStr = (t) => new Date(t).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+
+  if (!myTeamId) {
+    return (
+      <Panel style={{ padding: 32, maxWidth: 380, margin: "0 auto", textAlign: "center" }}>
+        <Send size={24} color={C.gold} style={{ marginBottom: 10 }} />
+        <div style={{ color: "#fff", fontWeight: 700, marginBottom: 6 }}>Pick your team first</div>
+        <div style={{ color: C.muted, fontSize: 12.5 }}>Choose your team (top right) to send and receive private messages with other teams.</div>
+      </Panel>
+    );
+  }
+
+  return (
+    <Panel style={{ padding: 0, overflow: "hidden" }}>
+      <div className="grid" style={{ gridTemplateColumns: "260px 1fr", minHeight: 480 }}>
+        {/* conversation list */}
+        <div style={{ borderRight: `1px solid ${C.border}`, display: "flex", flexDirection: "column" }}>
+          <div style={{ padding: 14, borderBottom: `1px solid ${C.border}` }}>
+            <Field label="Start a new conversation">
+              <div className="flex gap-1">
+                <Select value={startWith} onChange={(e) => setStartWith(e.target.value)} style={{ flex: 1 }}>
+                  <option value="">Choose a team…</option>
+                  {teams.filter((t) => t.id !== myTeamId).map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+                </Select>
+                <Btn size="sm" onClick={startNew}>Go</Btn>
+              </div>
+            </Field>
+          </div>
+          <div style={{ overflowY: "auto", flex: 1 }}>
+            {conversations.length === 0 && (
+              <div style={{ color: C.muted, fontSize: 12, padding: 14, textAlign: "center" }}>No conversations yet.</div>
+            )}
+            {conversations.map((c) => (
+              <button key={c.partnerId} onClick={() => openConversation(c.partnerId)}
+                className="flex items-center justify-between"
+                style={{
+                  width: "100%", textAlign: "left", padding: "10px 14px", background: activeTeamId === c.partnerId ? C.panelAlt : "transparent",
+                  border: "none", borderBottom: `1px solid ${C.border}33`, cursor: "pointer",
+                }}>
+                <div style={{ overflow: "hidden" }}>
+                  <div style={{ color: C.text, fontWeight: 600, fontSize: 13 }}>{teamName(c.partnerId)}</div>
+                  <div style={{ color: C.muted, fontSize: 11, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{c.lastMessage.text}</div>
+                </div>
+                {c.unread && <span style={{ width: 8, height: 8, borderRadius: "50%", background: C.red, flexShrink: 0, marginLeft: 6 }} />}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* active thread */}
+        <div style={{ display: "flex", flexDirection: "column" }}>
+          {!activeThread ? (
+            <div className="flex items-center justify-center" style={{ flex: 1, color: C.muted, fontSize: 13 }}>
+              Select a conversation, or start a new one.
+            </div>
+          ) : (
+            <>
+              <div style={{ padding: "12px 16px", borderBottom: `1px solid ${C.border}`, color: C.gold, fontWeight: 700, fontSize: 13.5 }}>
+                {teamName(activeTeamId)}
+              </div>
+              <div style={{ flex: 1, overflowY: "auto", padding: 16, maxHeight: 400 }}>
+                <div className="grid gap-3">
+                  {activeThread.messages.map((m) => {
+                    const mine = m.fromTeamId === myTeamId;
+                    return (
+                      <div key={m.id} style={{ display: "flex", justifyContent: mine ? "flex-end" : "flex-start" }}>
+                        <div style={{
+                          maxWidth: "70%", background: mine ? `${C.gold}22` : C.panelAlt,
+                          border: `1px solid ${mine ? C.gold + "55" : C.border}`, borderRadius: 10, padding: "8px 12px",
+                        }}>
+                          <div style={{ color: C.text, fontSize: 13 }}>{m.text}</div>
+                          <div style={{ color: C.muted, fontSize: 10, marginTop: 3 }}>{timeStr(m.time)}</div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                  <div ref={bottomRef} />
+                </div>
+              </div>
+              <div className="flex items-center gap-2" style={{ padding: 12, borderTop: `1px solid ${C.border}` }}>
+                <TextInput placeholder="Type a message…" value={text}
+                  onChange={(e) => setText(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") send(); }}
+                  style={{ flex: 1 }} />
+                <Btn icon={Send} onClick={send}>Send</Btn>
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+    </Panel>
+  );
+}
+
 function ChatTab({ chat, setChat, teams, myTeamId, markChatSeen }) {
   const [name, setName] = useState("");
   const [text, setText] = useState("");
