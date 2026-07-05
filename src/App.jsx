@@ -1005,14 +1005,14 @@ export default function EafcLeagueApp() {
   return (
     <div style={{ minHeight: "100vh", background: C.bg, fontFamily: "'Segoe UI', Inter, system-ui, sans-serif", overscrollBehaviorX: "contain" }}>
       {/* top bar */}
-      <div style={{ background: C.dark, borderBottom: `1px solid ${C.border}`, padding: "14px 18px" }}>
+      <div style={{ background: "#050a13", borderBottom: `1px solid rgba(231,197,104,0.22)`, padding: "14px 18px" }}>
         <div className="flex items-center justify-between flex-wrap gap-3" style={{ maxWidth: 1180, margin: "0 auto" }}>
           <div className="flex items-center gap-2">
-            <div style={{ width: 34, height: 34, borderRadius: 9, background: C.gold, display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <div style={{ width: 34, height: 34, borderRadius: 4, background: `linear-gradient(135deg, ${C.gold}, ${C.goldDim})`, display: "flex", alignItems: "center", justifyContent: "center", boxShadow: `0 0 14px ${C.gold}55` }}>
               <Trophy size={18} color={C.dark} />
             </div>
             <div>
-              <div style={{ color: "#fff", fontWeight: 800, fontSize: 16, letterSpacing: 0.3 }}>EAFC 26 CUSTOM FANTASY LEAGUE</div>
+              <div className="hud-font" style={{ color: "#fff", fontWeight: 600, fontSize: 18, letterSpacing: "0.03em" }}>EAFC 26 CUSTOM FANTASY LEAGUE</div>
               <div style={{ color: C.muted, fontSize: 11.5 }}>Season {season} · Private league app</div>
             </div>
           </div>
@@ -1025,8 +1025,8 @@ export default function EafcLeagueApp() {
       </div>
 
       {/* tabs */}
-      <div style={{ background: C.panel2, borderBottom: `1px solid ${C.border}`, overflowX: "auto", overscrollBehaviorX: "contain", WebkitOverflowScrolling: "touch" }}>
-        <div className="flex" style={{ maxWidth: 1180, margin: "0 auto", padding: "0 18px" }}>
+      <div style={{ background: "#080f1c", borderBottom: `1px solid rgba(231,197,104,0.2)`, overflowX: "auto", overscrollBehaviorX: "contain", WebkitOverflowScrolling: "touch" }}>
+        <div className="flex hud-font" style={{ maxWidth: 1180, margin: "0 auto", padding: "0 18px" }}>
           {TABS.map((t) => {
             const active = tab === t.id;
             return (
@@ -1035,9 +1035,11 @@ export default function EafcLeagueApp() {
                 onClick={() => setTab(t.id)}
                 className="flex items-center gap-1.5"
                 style={{
-                  padding: "12px 14px", background: "transparent", border: "none", cursor: "pointer",
-                  color: active ? C.gold : C.muted, fontWeight: 700, fontSize: 13,
-                  borderBottom: active ? `2px solid ${C.gold}` : "2px solid transparent",
+                  padding: "13px 16px", background: "transparent", border: "none", cursor: "pointer",
+                  color: active ? C.gold : "rgba(255,255,255,0.55)", fontWeight: 500, fontSize: 14,
+                  letterSpacing: "0.04em", textTransform: "uppercase",
+                  borderBottom: active ? `3px solid ${C.gold}` : "3px solid transparent",
+                  boxShadow: active ? `0 3px 10px -2px ${C.gold}88` : "none",
                   whiteSpace: "nowrap",
                 }}
               >
@@ -1172,25 +1174,29 @@ function SyncIndicator({ syncState, lastSyncedAt, onRefresh }) {
 /* ---- FIFA-menu-inspired HUD styling, previewed on the Dashboard only ---- */
 const hudStadiumBg = {
   background: `
-    radial-gradient(ellipse 900px 500px at 50% 100%, rgba(70,140,90,0.16) 0%, rgba(70,140,90,0) 60%),
-    radial-gradient(circle at 15% 0%, rgba(231,197,104,0.10) 0%, rgba(231,197,104,0) 40%),
-    radial-gradient(circle at 85% 0%, rgba(231,197,104,0.10) 0%, rgba(231,197,104,0) 40%),
-    linear-gradient(180deg, #05070c 0%, #0a1424 35%, #0c1c30 100%)
+    linear-gradient(115deg, rgba(231,197,104,0.10) 0%, rgba(231,197,104,0) 22%),
+    radial-gradient(ellipse 1100px 600px at 50% 105%, rgba(60,150,95,0.28) 0%, rgba(60,150,95,0) 62%),
+    radial-gradient(circle at 8% -5%, rgba(231,197,104,0.20) 0%, rgba(231,197,104,0) 38%),
+    radial-gradient(circle at 92% -5%, rgba(231,197,104,0.20) 0%, rgba(231,197,104,0) 38%),
+    repeating-linear-gradient(180deg, rgba(255,255,255,0.015) 0px, rgba(255,255,255,0.015) 1px, transparent 1px, transparent 3px),
+    linear-gradient(180deg, #04060a 0%, #081222 30%, #0a1a2e 65%, #0d2135 100%)
   `,
   margin: "-20px -18px -60px",
-  padding: "20px 18px 60px",
+  padding: "24px 18px 60px",
+  position: "relative",
 };
 
 function HudPanel({ children, style, accent }) {
   return (
-    <div style={{
-      background: "rgba(8, 18, 32, 0.82)",
-      backdropFilter: "blur(6px)",
-      border: "1px solid rgba(231,197,104,0.22)",
-      borderTop: `3px solid ${accent || C.gold}`,
-      borderRadius: 6,
-      boxShadow: "0 8px 24px rgba(0,0,0,0.35)",
-      padding: 18,
+    <div className="hud-font" style={{
+      background: "linear-gradient(180deg, rgba(14,26,45,0.92) 0%, rgba(7,15,27,0.92) 100%)",
+      backdropFilter: "blur(8px)",
+      border: "1px solid rgba(231,197,104,0.28)",
+      borderTop: `4px solid ${accent || C.gold}`,
+      borderRadius: "2px 10px 2px 2px",
+      boxShadow: `0 12px 32px rgba(0,0,0,0.5), 0 0 0 1px rgba(0,0,0,0.3), inset 0 1px 0 rgba(255,255,255,0.04)`,
+      clipPath: "polygon(0 0, calc(100% - 18px) 0, 100% 18px, 100% 100%, 0 100%)",
+      padding: 20,
       ...style,
     }}>
       {children}
@@ -1200,10 +1206,10 @@ function HudPanel({ children, style, accent }) {
 
 function HudHeading({ children, right }) {
   return (
-    <div className="flex items-center justify-between" style={{ marginBottom: 14 }}>
-      <div className="flex items-center gap-2">
-        <div style={{ width: 4, height: 16, background: C.gold }} />
-        <div style={{ color: "#fff", fontWeight: 800, fontSize: 12.5, letterSpacing: "0.12em", textTransform: "uppercase" }}>
+    <div className="flex items-center justify-between" style={{ marginBottom: 16 }}>
+      <div className="flex items-center gap-3">
+        <div style={{ width: 5, height: 22, background: C.gold, boxShadow: `0 0 10px ${C.gold}88` }} />
+        <div className="hud-font" style={{ color: "#fff", fontWeight: 600, fontSize: 17, letterSpacing: "0.08em", textTransform: "uppercase" }}>
           {children}
         </div>
       </div>
@@ -1214,9 +1220,9 @@ function HudHeading({ children, right }) {
 
 function HudStatChip({ label, value, tone }) {
   return (
-    <div style={{ flex: 1, minWidth: 140, padding: "10px 16px", borderRight: `1px solid rgba(231,197,104,0.18)` }}>
-      <div style={{ color: "rgba(255,255,255,0.55)", fontSize: 10, letterSpacing: "0.14em", textTransform: "uppercase", marginBottom: 3 }}>{label}</div>
-      <div style={{ color: tone === "gold" ? C.gold : "#fff", fontSize: 21, fontWeight: 800, fontVariantNumeric: "tabular-nums" }}>{value}</div>
+    <div style={{ flex: 1, minWidth: 140, padding: "14px 18px", borderRight: `1px solid rgba(231,197,104,0.2)` }}>
+      <div className="hud-font" style={{ color: "rgba(255,255,255,0.5)", fontSize: 11, letterSpacing: "0.18em", textTransform: "uppercase", marginBottom: 4 }}>{label}</div>
+      <div className="hud-font" style={{ color: tone === "gold" ? C.gold : "#fff", fontSize: 30, fontWeight: 600, fontVariantNumeric: "tabular-nums", textShadow: tone === "gold" ? `0 0 18px ${C.gold}55` : "none" }}>{value}</div>
     </div>
   );
 }
@@ -1248,32 +1254,39 @@ function Dashboard({ teams, squads, standings, budgetStats, prizeTotal, taxColle
         </HudPanel>
 
         {myTeam && (
-          <HudPanel accent={C.gold}>
-            <div className="flex items-center justify-between flex-wrap gap-3">
-              <div className="flex items-center gap-3">
-                <div style={{ width: 40, height: 40, borderRadius: 6, background: `linear-gradient(135deg, ${C.gold}, ${C.goldDim})`, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 900, color: "#0B1220", fontSize: 15 }}>
+          <HudPanel accent={C.gold} style={{ padding: "26px 28px" }}>
+            <div className="flex items-center justify-between flex-wrap gap-4">
+              <div className="flex items-center gap-4">
+                <div style={{
+                  width: 64, height: 64, borderRadius: 4,
+                  background: `linear-gradient(135deg, ${C.gold}, ${C.goldDim})`,
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  fontWeight: 700, color: "#0B1220", fontSize: 24,
+                  boxShadow: `0 0 24px ${C.gold}66`,
+                }} className="hud-font">
                   {myTeam.name.slice(0, 2).toUpperCase()}
                 </div>
                 <div>
-                  <div style={{ color: "rgba(255,255,255,0.5)", fontSize: 10, letterSpacing: "0.12em", textTransform: "uppercase" }}>Your Club</div>
-                  <div style={{ color: "#fff", fontWeight: 800, fontSize: 16 }}>{myTeam.name}</div>
+                  <div className="hud-font" style={{ color: "rgba(255,255,255,0.5)", fontSize: 11, letterSpacing: "0.18em", textTransform: "uppercase" }}>Your Club</div>
+                  <div className="hud-font" style={{ color: "#fff", fontWeight: 600, fontSize: 32, letterSpacing: "0.02em", lineHeight: 1.1 }}>{myTeam.name}</div>
+                  <div style={{ color: "rgba(255,255,255,0.45)", fontSize: 12.5 }}>{myTeam.manager}</div>
                 </div>
               </div>
               {myStanding && (
-                <div className="flex items-center gap-6">
+                <div className="flex items-center gap-8">
                   <div style={{ textAlign: "center" }}>
-                    <div style={{ color: "rgba(255,255,255,0.5)", fontSize: 10, letterSpacing: "0.1em", textTransform: "uppercase" }}>Position</div>
-                    <div style={{ color: C.gold, fontWeight: 800, fontSize: 18 }}>{myStanding.position}{myStanding.position === 1 ? "st" : myStanding.position === 2 ? "nd" : myStanding.position === 3 ? "rd" : "th"}</div>
+                    <div className="hud-font" style={{ color: "rgba(255,255,255,0.5)", fontSize: 10.5, letterSpacing: "0.16em", textTransform: "uppercase" }}>Position</div>
+                    <div className="hud-font" style={{ color: C.gold, fontWeight: 600, fontSize: 26, textShadow: `0 0 14px ${C.gold}55` }}>{myStanding.position}{myStanding.position === 1 ? "st" : myStanding.position === 2 ? "nd" : myStanding.position === 3 ? "rd" : "th"}</div>
                   </div>
                   <div style={{ textAlign: "center" }}>
-                    <div style={{ color: "rgba(255,255,255,0.5)", fontSize: 10, letterSpacing: "0.1em", textTransform: "uppercase" }}>Points</div>
-                    <div style={{ color: "#fff", fontWeight: 800, fontSize: 18 }}>{myStanding.points}</div>
+                    <div className="hud-font" style={{ color: "rgba(255,255,255,0.5)", fontSize: 10.5, letterSpacing: "0.16em", textTransform: "uppercase" }}>Points</div>
+                    <div className="hud-font" style={{ color: "#fff", fontWeight: 600, fontSize: 26 }}>{myStanding.points}</div>
                   </div>
                   <div style={{ textAlign: "center" }}>
-                    <div style={{ color: "rgba(255,255,255,0.5)", fontSize: 10, letterSpacing: "0.1em", textTransform: "uppercase" }}>Budget</div>
-                    <div style={{ color: "#fff", fontWeight: 800, fontSize: 18 }}>{money(budgetStats[myTeamId]?.current)}</div>
+                    <div className="hud-font" style={{ color: "rgba(255,255,255,0.5)", fontSize: 10.5, letterSpacing: "0.16em", textTransform: "uppercase" }}>Budget</div>
+                    <div className="hud-font" style={{ color: "#fff", fontWeight: 600, fontSize: 26 }}>{money(budgetStats[myTeamId]?.current)}</div>
                   </div>
-                  <Btn size="sm" onClick={() => setTab("squads")}>View Squad</Btn>
+                  <Btn onClick={() => setTab("squads")}>View Squad</Btn>
                 </div>
               )}
             </div>
