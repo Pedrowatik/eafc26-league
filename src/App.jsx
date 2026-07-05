@@ -133,10 +133,19 @@ const MY_TEAM_KEY = "eafc26-my-team"; // personal, per-device — not shared
 const NIGHTLY_BACKUP_PREFIX = "eafc26-nightly-backup-"; // written by the scheduled Edge Function
 
 /* ------------------------------- small UI -------------------------------- */
-function Panel({ children, style, ...rest }) {
+function Panel({ children, style, accent, ...rest }) {
   return (
     <div
-      style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 14, ...style }}
+      style={{
+        background: "linear-gradient(180deg, rgba(14,26,45,0.92) 0%, rgba(7,15,27,0.92) 100%)",
+        backdropFilter: "blur(8px)",
+        border: "1px solid rgba(231,197,104,0.28)",
+        borderTop: `4px solid ${accent || C.gold}`,
+        borderRadius: "2px 10px 2px 2px",
+        boxShadow: "0 12px 32px rgba(0,0,0,0.5), 0 0 0 1px rgba(0,0,0,0.3), inset 0 1px 0 rgba(255,255,255,0.04)",
+        clipPath: "polygon(0 0, calc(100% - 18px) 0, 100% 18px, 100% 100%, 0 100%)",
+        ...style,
+      }}
       {...rest}
     >
       {children}
@@ -146,10 +155,11 @@ function Panel({ children, style, ...rest }) {
 
 function SectionTitle({ icon: Icon, children, right }) {
   return (
-    <div className="flex items-center justify-between" style={{ marginBottom: 14 }}>
-      <div className="flex items-center gap-2">
-        {Icon && <Icon size={18} color={C.gold} />}
-        <h2 style={{ color: C.text, fontSize: 17, fontWeight: 700, letterSpacing: 0.2 }}>{children}</h2>
+    <div className="flex items-center justify-between" style={{ marginBottom: 16 }}>
+      <div className="flex items-center gap-3">
+        <div style={{ width: 5, height: 22, background: C.gold, boxShadow: `0 0 10px ${C.gold}88` }} />
+        {Icon && <Icon size={17} color={C.gold} />}
+        <h2 style={{ color: "#fff", fontSize: 17, fontWeight: 600, letterSpacing: "0.06em", textTransform: "uppercase" }}>{children}</h2>
       </div>
       {right}
     </div>
@@ -157,7 +167,7 @@ function SectionTitle({ icon: Icon, children, right }) {
 }
 
 function Label({ children }) {
-  return <div style={{ color: C.muted, fontSize: 11.5, fontWeight: 600, textTransform: "uppercase", letterSpacing: 0.6, marginBottom: 4 }}>{children}</div>;
+  return <div style={{ color: "rgba(255,255,255,0.55)", fontSize: 11, fontWeight: 500, textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 4 }}>{children}</div>;
 }
 
 function Field({ label, children }) {
@@ -1003,7 +1013,20 @@ export default function EafcLeagueApp() {
   }, []);
 
   return (
-    <div style={{ minHeight: "100vh", background: C.bg, fontFamily: "'Segoe UI', Inter, system-ui, sans-serif", overscrollBehaviorX: "contain" }}>
+    <div style={{
+      minHeight: "100vh",
+      fontFamily: "'Oswald', 'Segoe UI', sans-serif",
+      overscrollBehaviorX: "contain",
+      background: `
+        linear-gradient(115deg, rgba(231,197,104,0.10) 0%, rgba(231,197,104,0) 22%),
+        radial-gradient(ellipse 1100px 600px at 50% 105%, rgba(60,150,95,0.22) 0%, rgba(60,150,95,0) 62%),
+        radial-gradient(circle at 8% -5%, rgba(231,197,104,0.16) 0%, rgba(231,197,104,0) 38%),
+        radial-gradient(circle at 92% -5%, rgba(231,197,104,0.16) 0%, rgba(231,197,104,0) 38%),
+        repeating-linear-gradient(180deg, rgba(255,255,255,0.012) 0px, rgba(255,255,255,0.012) 1px, transparent 1px, transparent 3px),
+        linear-gradient(180deg, #04060a 0%, #081222 30%, #0a1a2e 65%, #0d2135 100%)
+      `,
+      backgroundAttachment: "fixed",
+    }}>
       {/* top bar */}
       <div style={{ background: "#050a13", borderBottom: `1px solid rgba(231,197,104,0.22)`, padding: "14px 18px" }}>
         <div className="flex items-center justify-between flex-wrap gap-3" style={{ maxWidth: 1180, margin: "0 auto" }}>
@@ -1171,58 +1194,11 @@ function SyncIndicator({ syncState, lastSyncedAt, onRefresh }) {
 }
 
 /* ------------------------------- Dashboard -------------------------------- */
-/* ---- FIFA-menu-inspired HUD styling, previewed on the Dashboard only ---- */
-const hudStadiumBg = {
-  background: `
-    linear-gradient(115deg, rgba(231,197,104,0.10) 0%, rgba(231,197,104,0) 22%),
-    radial-gradient(ellipse 1100px 600px at 50% 105%, rgba(60,150,95,0.28) 0%, rgba(60,150,95,0) 62%),
-    radial-gradient(circle at 8% -5%, rgba(231,197,104,0.20) 0%, rgba(231,197,104,0) 38%),
-    radial-gradient(circle at 92% -5%, rgba(231,197,104,0.20) 0%, rgba(231,197,104,0) 38%),
-    repeating-linear-gradient(180deg, rgba(255,255,255,0.015) 0px, rgba(255,255,255,0.015) 1px, transparent 1px, transparent 3px),
-    linear-gradient(180deg, #04060a 0%, #081222 30%, #0a1a2e 65%, #0d2135 100%)
-  `,
-  margin: "-20px -18px -60px",
-  padding: "24px 18px 60px",
-  position: "relative",
-};
-
-function HudPanel({ children, style, accent }) {
-  return (
-    <div className="hud-font" style={{
-      background: "linear-gradient(180deg, rgba(14,26,45,0.92) 0%, rgba(7,15,27,0.92) 100%)",
-      backdropFilter: "blur(8px)",
-      border: "1px solid rgba(231,197,104,0.28)",
-      borderTop: `4px solid ${accent || C.gold}`,
-      borderRadius: "2px 10px 2px 2px",
-      boxShadow: `0 12px 32px rgba(0,0,0,0.5), 0 0 0 1px rgba(0,0,0,0.3), inset 0 1px 0 rgba(255,255,255,0.04)`,
-      clipPath: "polygon(0 0, calc(100% - 18px) 0, 100% 18px, 100% 100%, 0 100%)",
-      padding: 20,
-      ...style,
-    }}>
-      {children}
-    </div>
-  );
-}
-
-function HudHeading({ children, right }) {
-  return (
-    <div className="flex items-center justify-between" style={{ marginBottom: 16 }}>
-      <div className="flex items-center gap-3">
-        <div style={{ width: 5, height: 22, background: C.gold, boxShadow: `0 0 10px ${C.gold}88` }} />
-        <div className="hud-font" style={{ color: "#fff", fontWeight: 600, fontSize: 17, letterSpacing: "0.08em", textTransform: "uppercase" }}>
-          {children}
-        </div>
-      </div>
-      {right}
-    </div>
-  );
-}
-
 function HudStatChip({ label, value, tone }) {
   return (
     <div style={{ flex: 1, minWidth: 140, padding: "14px 18px", borderRight: `1px solid rgba(231,197,104,0.2)` }}>
-      <div className="hud-font" style={{ color: "rgba(255,255,255,0.5)", fontSize: 11, letterSpacing: "0.18em", textTransform: "uppercase", marginBottom: 4 }}>{label}</div>
-      <div className="hud-font" style={{ color: tone === "gold" ? C.gold : "#fff", fontSize: 30, fontWeight: 600, fontVariantNumeric: "tabular-nums", textShadow: tone === "gold" ? `0 0 18px ${C.gold}55` : "none" }}>{value}</div>
+      <div style={{ color: "rgba(255,255,255,0.5)", fontSize: 11, letterSpacing: "0.18em", textTransform: "uppercase", marginBottom: 4 }}>{label}</div>
+      <div style={{ color: tone === "gold" ? C.gold : "#fff", fontSize: 30, fontWeight: 600, fontVariantNumeric: "tabular-nums", textShadow: tone === "gold" ? `0 0 18px ${C.gold}55` : "none" }}>{value}</div>
     </div>
   );
 }
@@ -1241,20 +1217,19 @@ function Dashboard({ teams, squads, standings, budgetStats, prizeTotal, taxColle
   };
 
   return (
-    <div style={hudStadiumBg}>
-      <div className="grid gap-4">
-        {/* HUD stat strip — mirrors the top-right level/XP/currency bar from the reference */}
-        <HudPanel style={{ padding: 0 }} accent={C.gold}>
+    <div className="grid gap-4">
+      {/* HUD stat strip — mirrors the top-right level/XP/currency bar from the reference */}
+      <Panel style={{ padding: 0 }} accent={C.gold}>
           <div className="flex flex-wrap">
             <HudStatChip label="Teams" value={teams.length} />
             <HudStatChip label="Season" value={season} />
             <HudStatChip label="Tax Collected" value={money(taxCollected)} tone="gold" />
             <HudStatChip label="Prize Pool" value={money(prizeTotal)} tone="gold" />
           </div>
-        </HudPanel>
+        </Panel>
 
         {myTeam && (
-          <HudPanel accent={C.gold} style={{ padding: "26px 28px" }}>
+          <Panel accent={C.gold} style={{ padding: "26px 28px" }}>
             <div className="flex items-center justify-between flex-wrap gap-4">
               <div className="flex items-center gap-4">
                 <div style={{
@@ -1290,14 +1265,14 @@ function Dashboard({ teams, squads, standings, budgetStats, prizeTotal, taxColle
                 </div>
               )}
             </div>
-          </HudPanel>
+          </Panel>
         )}
 
         <div className="grid gap-4" style={{ gridTemplateColumns: "2fr 1fr" }}>
-          <HudPanel>
-            <HudHeading right={<Btn variant="ghost" size="sm" icon={ChevronRight} onClick={() => setTab("standings")}>Full Table</Btn>}>
+          <Panel>
+            <SectionTitle right={<Btn variant="ghost" size="sm" icon={ChevronRight} onClick={() => setTab("standings")}>Full Table</Btn>}>
               League Table — Top 5
-            </HudHeading>
+            </SectionTitle>
             <Table
               head={["Pos", "Team", "Manager", "P", "GD", "Pts"]}
               rows={standings.slice(0, 5).map((r) => {
@@ -1310,10 +1285,10 @@ function Dashboard({ teams, squads, standings, budgetStats, prizeTotal, taxColle
                 Leading: <b style={{ color: C.gold }}>{leaderTeam?.name}</b> ({leaderTeam?.manager}) — {leader.points} pts
               </div>
             )}
-          </HudPanel>
+          </Panel>
 
-          <HudPanel>
-            <HudHeading>Next Events</HudHeading>
+          <Panel>
+            <SectionTitle>Next Events</SectionTitle>
             <div className="grid gap-2" style={{ marginBottom: 12 }}>
               {events.length === 0 && <div style={{ color: "rgba(255,255,255,0.5)", fontSize: 13 }}>No events added yet.</div>}
               {events.map((e) => (
@@ -1337,22 +1312,22 @@ function Dashboard({ teams, squads, standings, budgetStats, prizeTotal, taxColle
               </div>
               <Btn icon={Plus} onClick={addEvent}>Add Event</Btn>
             </div>
-          </HudPanel>
+          </Panel>
         </div>
 
         <div className="grid gap-4" style={{ gridTemplateColumns: "1fr 1fr" }}>
-          <HudPanel>
-            <HudHeading>Find a Player</HudHeading>
+          <Panel>
+            <SectionTitle>Find a Player</SectionTitle>
             <PlayerSearchInner teams={teams} squads={squads} />
-          </HudPanel>
-          <HudPanel>
-            <HudHeading>Recent Activity</HudHeading>
+          </Panel>
+          <Panel>
+            <SectionTitle>Recent Activity</SectionTitle>
             <RecentActivityInner activity={activity} />
-          </HudPanel>
+          </Panel>
         </div>
 
-        <HudPanel>
-          <HudHeading>Budget Snapshot</HudHeading>
+        <Panel>
+          <SectionTitle>Budget Snapshot</SectionTitle>
           <Table
             head={["Team", "Manager", "Current Budget", "Wages", "Compliance"]}
             rows={teams.map((t) => {
@@ -1361,8 +1336,7 @@ function Dashboard({ teams, squads, standings, budgetStats, prizeTotal, taxColle
                 <Pill tone={b.compliant ? "green" : "red"}>{b.compliant ? "OK" : "Over"}</Pill>];
             })}
           />
-        </HudPanel>
-      </div>
+        </Panel>
     </div>
   );
 }
