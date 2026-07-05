@@ -1667,7 +1667,7 @@ function Dashboard({ teams, squads, standings, budgetStats, prizeTotal, taxColle
           </Panel>
         )}
 
-        <div className="grid gap-4" style={{ gridTemplateColumns: "2fr 1fr" }}>
+        <div className="grid gap-4 stack-on-mobile" style={{ gridTemplateColumns: "2fr 1fr" }}>
           <Panel>
             <SectionTitle right={<Btn variant="ghost" size="sm" icon={ChevronRight} onClick={() => setTab("standings")}>Full Table</Btn>}>
               League Table — Top 5
@@ -2127,7 +2127,7 @@ function SquadsTab({ teams, squads, squadStats, renameTeam, setTab, movePlayerTo
           </div>
         )}
 
-        <div className="grid gap-4" style={{ gridTemplateColumns: "1.7fr 1fr", alignItems: "start" }}>
+        <div className="grid gap-4 stack-on-mobile" style={{ gridTemplateColumns: "1.7fr 1fr", alignItems: "start" }}>
           <SquadTable title={`Starting Squad (${STARTER_SLOTS} slots)`} players={sq.starters}
             labelForIdx={(i) => {
               const positions = formationPositions(team.formation || "4-4-2");
@@ -3058,7 +3058,7 @@ function MatchStatsPanel({ team1Name, team2Name, team1Players, team2Players, tea
           {team2Injured?.length > 0 && <span>{team2Name} — {team2Injured.join(", ")}</span>}
         </div>
       )}
-      <div className="grid gap-3" style={{ gridTemplateColumns: "1fr 1fr" }}>
+      <div className="grid gap-3 stack-on-mobile" style={{ gridTemplateColumns: "1fr 1fr" }}>
         <TeamStatBlock side="team1Stats" teamName={team1Name} players={team1Players} />
         <TeamStatBlock side="team2Stats" teamName={team2Name} players={team2Players} />
       </div>
@@ -3661,7 +3661,7 @@ function MessagesTab({ teams, myTeamId, privateMessages, sendPrivateMessage, dmL
 
   return (
     <Panel style={{ padding: 0, overflow: "hidden" }}>
-      <div className="grid" style={{ gridTemplateColumns: "260px 1fr", minHeight: 480 }}>
+      <div className="grid messages-grid" style={{ gridTemplateColumns: "260px 1fr", minHeight: 480 }}>
         {/* conversation list */}
         <div style={{ borderRight: `1px solid ${C.border}`, display: "flex", flexDirection: "column" }}>
           <div style={{ padding: 14, borderBottom: `1px solid ${C.border}` }}>

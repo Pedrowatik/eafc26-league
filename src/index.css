@@ -25,3 +25,22 @@ body {
   0% { transform: translateX(0); }
   100% { transform: translateX(-100%); }
 }
+
+/* Mobile-only layout fixes — everything here is scoped to narrow screens via the media query,
+   so nothing about the desktop/laptop layout changes at all. Most grids in the app already use
+   "repeat(auto-fit, minmax(...))" which adapts on its own; these are the few spots using a fixed
+   two-column split that needs an explicit nudge to stack on a phone. */
+@media (max-width: 760px) {
+  .stack-on-mobile {
+    grid-template-columns: 1fr !important;
+  }
+
+  .messages-grid {
+    grid-template-columns: 1fr !important;
+  }
+  .messages-grid > div:first-child {
+    border-right: none !important;
+    border-bottom: 1px solid #2E4E7A;
+    max-height: 220px;
+  }
+}
