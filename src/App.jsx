@@ -1019,6 +1019,19 @@ export default function EafcLeagueApp() {
 
   // Admin-only: remove a specific bid (e.g. a mis-click or joke bid) and recompute who's currently
   // winning from whatever bids remain.
+  // Cancels an auction outright — different from deleteBid, which only removes one bid and leaves
+  // the auction open for fresh ones. This actually takes the player off the board.
+  const cancelAuction = (auctionId, pinAttempt) => {
+    if (pinAttempt !== adminPin) return "Incorrect PIN.";
+    let err = null;
+    setAuctions((all) => all.map((a) => {
+      if (a.id !== auctionId) return a;
+      if (a.status !== "open" && a.status !== "pending") { err = "This auction's already closed."; return a; }
+      return { ...a, status: "cancelled" };
+    }));
+    return err;
+  };
+
   const deleteBid = (auctionId, bidId, pinAttempt) => {
     if (pinAttempt !== adminPin) return "Incorrect PIN.";
     let err = null;
@@ -1289,9 +1302,13 @@ export default function EafcLeagueApp() {
       setPlayerDatabase(cleaned);
     } else {
       setPlayerDatabase((existing) => {
-        const byName = new Map(existing.map((p) => [p.name.toLowerCase(), p]));
-        cleaned.forEach((p) => byName.set(p.name.toLowerCase(), p));
-        return Array.from(byName.values());
+        // Keyed by name + club, not name alone — two real players who happen to share a name
+        // (it happens more than you'd think) no longer silently overwrite each other, as long as
+        // they're not also at the same club.
+        const dedupeKey = (p) => `${p.name.toLowerCase()}::${p.club.toLowerCase()}`;
+        const byKey = new Map(existing.map((p) => [dedupeKey(p), p]));
+        cleaned.forEach((p) => byKey.set(dedupeKey(p), p));
+        return Array.from(byKey.values());
       });
     }
     return null;
@@ -1648,7 +1665,7 @@ export default function EafcLeagueApp() {
           <TransfersTab teams={teams} squads={squads} transfers={transfers} logTransfer={logTransfer}
             setTransfers={setTransfers} auctions={auctions} createAuction={createAuction}
             placeBid={placeBid} finalizeAuction={finalizeAuction} respondToAuction={respondToAuction}
-            deleteBid={deleteBid} deleteTransfer={deleteTransfer} editAuctionPlayerName={editAuctionPlayerName} nowTick={nowTick}
+            deleteBid={deleteBid} cancelAuction={cancelAuction} deleteTransfer={deleteTransfer} editAuctionPlayerName={editAuctionPlayerName} nowTick={nowTick}
             myTeamId={myTeamId} playerDatabase={playerDatabase} squadStats={squadStats}
             transferListings={transferListings} wantedListings={wantedListings}
             addTransferListing={addTransferListing} removeTransferListing={removeTransferListing}
@@ -2644,7 +2661,7 @@ function formatCountdown(ms) {
   return `${m}m ${s}s left`;
 }
 
-function AuctionsPanel({ teams, squads, auctions, createAuction, placeBid, finalizeAuction, respondToAuction, deleteBid, editAuctionPlayerName, myTeamId, playerDatabase, squadStats }) {
+function AuctionsPanel({ teams, squads, auctions, createAuction, placeBid, finalizeAuction, respondToAuction, deleteBid, cancelAuction, editAuctionPlayerName, myTeamId, playerDatabase, squadStats }) {
   const firstBidderFor = (sellerId) => {
     if (myTeamId && myTeamId !== sellerId) return myTeamId;
     return teams.find((t) => t.id !== sellerId)?.id || teams[0].id;
@@ -2681,7 +2698,7 @@ function AuctionsPanel({ teams, squads, auctions, createAuction, placeBid, final
 
   const pending = auctions.filter((a) => a.status === "pending");
   const open = auctions.filter((a) => a.status === "open");
-  const closed = auctions.filter((a) => a.status === "closed" || a.status === "declined");
+  const closed = auctions.filter((a) => a.status === "closed" || a.status === "declined" || a.status === "cancelled");
 
   return (
     <Panel style={{ padding: 18 }}>
@@ -2775,7 +2792,7 @@ function AuctionsPanel({ teams, squads, auctions, createAuction, placeBid, final
           <div style={{ color: C.gold, fontWeight: 700, fontSize: 13, marginBottom: 10 }}>Live Auctions ({open.length})</div>
           <div className="grid gap-3">
             {open.map((a) => (
-              <AuctionCard key={a.id} auction={a} teams={teams} now={now} placeBid={placeBid} finalizeAuction={finalizeAuction} deleteBid={deleteBid} editAuctionPlayerName={editAuctionPlayerName} myTeamId={myTeamId} squadStats={squadStats} />
+              <AuctionCard key={a.id} auction={a} teams={teams} now={now} placeBid={placeBid} finalizeAuction={finalizeAuction} deleteBid={deleteBid} cancelAuction={cancelAuction} editAuctionPlayerName={editAuctionPlayerName} myTeamId={myTeamId} squadStats={squadStats} />
             ))}
           </div>
         </div>
@@ -2791,8 +2808,8 @@ function AuctionsPanel({ teams, squads, auctions, createAuction, placeBid, final
             rows={closed.map((a) => [
               a.player.name,
               a.seller === "FA" ? "Non OCM" : teams.find((t) => t.id === a.seller)?.name || a.seller,
-              a.status === "declined" ? "Declined by owner" : a.winner ? (teams.find((t) => t.id === a.winner)?.name || a.winner) : "No bids",
-              a.status === "declined" ? "—" : a.winningBid ? money(a.winningBid) : "—",
+              a.status === "declined" ? "Declined by owner" : a.status === "cancelled" ? "Cancelled by admin" : a.winner ? (teams.find((t) => t.id === a.winner)?.name || a.winner) : "No bids",
+              (a.status === "declined" || a.status === "cancelled") ? "—" : a.winningBid ? money(a.winningBid) : "—",
             ])}
           />
         </div>
@@ -2862,12 +2879,15 @@ function PendingAuctionCard({ auction, teams, respondToAuction, editAuctionPlaye
   );
 }
 
-function AuctionCard({ auction, teams, now, placeBid, finalizeAuction, deleteBid, editAuctionPlayerName, myTeamId, squadStats }) {
+function AuctionCard({ auction, teams, now, placeBid, finalizeAuction, deleteBid, cancelAuction, editAuctionPlayerName, myTeamId, squadStats }) {
   const [bidAmount, setBidAmount] = useState("");
   const [err, setErr] = useState("");
   const [deletingBidId, setDeletingBidId] = useState(null);
   const [deletePin, setDeletePin] = useState("");
   const [deleteErr, setDeleteErr] = useState("");
+  const [cancelling, setCancelling] = useState(false);
+  const [cancelPin, setCancelPin] = useState("");
+  const [cancelErr, setCancelErr] = useState("");
 
   const remaining = auction.deadline - now;
   const ended = remaining <= 0;
@@ -2889,6 +2909,13 @@ function AuctionCard({ auction, teams, now, placeBid, finalizeAuction, deleteBid
     setDeletePin("");
     if (e) setDeleteErr(e);
     else { setDeletingBidId(null); setDeleteErr(""); }
+  };
+
+  const confirmCancel = () => {
+    const e = cancelAuction(auction.id, cancelPin);
+    setCancelPin("");
+    if (e) setCancelErr(e);
+    else { setCancelling(false); setCancelErr(""); }
   };
 
   return (
@@ -2938,6 +2965,22 @@ function AuctionCard({ auction, teams, now, placeBid, finalizeAuction, deleteBid
         <Btn variant="danger" onClick={() => finalizeAuction(auction.id)}>Finalize auction</Btn>
       )}
       {err && <div className="flex items-center gap-2" style={{ marginTop: 8, color: C.red, fontSize: 12 }}><AlertTriangle size={13} /> {err}</div>}
+
+      <div style={{ marginTop: 10 }}>
+        {!cancelling ? (
+          <button onClick={() => setCancelling(true)} title="Admin only — removes this auction entirely"
+            style={{ background: "transparent", border: "none", cursor: "pointer", color: C.muted, fontSize: 11, textDecoration: "underline" }}>
+            Cancel this auction (admin)
+          </button>
+        ) : (
+          <div className="flex items-center gap-2 flex-wrap">
+            <TextInput type="password" placeholder="Admin PIN" value={cancelPin} onChange={(e) => setCancelPin(e.target.value)} style={{ width: 120 }} />
+            <Btn size="sm" variant="danger" onClick={confirmCancel}>Confirm cancel</Btn>
+            <Btn size="sm" variant="outline" onClick={() => { setCancelling(false); setCancelPin(""); setCancelErr(""); }}>Back</Btn>
+            {cancelErr && <span style={{ color: C.red, fontSize: 11.5 }}>{cancelErr}</span>}
+          </div>
+        )}
+      </div>
 
       {auction.history.length > 0 && (
         <div style={{ marginTop: 12, paddingTop: 10, borderTop: `1px solid ${C.border}` }}>
@@ -3377,7 +3420,7 @@ function TransferWindowBanner({ transferWindow, transferWindowOpen, nowTick }) {
   );
 }
 
-function TransfersTab({ teams, squads, transfers, logTransfer, logAdminReward, setTransfers, auctions, createAuction, placeBid, finalizeAuction, respondToAuction, deleteBid, deleteTransfer, editAuctionPlayerName, nowTick, myTeamId, playerDatabase, squadStats, transferListings, wantedListings, addTransferListing, removeTransferListing, addWantedListing, removeWantedListing, sendMarketMessage, transferWindow, transferWindowOpen, season, swapOffers, offerSwap, respondToSwapOffer, hasUsedSwapThisWindow }) {
+function TransfersTab({ teams, squads, transfers, logTransfer, logAdminReward, setTransfers, auctions, createAuction, placeBid, finalizeAuction, respondToAuction, deleteBid, cancelAuction, deleteTransfer, editAuctionPlayerName, nowTick, myTeamId, playerDatabase, squadStats, transferListings, wantedListings, addTransferListing, removeTransferListing, addWantedListing, removeWantedListing, sendMarketMessage, transferWindow, transferWindowOpen, season, swapOffers, offerSwap, respondToSwapOffer, hasUsedSwapThisWindow }) {
   const [deletingId, setDeletingId] = useState(null);
   const [deletePin, setDeletePin] = useState("");
   const [deleteErr, setDeleteErr] = useState("");
@@ -3395,7 +3438,7 @@ function TransfersTab({ teams, squads, transfers, logTransfer, logAdminReward, s
 
       <AuctionsPanel teams={teams} squads={squads} auctions={auctions} createAuction={createAuction}
         placeBid={placeBid} finalizeAuction={finalizeAuction} respondToAuction={respondToAuction}
-        deleteBid={deleteBid} editAuctionPlayerName={editAuctionPlayerName} myTeamId={myTeamId}
+        deleteBid={deleteBid} cancelAuction={cancelAuction} editAuctionPlayerName={editAuctionPlayerName} myTeamId={myTeamId}
         playerDatabase={playerDatabase} squadStats={squadStats} />
 
       <PlayerMarket teams={teams} squads={squads} myTeamId={myTeamId}
