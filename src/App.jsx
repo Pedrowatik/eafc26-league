@@ -1316,6 +1316,13 @@ export default function EafcLeagueApp() {
     return null;
   };
 
+  const addPrize = (pinAttempt, form) => {
+    if (pinAttempt !== adminPin) return "Incorrect PIN.";
+    if (!form.category || !form.category.trim()) return "Enter a category.";
+    setPrizes((p) => [...p, { ...form, id: uid() }]);
+    return null;
+  };
+
   const setTransferWindowDates = (pinAttempt, opensAt, closesAt) => {
     if (pinAttempt !== adminPin) return "Incorrect PIN.";
     if (!opensAt || !closesAt) return "Set both an open and close date/time.";
@@ -1625,7 +1632,7 @@ export default function EafcLeagueApp() {
         )}
         {tab === "prizes" && (
           <PrizesTab prizes={prizes} setPrizes={setPrizes} taxCollected={taxCollected} prizeTotal={prizeTotal}
-            teams={teams} logActivity={logActivity} />
+            teams={teams} />
         )}
         {tab === "chat" && (
           <ChatTab chat={chat} setChat={setChat} teams={teams} myTeamId={myTeamId} markChatSeen={markChatSeen} />
@@ -1648,7 +1655,8 @@ export default function EafcLeagueApp() {
             importPlayerDatabase={importPlayerDatabase} clearPlayerDatabase={clearPlayerDatabase}
             teamLockOverride={teamLockOverride} toggleTeamLockOverride={toggleTeamLockOverride} clearChat={clearChat}
             resetTeamPassword={resetTeamPassword} squadStats={squadStats}
-            transferWindow={transferWindow} setTransferWindowDates={setTransferWindowDates} clearTransferWindow={clearTransferWindow} />
+            transferWindow={transferWindow} setTransferWindowDates={setTransferWindowDates} clearTransferWindow={clearTransferWindow}
+            addPrize={addPrize} />
         )}
       </div>
 
@@ -3987,16 +3995,7 @@ function StandingsTab({ teams, standings, fixtures }) {
 }
 
 /* -------------------------------- Prize Pool ---------------------------------- */
-function PrizesTab({ prizes, setPrizes, taxCollected, prizeTotal, teams, logActivity }) {
-  const blank = { category: "", description: "", amount: 0, recipient: "", date: todayISO() };
-  const [form, setForm] = useState(blank);
-
-  const add = () => {
-    if (!form.category.trim()) return;
-    setPrizes((p) => [...p, { ...form, id: uid() }]);
-    setForm(blank);
-  };
-
+function PrizesTab({ prizes, setPrizes, taxCollected, prizeTotal, teams }) {
   return (
     <div className="grid gap-4">
       <div className="grid gap-4" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(200px,1fr))" }}>
@@ -4005,23 +4004,10 @@ function PrizesTab({ prizes, setPrizes, taxCollected, prizeTotal, teams, logActi
       </div>
 
       <Panel style={{ padding: 18 }}>
-        <SectionTitle icon={Coins}>Add Prize / Bonus</SectionTitle>
-        <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))" }}>
-          <Field label="Category"><TextInput value={form.category} onChange={(e) => setForm((f) => ({ ...f, category: e.target.value }))} placeholder="e.g. League Winner" /></Field>
-          <Field label="Description"><TextInput value={form.description} onChange={(e) => setForm((f) => ({ ...f, description: e.target.value }))} /></Field>
-          <Field label="Amount (£M)"><TextInput type="number" step="0.1" value={form.amount} onChange={(e) => setForm((f) => ({ ...f, amount: e.target.value }))} /></Field>
-          <Field label="Recipient">
-            <Select value={form.recipient} onChange={(e) => setForm((f) => ({ ...f, recipient: e.target.value }))}>
-              <option value="">TBD</option>
-              {teams.map((t) => <option key={t.id} value={t.name}>{t.name}</option>)}
-            </Select>
-          </Field>
-        </div>
-        <div style={{ marginTop: 14 }}><Btn icon={Plus} onClick={add}>Add</Btn></div>
-      </Panel>
-
-      <Panel style={{ padding: 18 }}>
         <SectionTitle icon={Coins}>Prize Log</SectionTitle>
+        <div style={{ color: C.muted, fontSize: 11.5, marginBottom: 12 }}>
+          New prizes/bonuses are added from the Admin tab.
+        </div>
         <Table
           head={["Category", "Description", "Amount", "Recipient", "Date", ""]}
           rows={prizes.map((p) => [
@@ -4315,7 +4301,46 @@ function RulesTab({ teams, standings }) {
   );
 }
 
-function AdminTab({ teams, squads, myTeamId, playerDatabase, adminPin, logAdminReward, resetAll, changeAdminPin, addFundsToTeam, addEarned86Slot, exportBackup, restoreBackup, restoreFromNightlyBackup, endSeason, season, seasonHistory, standings, importPlayerDatabase, clearPlayerDatabase, teamLockOverride, toggleTeamLockOverride, clearChat, resetTeamPassword, squadStats, transferWindow, setTransferWindowDates, clearTransferWindow }) {
+function AddPrizeTools({ teams, addPrize }) {
+  const blank = { category: "", description: "", amount: 0, recipient: "", date: todayISO() };
+  const [form, setForm] = useState(blank);
+  const [pin, setPin] = useState("");
+  const [msg, setMsg] = useState(null);
+
+  const add = () => {
+    const err = addPrize(pin, form);
+    if (err) setMsg({ text: err, tone: "red" });
+    else { setMsg({ text: "Prize added.", tone: "green" }); setForm(blank); }
+  };
+
+  return (
+    <Panel style={{ padding: 18 }}>
+      <SectionTitle icon={Coins}>Add Prize / Bonus</SectionTitle>
+      <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))" }}>
+        <Field label="Category"><TextInput value={form.category} onChange={(e) => setForm((f) => ({ ...f, category: e.target.value }))} placeholder="e.g. League Winner" /></Field>
+        <Field label="Description"><TextInput value={form.description} onChange={(e) => setForm((f) => ({ ...f, description: e.target.value }))} /></Field>
+        <Field label="Amount (£M)"><TextInput type="number" step="0.1" value={form.amount} onChange={(e) => setForm((f) => ({ ...f, amount: e.target.value }))} /></Field>
+        <Field label="Recipient">
+          <Select value={form.recipient} onChange={(e) => setForm((f) => ({ ...f, recipient: e.target.value }))}>
+            <option value="">TBD</option>
+            {teams.map((t) => <option key={t.id} value={t.name}>{t.name}</option>)}
+          </Select>
+        </Field>
+        <Field label="Admin PIN">
+          <TextInput type="password" value={pin} onChange={(e) => setPin(e.target.value)} />
+        </Field>
+      </div>
+      <div style={{ marginTop: 14 }}><Btn icon={Plus} onClick={add}>Add</Btn></div>
+      {msg && (
+        <div className="flex items-center gap-2" style={{ marginTop: 10, color: msg.tone === "green" ? C.green : C.red, fontSize: 12.5 }}>
+          {msg.tone === "green" ? <CheckCircle2 size={14} /> : <AlertTriangle size={14} />} {msg.text}
+        </div>
+      )}
+    </Panel>
+  );
+}
+
+function AdminTab({ teams, squads, myTeamId, playerDatabase, adminPin, logAdminReward, resetAll, changeAdminPin, addFundsToTeam, addEarned86Slot, exportBackup, restoreBackup, restoreFromNightlyBackup, endSeason, season, seasonHistory, standings, importPlayerDatabase, clearPlayerDatabase, teamLockOverride, toggleTeamLockOverride, clearChat, resetTeamPassword, squadStats, transferWindow, setTransferWindowDates, clearTransferWindow, addPrize }) {
   const [unlocked, setUnlocked] = useState(false);
   const [pinInput, setPinInput] = useState("");
   const [err, setErr] = useState("");
@@ -4346,6 +4371,8 @@ function AdminTab({ teams, squads, myTeamId, playerDatabase, adminPin, logAdminR
   return (
     <div className="grid gap-4">
       <AdminPlayerRewards teams={teams} squads={squads} logAdminReward={logAdminReward} myTeamId={myTeamId} playerDatabase={playerDatabase} squadStats={squadStats} />
+
+      <AddPrizeTools teams={teams} addPrize={addPrize} />
 
       <BackupTools exportBackup={exportBackup} restoreBackup={restoreBackup} restoreFromNightlyBackup={restoreFromNightlyBackup} />
 
