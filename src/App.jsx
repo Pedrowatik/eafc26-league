@@ -1066,6 +1066,7 @@ export default function EafcLeagueApp() {
     { id: "prizes", label: "Prize Pool", icon: Coins },
     { id: "chat", label: "League Chat", icon: MessageCircle },
     { id: "rules", label: "Rules", icon: BookOpen },
+    { id: "admin", label: "Admin", icon: Lock },
   ];
 
   // Overscroll on some trackpads/phones briefly reveals the page behind the app, which defaults to
@@ -1170,7 +1171,6 @@ export default function EafcLeagueApp() {
         )}
         {tab === "transfers" && (
           <TransfersTab teams={teams} squads={squads} transfers={transfers} logTransfer={logTransfer}
-            logAdminReward={logAdminReward}
             setTransfers={setTransfers} auctions={auctions} createAuction={createAuction}
             placeBid={placeBid} finalizeAuction={finalizeAuction} respondToAuction={respondToAuction}
             deleteBid={deleteBid} editAuctionPlayerName={editAuctionPlayerName} nowTick={nowTick}
@@ -1191,12 +1191,16 @@ export default function EafcLeagueApp() {
           <ChatTab chat={chat} setChat={setChat} teams={teams} myTeamId={myTeamId} markChatSeen={markChatSeen} />
         )}
         {tab === "rules" && (
-          <RulesTab teams={teams} resetAll={resetAll} changeAdminPin={changeAdminPin}
+          <RulesTab teams={teams} standings={standings} />
+        )}
+        {tab === "admin" && (
+          <AdminTab teams={teams} squads={squads} myTeamId={myTeamId} playerDatabase={playerDatabase}
+            adminPin={adminPin} logAdminReward={logAdminReward}
+            resetAll={resetAll} changeAdminPin={changeAdminPin}
             addFundsToTeam={addFundsToTeam} addEarned86Slot={addEarned86Slot}
             exportBackup={exportBackup} restoreBackup={restoreBackup} restoreFromNightlyBackup={restoreFromNightlyBackup}
             endSeason={endSeason} season={season} seasonHistory={seasonHistory} standings={standings}
-            playerDatabase={playerDatabase} importPlayerDatabase={importPlayerDatabase}
-            clearPlayerDatabase={clearPlayerDatabase} />
+            importPlayerDatabase={importPlayerDatabase} clearPlayerDatabase={clearPlayerDatabase} />
         )}
       </div>
 
@@ -2125,7 +2129,7 @@ function AuctionCard({ auction, teams, now, placeBid, finalizeAuction, deleteBid
   );
 }
 
-function TransfersTab({ teams, squads, transfers, logTransfer, logAdminReward, setTransfers, auctions, createAuction, placeBid, finalizeAuction, respondToAuction, deleteBid, editAuctionPlayerName, nowTick, myTeamId, playerDatabase }) {
+function AdminPlayerRewards({ teams, squads, logAdminReward, myTeamId, playerDatabase }) {
   const blank = { date: todayISO(), from: "FA", to: myTeamId || teams[0].id, name: "", position: "ST", rating: 75, club: "", age: 25, wage: 0, price: 0, notes: "" };
   const [form, setForm] = useState(blank);
   const [warning, setWarning] = useState("");
@@ -2147,95 +2151,99 @@ function TransfersTab({ teams, squads, transfers, logTransfer, logAdminReward, s
   };
 
   return (
+    <Panel style={{ padding: 18, border: `1px solid ${C.gold}55` }}>
+      <SectionTitle icon={Lock}>Admin: Player Rewards</SectionTitle>
+      <div style={{ color: C.muted, fontSize: 11.5, marginBottom: 12 }}>
+        For giving a player to a team outside the normal bidding process — season rewards, prizes, corrections,
+        or anything with no competing bids. Requires the admin PIN. If multiple teams might compete for a player,
+        use Player Auctions on the Transfers tab instead.
+      </div>
+      <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))" }}>
+        <Field label="Date">
+          <TextInput type="date" value={form.date} onChange={(e) => setForm((f) => ({ ...f, date: e.target.value }))} />
+        </Field>
+        <Field label="From (seller)">
+          <Select value={form.from} onChange={(e) => setForm((f) => ({ ...f, from: e.target.value, name: "" }))}>
+            <option value="FA">Non OCM</option>
+            {teams.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+          </Select>
+        </Field>
+        <Field label="To (buyer)">
+          <Select value={form.to} onChange={(e) => setForm((f) => ({ ...f, to: e.target.value }))}>
+            {teams.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+            <option value="FA">Non OCM (release)</option>
+          </Select>
+        </Field>
+        <Field label="Bid (£M)">
+          <TextInput type="number" step="0.25" value={form.price} onChange={(e) => setForm((f) => ({ ...f, price: e.target.value }))} />
+        </Field>
+      </div>
+
+      {form.from !== "FA" ? (
+        <div style={{ marginTop: 12 }}>
+          <Field label="Player (from that team's current squad)">
+            <Select value={form.name} onChange={(e) => pickSellerPlayer(e.target.value)}>
+              <option value="">Select a player…</option>
+              {sellerSquadPlayers.map((p) => <option key={p.name} value={p.name}>{p.name} ({p.position}, {p.rating})</option>)}
+            </Select>
+          </Field>
+        </div>
+      ) : (
+        <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", marginTop: 12 }}>
+          <Field label="Player name">
+            <PlayerAutocomplete
+              value={form.name}
+              onChange={(name) => setForm((f) => ({ ...f, name }))}
+              playerDatabase={playerDatabase}
+              onSelect={(p) => setForm((f) => ({
+                ...f, name: p.name, position: p.position || f.position, rating: p.rating || f.rating,
+                club: p.club || f.club, age: p.age || f.age, wage: p.wage || f.wage,
+                price: p.value ? roundUpTo250k(p.value) : f.price,
+              }))}
+            />
+          </Field>
+          <Field label="Position">
+            <Select value={form.position} onChange={(e) => setForm((f) => ({ ...f, position: e.target.value }))}>
+              {POSITIONS.map((pos) => <option key={pos}>{pos}</option>)}
+            </Select>
+          </Field>
+          <Field label="Rating"><TextInput type="number" value={form.rating} onChange={(e) => setForm((f) => ({ ...f, rating: e.target.value }))} /></Field>
+          <Field label="Club"><TextInput value={form.club} onChange={(e) => setForm((f) => ({ ...f, club: e.target.value }))} /></Field>
+          <Field label="Age"><TextInput type="number" value={form.age} onChange={(e) => setForm((f) => ({ ...f, age: e.target.value }))} /></Field>
+          <Field label="Weekly wage (£k)"><TextInput type="number" value={form.wage} onChange={(e) => setForm((f) => ({ ...f, wage: e.target.value }))} /></Field>
+        </div>
+      )}
+
+      <div className="flex items-end gap-4 flex-wrap" style={{ marginTop: 14 }}>
+        <Pill tone="gold">Tax: {money(tax)}</Pill>
+        <Pill tone="muted">Final cost to buyer: {money(Number(form.price || 0) + tax)}</Pill>
+        <Field label="Admin PIN">
+          <TextInput type="password" value={pin} onChange={(e) => setPin(e.target.value)} style={{ width: 140 }} />
+        </Field>
+        <Btn icon={Plus} onClick={submit}>Give player</Btn>
+      </div>
+      {warning && (
+        <div className="flex items-center gap-2" style={{ marginTop: 10, color: C.red, fontSize: 12.5 }}>
+          <AlertTriangle size={14} /> {warning}
+        </div>
+      )}
+      <div style={{ marginTop: 10, color: C.muted, fontSize: 11.5 }}>
+        Bids should be in £250,000 increments. Tax is 10% of the bid (minimum £0.25M), charged to the buyer.
+        Logging a transfer doesn't move anything immediately — the seller is credited and loses the player after
+        12 hours, and the buyer's signing (squad placement, budget hit, tax) is ratified after the full 24 hours.
+        See the Status column in Transfer History (on the Transfers tab) for where each deal stands.
+      </div>
+    </Panel>
+  );
+}
+
+function TransfersTab({ teams, squads, transfers, logTransfer, logAdminReward, setTransfers, auctions, createAuction, placeBid, finalizeAuction, respondToAuction, deleteBid, editAuctionPlayerName, nowTick, myTeamId, playerDatabase }) {
+  return (
     <div className="grid gap-4">
       <AuctionsPanel teams={teams} squads={squads} auctions={auctions} createAuction={createAuction}
         placeBid={placeBid} finalizeAuction={finalizeAuction} respondToAuction={respondToAuction}
         deleteBid={deleteBid} editAuctionPlayerName={editAuctionPlayerName} myTeamId={myTeamId}
         playerDatabase={playerDatabase} />
-
-      <Panel style={{ padding: 18, border: `1px solid ${C.gold}55` }}>
-        <SectionTitle icon={Lock}>Admin: Player Rewards</SectionTitle>
-        <div style={{ color: C.muted, fontSize: 11.5, marginBottom: 12 }}>
-          For giving a player to a team outside the normal bidding process — season rewards, prizes, corrections,
-          or anything with no competing bids. Requires the admin PIN. If multiple teams might compete for a player,
-          use Player Auctions above instead.
-        </div>
-        <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))" }}>
-          <Field label="Date">
-            <TextInput type="date" value={form.date} onChange={(e) => setForm((f) => ({ ...f, date: e.target.value }))} />
-          </Field>
-          <Field label="From (seller)">
-            <Select value={form.from} onChange={(e) => setForm((f) => ({ ...f, from: e.target.value, name: "" }))}>
-              <option value="FA">Non OCM</option>
-              {teams.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
-            </Select>
-          </Field>
-          <Field label="To (buyer)">
-            <Select value={form.to} onChange={(e) => setForm((f) => ({ ...f, to: e.target.value }))}>
-              {teams.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
-              <option value="FA">Non OCM (release)</option>
-            </Select>
-          </Field>
-          <Field label="Bid (£M)">
-            <TextInput type="number" step="0.25" value={form.price} onChange={(e) => setForm((f) => ({ ...f, price: e.target.value }))} />
-          </Field>
-        </div>
-
-        {form.from !== "FA" ? (
-          <div style={{ marginTop: 12 }}>
-            <Field label="Player (from that team's current squad)">
-              <Select value={form.name} onChange={(e) => pickSellerPlayer(e.target.value)}>
-                <option value="">Select a player…</option>
-                {sellerSquadPlayers.map((p) => <option key={p.name} value={p.name}>{p.name} ({p.position}, {p.rating})</option>)}
-              </Select>
-            </Field>
-          </div>
-        ) : (
-          <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", marginTop: 12 }}>
-            <Field label="Player name">
-              <PlayerAutocomplete
-                value={form.name}
-                onChange={(name) => setForm((f) => ({ ...f, name }))}
-                playerDatabase={playerDatabase}
-                onSelect={(p) => setForm((f) => ({
-                  ...f, name: p.name, position: p.position || f.position, rating: p.rating || f.rating,
-                  club: p.club || f.club, age: p.age || f.age, wage: p.wage || f.wage,
-                  price: p.value ? roundUpTo250k(p.value) : f.price,
-                }))}
-              />
-            </Field>
-            <Field label="Position">
-              <Select value={form.position} onChange={(e) => setForm((f) => ({ ...f, position: e.target.value }))}>
-                {POSITIONS.map((pos) => <option key={pos}>{pos}</option>)}
-              </Select>
-            </Field>
-            <Field label="Rating"><TextInput type="number" value={form.rating} onChange={(e) => setForm((f) => ({ ...f, rating: e.target.value }))} /></Field>
-            <Field label="Club"><TextInput value={form.club} onChange={(e) => setForm((f) => ({ ...f, club: e.target.value }))} /></Field>
-            <Field label="Age"><TextInput type="number" value={form.age} onChange={(e) => setForm((f) => ({ ...f, age: e.target.value }))} /></Field>
-            <Field label="Weekly wage (£k)"><TextInput type="number" value={form.wage} onChange={(e) => setForm((f) => ({ ...f, wage: e.target.value }))} /></Field>
-          </div>
-        )}
-
-        <div className="flex items-end gap-4 flex-wrap" style={{ marginTop: 14 }}>
-          <Pill tone="gold">Tax: {money(tax)}</Pill>
-          <Pill tone="muted">Final cost to buyer: {money(Number(form.price || 0) + tax)}</Pill>
-          <Field label="Admin PIN">
-            <TextInput type="password" value={pin} onChange={(e) => setPin(e.target.value)} style={{ width: 140 }} />
-          </Field>
-          <Btn icon={Plus} onClick={submit}>Give player</Btn>
-        </div>
-        {warning && (
-          <div className="flex items-center gap-2" style={{ marginTop: 10, color: C.red, fontSize: 12.5 }}>
-            <AlertTriangle size={14} /> {warning}
-          </div>
-        )}
-        <div style={{ marginTop: 10, color: C.muted, fontSize: 11.5 }}>
-          Bids should be in £250,000 increments. Tax is 10% of the bid (minimum £0.25M), charged to the buyer.
-          Logging a transfer doesn't move anything immediately — the seller is credited and loses the player after
-          12 hours, and the buyer's signing (squad placement, budget hit, tax) is ratified after the full 24 hours.
-          See the Status column in Transfer History below for where each deal stands.
-        </div>
-      </Panel>
 
       <Panel style={{ padding: 18 }}>
         <SectionTitle icon={Repeat}>Transfer History</SectionTitle>
@@ -2780,7 +2788,7 @@ function ChatTab({ chat, setChat, teams, myTeamId, markChatSeen }) {
 }
 
 /* --------------------------------- Rules ---------------------------------- */
-function RulesTab({ teams, resetAll, changeAdminPin, addFundsToTeam, addEarned86Slot, exportBackup, restoreBackup, restoreFromNightlyBackup, endSeason, season, seasonHistory, standings, playerDatabase, importPlayerDatabase, clearPlayerDatabase }) {
+function RulesTab({ teams, standings }) {
   const n = teams.length;
   return (
     <div className="grid gap-4">
@@ -2789,7 +2797,7 @@ function RulesTab({ teams, resetAll, changeAdminPin, addFundsToTeam, addEarned86
         <div className="grid gap-3" style={{ color: C.text, fontSize: 13.5, lineHeight: 1.7 }}>
           <RuleBlock title="Currency & Budget">
             All values in £. Every team starts Season 1 with £500,000,000. From Season 2 onward, leftover budget
-            carries over and each team gets a position-based top-up when the season ends (see End of Season below).
+            carries over and each team gets a position-based top-up when the season ends (see the Admin tab).
             Bids must be placed in £250,000 increments.
           </RuleBlock>
           <RuleBlock title="Transfer Tax">
@@ -2821,6 +2829,41 @@ function RulesTab({ teams, resetAll, changeAdminPin, addFundsToTeam, addEarned86
           ])}
         />
       </Panel>
+    </div>
+  );
+}
+
+function AdminTab({ teams, squads, myTeamId, playerDatabase, adminPin, logAdminReward, resetAll, changeAdminPin, addFundsToTeam, addEarned86Slot, exportBackup, restoreBackup, restoreFromNightlyBackup, endSeason, season, seasonHistory, standings, importPlayerDatabase, clearPlayerDatabase }) {
+  const [unlocked, setUnlocked] = useState(false);
+  const [pinInput, setPinInput] = useState("");
+  const [err, setErr] = useState("");
+
+  const unlock = () => {
+    if (pinInput === adminPin) { setUnlocked(true); setErr(""); }
+    else setErr("Incorrect PIN.");
+  };
+
+  if (!unlocked) {
+    return (
+      <Panel style={{ padding: 32, maxWidth: 380, margin: "0 auto" }}>
+        <div className="flex flex-col items-center gap-3" style={{ textAlign: "center" }}>
+          <Lock size={28} color={C.gold} />
+          <div style={{ color: "#fff", fontWeight: 700, fontSize: 16 }}>Admin Area</div>
+          <div style={{ color: C.muted, fontSize: 12.5 }}>Enter the admin PIN to view backup, player database, season, and reward tools.</div>
+          <TextInput type="password" placeholder="Admin PIN" value={pinInput}
+            onChange={(e) => setPinInput(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") unlock(); }}
+            style={{ width: 160, textAlign: "center" }} />
+          <Btn onClick={unlock}>Unlock</Btn>
+          {err && <div style={{ color: C.red, fontSize: 12 }}>{err}</div>}
+        </div>
+      </Panel>
+    );
+  }
+
+  return (
+    <div className="grid gap-4">
+      <AdminPlayerRewards teams={teams} squads={squads} logAdminReward={logAdminReward} myTeamId={myTeamId} playerDatabase={playerDatabase} />
 
       <BackupTools exportBackup={exportBackup} restoreBackup={restoreBackup} restoreFromNightlyBackup={restoreFromNightlyBackup} />
 
