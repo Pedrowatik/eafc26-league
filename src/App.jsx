@@ -116,17 +116,20 @@ function defaultTeams() {
     notes: "",
     formation: "4-4-2",
     password: "",
-    crest: "",
+    homeClub: "", // real club this fantasy team represents — determines Captain eligibility
   }));
 }
 
-// Curated set of emoji that read well as team crests — mostly animals/heraldic symbols in the
-// spirit of real football badges (lions, eagles, wolves, shields, crowns, etc.).
-const CREST_OPTIONS = [
-  "🦁", "🐺", "🦅", "🐉", "🐯", "🐻", "🦂", "🐍", "🦈", "🐗",
-  "⚔️", "🛡️", "👑", "⭐", "🔥", "⚡", "🏆", "🥇", "🔱", "☠️",
-  "🐴", "🦏", "🦬", "🐂", "🦍", "🦄", "🦊", "🦇", "🐲", "🎯",
-];
+const CAPTAIN_SLOT_INDEX = STARTER_SLOTS - 1; // last starting slot (21st) is reserved for the Captain
+const CAPTAIN_MAX_RATING = 83;
+
+function firstFreeSlot(squad) {
+  const si = squad.starters.findIndex((p, i) => !p && i !== CAPTAIN_SLOT_INDEX);
+  if (si !== -1) return { group: "starters", idx: si };
+  const ri = squad.reserves.findIndex((p) => !p);
+  if (ri !== -1) return { group: "reserves", idx: ri };
+  return null;
+}
 
 function defaultSquads() {
   const squads = {};
@@ -316,6 +319,9 @@ export default function EafcLeagueApp() {
   const [playerDatabase, setPlayerDatabase] = useState([]); // imported from Sofifa for autocomplete
   const [injuries, setInjuries] = useState({}); // { [teamId]: { [playerName]: lastInjuredMatchday } }
   const [teamLockOverride, setTeamLockOverride] = useState(false); // admin toggle to allow re-picks mid-season
+  const [transferWindow, setTransferWindow] = useState({ opensAt: null, closesAt: null }); // null = always open
+  const [swapsUsed, setSwapsUsed] = useState({}); // { [teamId]: windowOpensAt } — which window a team last used their swap in
+  const [swapOffers, setSwapOffers] = useState([]); // pending/accepted/declined player-for-player swap proposals
   const [cardTally, setCardTally] = useState({}); // { [teamId]: { [playerName]: seasonYellowCount } }
   const [suspensions, setSuspensions] = useState({}); // { [teamId]: { [playerName]: true } } — cleared once that team completes one more fixture
   const [transferListings, setTransferListings] = useState([]); // players a team has put up for sale
@@ -353,6 +359,9 @@ export default function EafcLeagueApp() {
     if (data.playerDatabase) setPlayerDatabase(data.playerDatabase);
     if (data.injuries) setInjuries(data.injuries);
     if (data.teamLockOverride !== undefined) setTeamLockOverride(data.teamLockOverride);
+    if (data.transferWindow) setTransferWindow(data.transferWindow);
+    if (data.swapsUsed) setSwapsUsed(data.swapsUsed);
+    if (data.swapOffers) setSwapOffers(data.swapOffers);
     if (data.cardTally) setCardTally(data.cardTally);
     if (data.suspensions) setSuspensions(data.suspensions);
     if (data.transferListings) setTransferListings(data.transferListings);
@@ -405,7 +414,7 @@ export default function EafcLeagueApp() {
         const savedAt = Date.now();
         await storage.set(
           STORAGE_KEY,
-          JSON.stringify({ teams, squads, transfers, fixtures, prizes, events, auctions, adminPin, season, seasonHistory, activity, chat, playerDatabase, injuries, teamLockOverride, cardTally, suspensions, transferListings, wantedListings, privateMessages, savedAt }),
+          JSON.stringify({ teams, squads, transfers, fixtures, prizes, events, auctions, adminPin, season, seasonHistory, activity, chat, playerDatabase, injuries, teamLockOverride, cardTally, suspensions, transferListings, wantedListings, privateMessages, transferWindow, swapsUsed, swapOffers, savedAt }),
           true
         );
         knownSavedAtRef.current = savedAt;
@@ -416,7 +425,7 @@ export default function EafcLeagueApp() {
       }
     }, 500);
     return () => clearTimeout(t);
-  }, [teams, squads, transfers, fixtures, prizes, events, auctions, adminPin, season, seasonHistory, activity, chat, playerDatabase, injuries, teamLockOverride, cardTally, suspensions, transferListings, wantedListings, privateMessages, loaded]);
+  }, [teams, squads, transfers, fixtures, prizes, events, auctions, adminPin, season, seasonHistory, activity, chat, playerDatabase, injuries, teamLockOverride, cardTally, suspensions, transferListings, wantedListings, privateMessages, transferWindow, swapsUsed, swapOffers, loaded]);
 
   // live sync: poll for other people's changes and pull them in automatically. Skipped while we
   // have our own unsaved edit in flight, so we don't clobber it with a slightly stale copy.
@@ -616,7 +625,7 @@ export default function EafcLeagueApp() {
           // Tax-only auction-loss charges have no player to place — just mark them ratified.
           if (tx.from === "AUCTION_LOSS") { txChanged = true; return { ...tx, buyerProcessed: true }; }
           const team = nextSquads[tx.to];
-          const si = team.starters.findIndex((p) => !p);
+          const si = team.starters.findIndex((p, i) => !p && i !== CAPTAIN_SLOT_INDEX);
           const group = si !== -1 ? "starters" : null;
           const ri = group ? -1 : team.reserves.findIndex((p) => !p);
           const targetGroup = group || (ri !== -1 ? "reserves" : null);
@@ -698,6 +707,13 @@ export default function EafcLeagueApp() {
     [fixtures]
   );
 
+  // No window set at all = always open (so this doesn't suddenly lock anyone out until an admin
+  // actually configures one). Once set, it's purely time-based — no manual toggle needed.
+  const transferWindowOpen = useMemo(() => {
+    if (!transferWindow.opensAt || !transferWindow.closesAt) return true;
+    return nowTick >= transferWindow.opensAt && nowTick <= transferWindow.closesAt;
+  }, [transferWindow, nowTick]);
+
   const standings = useMemo(() => {
     const rows = teams.map((t) => ({ id: t.id, w: 0, d: 0, l: 0, gf: 0, ga: 0, played: 0 }));
     const byId = Object.fromEntries(rows.map((r) => [r.id, r]));
@@ -739,17 +755,52 @@ export default function EafcLeagueApp() {
   };
 
   // Moves a player from one group (starters/reserves) to the other, into the first free slot.
-  // Doesn't touch player data itself — purely reorganizing an existing squad.
+  // Doesn't touch player data itself — purely reorganizing an existing squad. The Captain slot
+  // (last starter slot) is excluded — that's only ever filled via signCaptain.
   const movePlayerToGroup = (teamId, fromGroup, index, toGroup) => {
     const sq = squads[teamId];
     const player = sq[fromGroup][index];
     if (!player) return "No player in that slot.";
-    const freeIdx = sq[toGroup].findIndex((p) => !p);
+    const freeIdx = sq[toGroup].findIndex((p, i) => !p && !(toGroup === "starters" && i === CAPTAIN_SLOT_INDEX));
     if (freeIdx === -1) return `No free slot in ${toGroup === "starters" ? "the starting squad" : "reserves"}.`;
     setSquads((all) => {
       const next = { ...all, [teamId]: { starters: [...all[teamId].starters], reserves: [...all[teamId].reserves] } };
       next[teamId][fromGroup][index] = null;
       next[teamId][toGroup][freeIdx] = player;
+      return next;
+    });
+    return null;
+  };
+
+  // Signs a Club Captain into the reserved 21st slot — free (no budget/wage impact), restricted to
+  // players from the team's declared home club, rated 83 or below. Self-service, own team only.
+  const signCaptain = (teamId, player) => {
+    const team = teams.find((t) => t.id === teamId);
+    if (!team) return "Team not found.";
+    if (!team.homeClub || !team.homeClub.trim()) return "Set your team's Home Club first (in the fields above) before signing a Captain.";
+    if (!player || !player.name) return "Choose a player.";
+    if (Number(player.rating) > CAPTAIN_MAX_RATING) return `Captains must be rated ${CAPTAIN_MAX_RATING} or below.`;
+    if (!player.club || player.club.trim().toLowerCase() !== team.homeClub.trim().toLowerCase()) {
+      return `Your Captain has to be a ${team.homeClub} player.`;
+    }
+    const sq = squads[teamId];
+    if (sq.starters[CAPTAIN_SLOT_INDEX]) return "This team already has a Captain — release them first to sign a new one.";
+    setSquads((all) => {
+      const next = { ...all, [teamId]: { starters: [...all[teamId].starters], reserves: [...all[teamId].reserves] } };
+      next[teamId].starters[CAPTAIN_SLOT_INDEX] = {
+        name: player.name, position: player.position || "CM", rating: Number(player.rating) || 0,
+        club: player.club, age: Number(player.age) || 0, value: 0, wage: 0, // free — no budget/wage impact
+      };
+      return next;
+    });
+    logActivity(`${team.name} appointed ${player.name} as Club Captain`, "transfer");
+    return null;
+  };
+
+  const releaseCaptain = (teamId) => {
+    setSquads((all) => {
+      const next = { ...all, [teamId]: { starters: [...all[teamId].starters], reserves: [...all[teamId].reserves] } };
+      next[teamId].starters[CAPTAIN_SLOT_INDEX] = null;
       return next;
     });
     return null;
@@ -852,7 +903,7 @@ export default function EafcLeagueApp() {
         }
         if (teamById[form.to]) {
           const team = next[form.to];
-          const si = team.starters.findIndex((p) => !p);
+          const si = team.starters.findIndex((p, i) => !p && i !== CAPTAIN_SLOT_INDEX);
           const group = si !== -1 ? "starters" : (team.reserves.findIndex((p) => !p) !== -1 ? "reserves" : null);
           if (group) {
             const idx = group === "starters" ? si : team.reserves.findIndex((p) => !p);
@@ -884,6 +935,7 @@ export default function EafcLeagueApp() {
   const AUCTION_DURATION_MS = 24 * 60 * 60 * 1000;
 
   const createAuction = (form) => {
+    if (!transferWindowOpen) return "The transfer window is closed — auctions can't be started right now.";
     if (!form.name.trim()) return "Enter a player name.";
     if (!form.startingBidder) return "Choose which team is making the opening bid.";
     if (form.startingBidder === form.seller) return "The opening bidder can't be the same team as the seller.";
@@ -1264,18 +1316,38 @@ export default function EafcLeagueApp() {
     return null;
   };
 
+  const setTransferWindowDates = (pinAttempt, opensAt, closesAt) => {
+    if (pinAttempt !== adminPin) return "Incorrect PIN.";
+    if (!opensAt || !closesAt) return "Set both an open and close date/time.";
+    if (closesAt <= opensAt) return "Closing time has to be after the opening time.";
+    setTransferWindow({ opensAt, closesAt });
+    return null;
+  };
+
+  const clearTransferWindow = (pinAttempt) => {
+    if (pinAttempt !== adminPin) return "Incorrect PIN.";
+    setTransferWindow({ opensAt: null, closesAt: null });
+    return null;
+  };
+
   /* ------------------------------- player market ------------------------------- */
-  const addTransferListing = (player, askingPrice, notes) => {
+  const addTransferListing = (player, askingPrice, notes, swapWantedPosition) => {
+    if (!transferWindowOpen) return "The transfer window is closed — you can't list a player right now.";
     if (!myTeamId) return "Pick your team first (top right) before listing a player.";
     if (!player) return "Choose a player from your squad.";
-    if (!askingPrice || Number(askingPrice) <= 0) return "Enter an asking price.";
+    if (swapWantedPosition) {
+      if (season < 2) return "Swap listings only become available from Season 2 onward.";
+    } else if (!askingPrice || Number(askingPrice) <= 0) {
+      return "Enter an asking price.";
+    }
     if (transferListings.some((l) => l.teamId === myTeamId && l.playerName === player.name)) {
       return "That player's already on the transfer list.";
     }
     setTransferListings((all) => [{
       id: uid(), teamId: myTeamId, playerName: player.name, position: player.position,
       rating: player.rating, club: player.club, age: player.age, wage: player.wage,
-      askingPrice: Number(askingPrice), notes: notes || "", postedAt: Date.now(),
+      askingPrice: swapWantedPosition ? 0 : Number(askingPrice), swapWantedPosition: swapWantedPosition || null,
+      notes: notes || "", postedAt: Date.now(),
     }, ...all]);
     return null;
   };
@@ -1291,6 +1363,7 @@ export default function EafcLeagueApp() {
   };
 
   const addWantedListing = (position, notes) => {
+    if (!transferWindowOpen) return "The transfer window is closed — you can't post a wanted ad right now.";
     if (!myTeamId) return "Pick your team first (top right) before posting a wanted ad.";
     if (!position) return "Choose a position.";
     setWantedListings((all) => [{ id: uid(), teamId: myTeamId, position, notes: notes || "", postedAt: Date.now() }, ...all]);
@@ -1304,6 +1377,78 @@ export default function EafcLeagueApp() {
       return "Only the team that posted this (or an admin) can remove it.";
     }
     setWantedListings((all) => all.filter((l) => l.id !== id));
+    return null;
+  };
+
+  // Has this team already used their one swap for the current window? Ties the "used" marker to
+  // the window's own opensAt timestamp, so it naturally resets whenever admin opens a new window.
+  const hasUsedSwapThisWindow = (teamId) => swapsUsed[teamId] === (transferWindow.opensAt || "no-window-set");
+
+  const offerSwap = (listingId, offeringPlayerName) => {
+    if (!transferWindowOpen) return "The transfer window is closed.";
+    if (season < 2) return "Swaps only become available from Season 2 onward.";
+    if (!myTeamId) return "Pick your team first (top right) before offering a swap.";
+    const listing = transferListings.find((l) => l.id === listingId);
+    if (!listing || !listing.swapWantedPosition) return "That listing isn't open to swaps.";
+    if (listing.teamId === myTeamId) return "You can't swap with yourself.";
+    if (hasUsedSwapThisWindow(myTeamId)) return "You've already used your swap for this window.";
+    if (hasUsedSwapThisWindow(listing.teamId)) return "That team has already used their swap for this window.";
+    const myPlayer = [...(squads[myTeamId]?.starters || []), ...(squads[myTeamId]?.reserves || [])].find((p) => p && p.name === offeringPlayerName);
+    if (!myPlayer) return "Choose a player from your own squad to offer.";
+    setSwapOffers((all) => [...all, {
+      id: uid(), listingId, listingTeamId: listing.teamId, listingPlayerName: listing.playerName,
+      offeringTeamId: myTeamId, offeringPlayerName: myPlayer.name, status: "pending", createdAt: Date.now(),
+    }]);
+    sendPrivateMessage(listing.teamId, `🔄 Swap offer: ${myPlayer.name} for your ${listing.playerName}. Check the Transfer List to accept or decline.`);
+    return null;
+  };
+
+  const respondToSwapOffer = (offerId, accept) => {
+    const offer = swapOffers.find((o) => o.id === offerId);
+    if (!offer) return "Offer not found.";
+    if (offer.status !== "pending") return "This offer has already been resolved.";
+    if (offer.listingTeamId !== myTeamId) return "Only the team that listed the player can respond to this offer.";
+
+    if (!accept) {
+      setSwapOffers((all) => all.map((o) => (o.id === offerId ? { ...o, status: "declined" } : o)));
+      sendPrivateMessage(offer.offeringTeamId, `Swap offer for ${offer.listingPlayerName} was declined.`);
+      return null;
+    }
+
+    // Execute the swap: each player moves into the other team's first free slot (never the
+    // Captain slot), both teams' one-swap-per-window allowance is marked used, and the original
+    // listing is removed since the player it was for has now moved on.
+    setSquads((all) => {
+      const listingSquad = all[offer.listingTeamId], offeringSquad = all[offer.offeringTeamId];
+      const listingPlayerObj = [...listingSquad.starters, ...listingSquad.reserves].find((p) => p && p.name === offer.listingPlayerName);
+      const offeringPlayerObj = [...offeringSquad.starters, ...offeringSquad.reserves].find((p) => p && p.name === offer.offeringPlayerName);
+      if (!listingPlayerObj || !offeringPlayerObj) return all; // one side no longer has the player — abort safely
+
+      const removePlayer = (sq, name) => ({
+        starters: sq.starters.map((p) => (p && p.name === name ? null : p)),
+        reserves: sq.reserves.map((p) => (p && p.name === name ? null : p)),
+      });
+      let nextListingSquad = removePlayer(listingSquad, offer.listingPlayerName);
+      let nextOfferingSquad = removePlayer(offeringSquad, offer.offeringPlayerName);
+
+      const slotForOffering = firstFreeSlot(nextListingSquad);
+      const slotForListing = firstFreeSlot(nextOfferingSquad);
+      if (!slotForOffering || !slotForListing) return all; // no room on one side — abort safely
+
+      nextListingSquad = { ...nextListingSquad, [slotForOffering.group]: [...nextListingSquad[slotForOffering.group]] };
+      nextListingSquad[slotForOffering.group][slotForOffering.idx] = offeringPlayerObj;
+      nextOfferingSquad = { ...nextOfferingSquad, [slotForListing.group]: [...nextOfferingSquad[slotForListing.group]] };
+      nextOfferingSquad[slotForListing.group][slotForListing.idx] = listingPlayerObj;
+
+      return { ...all, [offer.listingTeamId]: nextListingSquad, [offer.offeringTeamId]: nextOfferingSquad };
+    });
+
+    const windowKey = transferWindow.opensAt || "no-window-set";
+    setSwapsUsed((prev) => ({ ...prev, [offer.listingTeamId]: windowKey, [offer.offeringTeamId]: windowKey }));
+    setSwapOffers((all) => all.map((o) => (o.id === offerId ? { ...o, status: "accepted" } : o)));
+    setTransferListings((all) => all.filter((l) => l.id !== offer.listingId));
+    logActivity(`Swap completed: ${offer.listingPlayerName} ↔ ${offer.offeringPlayerName}`, "transfer");
+    sendPrivateMessage(offer.offeringTeamId, `✅ Swap accepted — ${offer.listingPlayerName} for your ${offer.offeringPlayerName} is done.`);
     return null;
   };
 
@@ -1328,6 +1473,8 @@ export default function EafcLeagueApp() {
   }, [dmLastSeen]);
 
   // Market offers/interest now send a real private message instead of a tagged public chat post.
+  // Deliberately NOT gated by the transfer window — negotiating/chatting is fine anytime, it's only
+  // actually listing/bidding that's restricted.
   const sendMarketMessage = (toTeamId, text) => sendPrivateMessage(toTeamId, text);
 
   /* --------------------------------- render --------------------------------- */
@@ -1449,7 +1596,8 @@ export default function EafcLeagueApp() {
         )}
         {tab === "squads" && (
           <SquadsTab teams={teams} squads={squads} squadStats={squadStats} renameTeam={renameTeam}
-            setTab={setTab} movePlayerToGroup={movePlayerToGroup} reorderPlayer={reorderPlayer} myTeamId={myTeamId} />
+            setTab={setTab} movePlayerToGroup={movePlayerToGroup} reorderPlayer={reorderPlayer} myTeamId={myTeamId}
+            signCaptain={signCaptain} releaseCaptain={releaseCaptain} playerDatabase={playerDatabase} />
         )}
         {tab === "budgets" && (
           <BudgetsTab teams={teams} budgetStats={budgetStats} renameTeam={renameTeam} />
@@ -1463,7 +1611,9 @@ export default function EafcLeagueApp() {
             transferListings={transferListings} wantedListings={wantedListings}
             addTransferListing={addTransferListing} removeTransferListing={removeTransferListing}
             addWantedListing={addWantedListing} removeWantedListing={removeWantedListing}
-            sendMarketMessage={sendMarketMessage} />
+            sendMarketMessage={sendMarketMessage} transferWindow={transferWindow} transferWindowOpen={transferWindowOpen}
+            season={season} swapOffers={swapOffers} offerSwap={offerSwap} respondToSwapOffer={respondToSwapOffer}
+            hasUsedSwapThisWindow={hasUsedSwapThisWindow} />
         )}
         {tab === "fixtures" && (
           <FixturesTab teams={teams} fixtures={fixtures} setFixtures={setFixtures} logActivity={logActivity}
@@ -1497,7 +1647,8 @@ export default function EafcLeagueApp() {
             endSeason={endSeason} season={season} seasonHistory={seasonHistory} standings={standings}
             importPlayerDatabase={importPlayerDatabase} clearPlayerDatabase={clearPlayerDatabase}
             teamLockOverride={teamLockOverride} toggleTeamLockOverride={toggleTeamLockOverride} clearChat={clearChat}
-            resetTeamPassword={resetTeamPassword} squadStats={squadStats} />
+            resetTeamPassword={resetTeamPassword} squadStats={squadStats}
+            transferWindow={transferWindow} setTransferWindowDates={setTransferWindowDates} clearTransferWindow={clearTransferWindow} />
         )}
       </div>
 
@@ -1687,10 +1838,10 @@ function Dashboard({ teams, squads, standings, budgetStats, prizeTotal, taxColle
                   width: 64, height: 64, borderRadius: 4,
                   background: `linear-gradient(135deg, ${C.gold}, ${C.goldDim})`,
                   display: "flex", alignItems: "center", justifyContent: "center",
-                  fontWeight: 700, color: "#0B1220", fontSize: myTeam.crest ? 32 : 24,
+                  fontWeight: 700, color: "#0B1220", fontSize: 24,
                   boxShadow: `0 0 24px ${C.gold}66`,
                 }} className="hud-font">
-                  {myTeam.crest || myTeam.name.slice(0, 2).toUpperCase()}
+                  {myTeam.name.slice(0, 2).toUpperCase()}
                 </div>
                 <div>
                   <div className="hud-font" style={{ color: "rgba(255,255,255,0.5)", fontSize: 11, letterSpacing: "0.18em", textTransform: "uppercase" }}>Your Club</div>
@@ -2082,17 +2233,28 @@ function FormationPitch({ formation, starters }) {
   );
 }
 
-function SquadsTab({ teams, squads, squadStats, renameTeam, setTab, movePlayerToGroup, reorderPlayer, myTeamId }) {
+function SquadsTab({ teams, squads, squadStats, renameTeam, setTab, movePlayerToGroup, reorderPlayer, myTeamId, signCaptain, releaseCaptain, playerDatabase }) {
   const [activeTeam, setActiveTeam] = useState(myTeamId || teams[0].id);
   const [moveError, setMoveError] = useState("");
+  const [captainForm, setCaptainForm] = useState({ name: "", position: "CM", rating: 75, club: "", age: 25 });
+  const [captainError, setCaptainError] = useState("");
   const team = teams.find((t) => t.id === activeTeam);
   const sq = squads[activeTeam];
   const stat = squadStats[activeTeam];
+  const clubOptions = useMemo(() => [...new Set(playerDatabase.map((p) => p.club).filter(Boolean))].sort(), [playerDatabase]);
 
   const move = (fromGroup, index, toGroup) => {
     const err = movePlayerToGroup(activeTeam, fromGroup, index, toGroup);
     setMoveError(err || "");
   };
+
+  const doSignCaptain = () => {
+    const err = signCaptain(activeTeam, captainForm);
+    setCaptainError(err || "");
+    if (!err) setCaptainForm({ name: "", position: "CM", rating: 75, club: team.homeClub || "", age: 25 });
+  };
+
+  const captain = sq.starters[CAPTAIN_SLOT_INDEX];
 
   return (
     <div className="grid gap-4">
@@ -2106,7 +2268,7 @@ function SquadsTab({ teams, squads, squadStats, renameTeam, setTab, movePlayerTo
                 background: activeTeam === t.id ? `${C.gold}22` : "transparent",
                 color: activeTeam === t.id ? C.gold : C.muted,
               }}>
-              {t.crest ? `${t.crest} ` : ""}{t.name}
+              {t.name}
             </button>
           ))}
         </div>
@@ -2115,7 +2277,7 @@ function SquadsTab({ teams, squads, squadStats, renameTeam, setTab, movePlayerTo
       <Panel style={{ padding: 18 }}>
         <SectionTitle icon={Users}
           right={<Btn size="sm" icon={Repeat} onClick={() => setTab("transfers")}>Add / release players via Transfers</Btn>}>
-          {team.crest ? `${team.crest} ` : ""}{team.name} — {team.manager}
+          {team.name} — {team.manager}
         </SectionTitle>
         <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", marginBottom: 16 }}>
           <Field label="Team name">
@@ -2150,36 +2312,22 @@ function SquadsTab({ teams, squads, squadStats, renameTeam, setTab, movePlayerTo
               <div style={{ ...inputStyle, opacity: 0.7 }}>{team.formation || "4-4-2"}</div>
             )}
           </Field>
+          <Field label="Home Club (for Captain eligibility)">
+            {activeTeam === myTeamId ? (
+              <>
+                <TextInput list="home-club-options" value={team.homeClub || ""} onChange={(e) => renameTeam(team.id, { homeClub: e.target.value })} placeholder="e.g. Arsenal" />
+                <datalist id="home-club-options">
+                  {clubOptions.map((c) => <option key={c} value={c} />)}
+                </datalist>
+              </>
+            ) : (
+              <div style={{ ...inputStyle, opacity: 0.7 }}>{team.homeClub || "Not set"}</div>
+            )}
+          </Field>
         </div>
         {activeTeam !== myTeamId && (
           <div style={{ color: C.muted, fontSize: 11, marginBottom: 12 }}>
-            {myTeamId ? "You can only edit your own team's name, manager, formation, and crest." : "Pick your team (top right) to edit its name, manager, formation, and crest."}
-          </div>
-        )}
-
-        {activeTeam === myTeamId && (
-          <div style={{ marginBottom: 16 }}>
-            <Label>Crest</Label>
-            <div className="flex flex-wrap gap-1">
-              <button onClick={() => renameTeam(team.id, { crest: "" })} title="Use initials instead"
-                style={{
-                  width: 34, height: 34, borderRadius: 6, fontSize: 14, cursor: "pointer",
-                  border: `1px solid ${!team.crest ? C.gold : C.border}`, background: !team.crest ? `${C.gold}22` : C.panelAlt,
-                  color: C.muted, display: "flex", alignItems: "center", justifyContent: "center",
-                }}>
-                {team.name.slice(0, 2).toUpperCase()}
-              </button>
-              {CREST_OPTIONS.map((c) => (
-                <button key={c} onClick={() => renameTeam(team.id, { crest: c })}
-                  style={{
-                    width: 34, height: 34, borderRadius: 6, fontSize: 17, cursor: "pointer",
-                    border: `1px solid ${team.crest === c ? C.gold : C.border}`, background: team.crest === c ? `${C.gold}22` : C.panelAlt,
-                    display: "flex", alignItems: "center", justifyContent: "center",
-                  }}>
-                  {c}
-                </button>
-              ))}
-            </div>
+            {myTeamId ? "You can only edit your own team's name, manager, and formation." : "Pick your team (top right) to edit its name, manager, and formation."}
           </div>
         )}
 
@@ -2205,9 +2353,64 @@ function SquadsTab({ teams, squads, squadStats, renameTeam, setTab, movePlayerTo
           </div>
         )}
 
+        <div style={{ background: C.panelAlt, border: `1px solid ${C.gold}55`, borderRadius: 8, padding: 12, marginBottom: 16 }}>
+          <div style={{ color: C.gold, fontWeight: 700, fontSize: 13, marginBottom: 6 }}>Club Captain (slot 21 — free, no budget or wage impact)</div>
+          <div style={{ color: C.muted, fontSize: 11.5, marginBottom: 10 }}>
+            A loyal, club-only signing — must be from your Home Club above and rated {CAPTAIN_MAX_RATING} or below.
+          </div>
+          {captain ? (
+            activeTeam === myTeamId ? (
+              <div className="flex items-center justify-between flex-wrap gap-2">
+                <div style={{ color: C.text, fontSize: 13 }}>
+                  <b>{captain.name}</b> — {captain.position}, {captain.rating} OVR, {captain.club}
+                </div>
+                <Btn size="sm" variant="outline" onClick={() => releaseCaptain(activeTeam)}>Release Captain</Btn>
+              </div>
+            ) : (
+              <div style={{ color: C.text, fontSize: 13 }}>
+                <b>{captain.name}</b> — {captain.position}, {captain.rating} OVR, {captain.club}
+              </div>
+            )
+          ) : activeTeam === myTeamId ? (
+            <>
+              <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))" }}>
+                <Field label="Player name">
+                  <PlayerAutocomplete
+                    value={captainForm.name}
+                    onChange={(name) => setCaptainForm((f) => ({ ...f, name }))}
+                    playerDatabase={playerDatabase.filter((p) => (!team.homeClub || p.club === team.homeClub) && Number(p.rating) <= CAPTAIN_MAX_RATING)}
+                    onSelect={(p) => setCaptainForm((f) => ({ ...f, name: p.name, position: p.position || f.position, rating: p.rating || f.rating, club: p.club || f.club, age: p.age || f.age }))}
+                  />
+                </Field>
+                <Field label="Position">
+                  <Select value={captainForm.position} onChange={(e) => setCaptainForm((f) => ({ ...f, position: e.target.value }))}>
+                    {POSITIONS.map((pos) => <option key={pos}>{pos}</option>)}
+                  </Select>
+                </Field>
+                <Field label={`Rating (max ${CAPTAIN_MAX_RATING})`}>
+                  <TextInput type="number" max={CAPTAIN_MAX_RATING} value={captainForm.rating} onChange={(e) => setCaptainForm((f) => ({ ...f, rating: e.target.value }))} />
+                </Field>
+                <Field label="Club (must match Home Club)">
+                  <TextInput value={captainForm.club} onChange={(e) => setCaptainForm((f) => ({ ...f, club: e.target.value }))} />
+                </Field>
+                <Field label="Age">
+                  <TextInput type="number" value={captainForm.age} onChange={(e) => setCaptainForm((f) => ({ ...f, age: e.target.value }))} />
+                </Field>
+              </div>
+              <div style={{ marginTop: 10 }}>
+                <Btn icon={Plus} onClick={doSignCaptain}>Sign Captain</Btn>
+              </div>
+              {captainError && <div style={{ color: C.red, fontSize: 11.5, marginTop: 8 }}>{captainError}</div>}
+            </>
+          ) : (
+            <div style={{ color: C.muted, fontSize: 12.5 }}>No Captain signed yet.</div>
+          )}
+        </div>
+
         <div className="grid gap-4 stack-on-mobile" style={{ gridTemplateColumns: "1.7fr 1fr", alignItems: "start" }}>
           <SquadTable title={`Starting Squad (${STARTER_SLOTS} slots)`} players={sq.starters}
             labelForIdx={(i) => {
+              if (i === CAPTAIN_SLOT_INDEX) return "CAPT";
               const positions = formationPositions(team.formation || "4-4-2");
               return i < 11 ? positions[i] : i + 1;
             }}
@@ -2842,24 +3045,30 @@ function AdminPlayerRewards({ teams, squads, logAdminReward, myTeamId, playerDat
   );
 }
 
-function PlayerMarket({ teams, squads, myTeamId, transferListings, wantedListings, addTransferListing, removeTransferListing, addWantedListing, removeWantedListing, sendMarketMessage }) {
+function PlayerMarket({ teams, squads, myTeamId, transferListings, wantedListings, addTransferListing, removeTransferListing, addWantedListing, removeWantedListing, sendMarketMessage, season, swapOffers, offerSwap, respondToSwapOffer, hasUsedSwapThisWindow }) {
   const mySquadPlayers = myTeamId ? [...(squads[myTeamId]?.starters || []), ...(squads[myTeamId]?.reserves || [])].filter(Boolean) : [];
   const teamName = (id) => teams.find((t) => t.id === id)?.name || id;
+  const swapsEnabled = season >= 2;
 
-  // --- Transfer List (for sale) ---
+  // --- Transfer List (for sale, or swap once Season 2+) ---
+  const [listType, setListType] = useState("cash"); // "cash" | "swap"
   const [listPlayerName, setListPlayerName] = useState("");
   const [askingPrice, setAskingPrice] = useState("");
+  const [swapWantedPosition, setSwapWantedPosition] = useState("CB");
   const [listNotes, setListNotes] = useState("");
   const [listMsg, setListMsg] = useState(null);
   const [offering, setOffering] = useState(null); // listing id currently composing an offer for
   const [offerAmount, setOfferAmount] = useState("");
   const [offerNote, setOfferNote] = useState("");
+  const [swapOfferPlayer, setSwapOfferPlayer] = useState("");
   const [removePin, setRemovePin] = useState({}); // { [listingId]: pinValue } for non-owners removing
 
   const submitListing = () => {
     const player = mySquadPlayers.find((p) => p.name === listPlayerName);
-    const err = addTransferListing(player, askingPrice, listNotes);
-    setListMsg(err ? { text: err, tone: "red" } : { text: "Player listed for transfer.", tone: "green" });
+    const err = listType === "swap"
+      ? addTransferListing(player, null, listNotes, swapWantedPosition)
+      : addTransferListing(player, askingPrice, listNotes, null);
+    setListMsg(err ? { text: err, tone: "red" } : { text: "Player listed.", tone: "green" });
     if (!err) { setListPlayerName(""); setAskingPrice(""); setListNotes(""); }
   };
 
@@ -2869,10 +3078,22 @@ function PlayerMarket({ teams, squads, myTeamId, transferListings, wantedListing
     setOffering(null); setOfferAmount(""); setOfferNote("");
   };
 
+  const doOfferSwap = (listing) => {
+    const err = offerSwap(listing.id, swapOfferPlayer);
+    if (err) setListMsg({ text: err, tone: "red" });
+    else { setListMsg({ text: "Swap offer sent.", tone: "green" }); setOffering(null); setSwapOfferPlayer(""); }
+  };
+
   const doRemoveListing = (id) => {
     const err = removeTransferListing(id, removePin[id] || "");
     if (!err) setRemovePin((p) => ({ ...p, [id]: "" }));
     else setListMsg({ text: err, tone: "red" });
+  };
+
+  const doRespondSwap = (offerId, accept) => {
+    const err = respondToSwapOffer(offerId, accept);
+    if (err) setListMsg({ text: err, tone: "red" });
+    else setListMsg({ text: accept ? "Swap accepted." : "Swap declined.", tone: "green" });
   };
 
   // --- Players Wanted ---
@@ -2905,30 +3126,47 @@ function PlayerMarket({ teams, squads, myTeamId, transferListings, wantedListing
       <Panel style={{ padding: 18 }}>
         <SectionTitle icon={Repeat}>Transfer List</SectionTitle>
         <div style={{ color: C.muted, fontSize: 11.5, marginBottom: 12 }}>
-          Put one of your own players up for sale with an asking price. Other teams can make an offer, which starts
-          a private conversation with you (check the Messages tab).
+          Put one of your own players up for sale with an asking price, or — from Season 2 onward — list them for a
+          straight swap instead. Other teams can respond, which starts a private conversation with you (check the
+          Messages tab), or for swaps, a formal offer you can accept or decline right here.
         </div>
 
         {myTeamId ? (
-          <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", marginBottom: 12 }}>
-            <Field label="Player (from your squad)">
-              <Select value={listPlayerName} onChange={(e) => setListPlayerName(e.target.value)}>
-                <option value="">Select a player…</option>
-                {mySquadPlayers
-                  .filter((p) => !transferListings.some((l) => l.teamId === myTeamId && l.playerName === p.name))
-                  .map((p) => <option key={p.name} value={p.name}>{p.name} ({p.position}, {p.rating})</option>)}
-              </Select>
-            </Field>
-            <Field label="Asking price (£M)">
-              <TextInput type="number" step="0.25" value={askingPrice} onChange={(e) => setAskingPrice(e.target.value)} />
-            </Field>
-            <Field label="Notes (optional)">
-              <TextInput value={listNotes} onChange={(e) => setListNotes(e.target.value)} placeholder="e.g. open to swaps" />
-            </Field>
-            <div style={{ alignSelf: "end" }}>
-              <Btn icon={Plus} onClick={submitListing}>List Player</Btn>
+          <>
+            {swapsEnabled && (
+              <div className="flex gap-2" style={{ marginBottom: 12 }}>
+                <Btn size="sm" variant={listType === "cash" ? "primary" : "outline"} onClick={() => setListType("cash")}>For Cash</Btn>
+                <Btn size="sm" variant={listType === "swap" ? "primary" : "outline"} onClick={() => setListType("swap")}>For Swap</Btn>
+              </div>
+            )}
+            <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", marginBottom: 12 }}>
+              <Field label="Player (from your squad)">
+                <Select value={listPlayerName} onChange={(e) => setListPlayerName(e.target.value)}>
+                  <option value="">Select a player…</option>
+                  {mySquadPlayers
+                    .filter((p) => !transferListings.some((l) => l.teamId === myTeamId && l.playerName === p.name))
+                    .map((p) => <option key={p.name} value={p.name}>{p.name} ({p.position}, {p.rating})</option>)}
+                </Select>
+              </Field>
+              {listType === "swap" ? (
+                <Field label="Position wanted in return">
+                  <Select value={swapWantedPosition} onChange={(e) => setSwapWantedPosition(e.target.value)}>
+                    {POSITIONS.map((pos) => <option key={pos}>{pos}</option>)}
+                  </Select>
+                </Field>
+              ) : (
+                <Field label="Asking price (£M)">
+                  <TextInput type="number" step="0.25" value={askingPrice} onChange={(e) => setAskingPrice(e.target.value)} />
+                </Field>
+              )}
+              <Field label="Notes (optional)">
+                <TextInput value={listNotes} onChange={(e) => setListNotes(e.target.value)} placeholder={listType === "swap" ? "e.g. 90+ pace, box crasher" : "e.g. open to swaps"} />
+              </Field>
+              <div style={{ alignSelf: "end" }}>
+                <Btn icon={Plus} onClick={submitListing}>List Player</Btn>
+              </div>
             </div>
-          </div>
+          </>
         ) : (
           <div style={{ color: C.muted, fontSize: 12, marginBottom: 12 }}>Pick your team (top right) to list a player.</div>
         )}
@@ -2938,32 +3176,72 @@ function PlayerMarket({ teams, squads, myTeamId, transferListings, wantedListing
           <div style={{ color: C.muted, fontSize: 12.5 }}>No players currently listed.</div>
         ) : (
           <div className="grid gap-2">
-            {transferListings.map((l) => (
-              <div key={l.id} style={{ background: C.panelAlt, borderRadius: 8, padding: 10 }}>
-                <div className="flex items-center justify-between flex-wrap gap-2">
-                  <div style={{ fontSize: 12.5 }}>
-                    <b style={{ color: C.text }}>{l.playerName}</b>{" "}
-                    <span style={{ color: C.muted }}>{l.position} · {l.rating} · {l.club} · {l.age}y — listed by {teamName(l.teamId)}</span>
-                    <div style={{ color: C.gold, fontWeight: 700 }}>Asking {money(l.askingPrice)}</div>
-                    {l.notes && <div style={{ color: C.muted, fontSize: 11.5 }}>{l.notes}</div>}
+            {transferListings.map((l) => {
+              const isSwap = !!l.swapWantedPosition;
+              const myOfferSquadPlayers = mySquadPlayers; // reused for swap-offer player picker
+              const pendingOffersForThis = swapOffers.filter((o) => o.listingId === l.id && o.status === "pending");
+              const iAlreadyUsedSwap = myTeamId && hasUsedSwapThisWindow(myTeamId);
+              const listerUsedSwap = hasUsedSwapThisWindow(l.teamId);
+              return (
+                <div key={l.id} style={{ background: C.panelAlt, borderRadius: 8, padding: 10 }}>
+                  <div className="flex items-center justify-between flex-wrap gap-2">
+                    <div style={{ fontSize: 12.5 }}>
+                      <b style={{ color: C.text }}>{l.playerName}</b>{" "}
+                      <span style={{ color: C.muted }}>{l.position} · {l.rating} · {l.club} · {l.age}y — listed by {teamName(l.teamId)}</span>
+                      <div style={{ color: C.gold, fontWeight: 700 }}>
+                        {isSwap ? `Wants: ${l.swapWantedPosition} in return` : `Asking ${money(l.askingPrice)}`}
+                      </div>
+                      {l.notes && <div style={{ color: C.muted, fontSize: 11.5 }}>{l.notes}</div>}
+                    </div>
+                    <div className="flex items-center gap-2">
+                      {l.teamId === myTeamId ? (
+                        <Btn size="sm" variant="outline" icon={Trash2} onClick={() => doRemoveListing(l.id)}>Remove</Btn>
+                      ) : isSwap ? (
+                        <Btn size="sm" disabled={iAlreadyUsedSwap || listerUsedSwap}
+                          onClick={() => setOffering(offering === l.id ? null : l.id)}
+                          title={iAlreadyUsedSwap ? "You've used your swap for this window" : listerUsedSwap ? "They've used their swap for this window" : ""}>
+                          Offer a Swap
+                        </Btn>
+                      ) : (
+                        <Btn size="sm" onClick={() => setOffering(offering === l.id ? null : l.id)}>Make Offer</Btn>
+                      )}
+                    </div>
                   </div>
-                  <div className="flex items-center gap-2">
-                    {l.teamId === myTeamId ? (
-                      <Btn size="sm" variant="outline" icon={Trash2} onClick={() => doRemoveListing(l.id)}>Remove</Btn>
-                    ) : (
-                      <Btn size="sm" onClick={() => setOffering(offering === l.id ? null : l.id)}>Make Offer</Btn>
-                    )}
-                  </div>
+
+                  {/* Pending swap offers on your own listing */}
+                  {l.teamId === myTeamId && pendingOffersForThis.map((o) => (
+                    <div key={o.id} className="flex items-center justify-between flex-wrap gap-2" style={{ marginTop: 10, background: C.panel, borderRadius: 6, padding: 8 }}>
+                      <div style={{ fontSize: 12, color: C.text }}>
+                        {teamName(o.offeringTeamId)} offers <b>{o.offeringPlayerName}</b> for your {o.listingPlayerName}
+                      </div>
+                      <div className="flex gap-2">
+                        <Btn size="sm" onClick={() => doRespondSwap(o.id, true)}>Accept</Btn>
+                        <Btn size="sm" variant="outline" onClick={() => doRespondSwap(o.id, false)}>Decline</Btn>
+                      </div>
+                    </div>
+                  ))}
+
+                  {offering === l.id && isSwap && (
+                    <div className="flex items-end gap-2 flex-wrap" style={{ marginTop: 10 }}>
+                      <Field label="Offer one of your players">
+                        <Select value={swapOfferPlayer} onChange={(e) => setSwapOfferPlayer(e.target.value)} style={{ width: 220 }}>
+                          <option value="">Select a player…</option>
+                          {myOfferSquadPlayers.map((p) => <option key={p.name} value={p.name}>{p.name} ({p.position}, {p.rating})</option>)}
+                        </Select>
+                      </Field>
+                      <Btn size="sm" icon={Send} onClick={() => doOfferSwap(l)}>Send Swap Offer</Btn>
+                    </div>
+                  )}
+                  {offering === l.id && !isSwap && (
+                    <div className="flex items-end gap-2 flex-wrap" style={{ marginTop: 10 }}>
+                      <Field label="Offer (£M)"><TextInput type="number" step="0.25" value={offerAmount} onChange={(e) => setOfferAmount(e.target.value)} style={{ width: 110 }} /></Field>
+                      <Field label="Message (optional)"><TextInput value={offerNote} onChange={(e) => setOfferNote(e.target.value)} style={{ width: 220 }} /></Field>
+                      <Btn size="sm" icon={Send} onClick={() => sendOffer(l)}>Send Offer</Btn>
+                    </div>
+                  )}
                 </div>
-                {offering === l.id && (
-                  <div className="flex items-end gap-2 flex-wrap" style={{ marginTop: 10 }}>
-                    <Field label="Offer (£M)"><TextInput type="number" step="0.25" value={offerAmount} onChange={(e) => setOfferAmount(e.target.value)} style={{ width: 110 }} /></Field>
-                    <Field label="Message (optional)"><TextInput value={offerNote} onChange={(e) => setOfferNote(e.target.value)} style={{ width: 220 }} /></Field>
-                    <Btn size="sm" icon={Send} onClick={() => sendOffer(l)}>Send Offer</Btn>
-                  </div>
-                )}
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </Panel>
@@ -3029,7 +3307,29 @@ function PlayerMarket({ teams, squads, myTeamId, transferListings, wantedListing
   );
 }
 
-function TransfersTab({ teams, squads, transfers, logTransfer, logAdminReward, setTransfers, auctions, createAuction, placeBid, finalizeAuction, respondToAuction, deleteBid, deleteTransfer, editAuctionPlayerName, nowTick, myTeamId, playerDatabase, squadStats, transferListings, wantedListings, addTransferListing, removeTransferListing, addWantedListing, removeWantedListing, sendMarketMessage }) {
+function TransferWindowBanner({ transferWindow, transferWindowOpen, nowTick }) {
+  if (!transferWindow.opensAt || !transferWindow.closesAt) return null; // no window configured — nothing to show
+  const beforeOpen = nowTick < transferWindow.opensAt;
+  const target = beforeOpen ? transferWindow.opensAt : transferWindow.closesAt;
+  const remaining = target - nowTick;
+
+  return (
+    <Panel style={{ padding: 14 }} accent={transferWindowOpen ? C.green : C.red}>
+      <div className="flex items-center justify-between flex-wrap gap-2">
+        <div style={{ color: C.text, fontSize: 13.5, fontWeight: 700 }}>
+          {transferWindowOpen ? "🟢 Transfer window is OPEN" : beforeOpen ? "🔴 Transfer window opens soon" : "🔴 Transfer window is CLOSED"}
+        </div>
+        <Pill tone={transferWindowOpen ? "green" : "red"}>
+          {remaining > 0
+            ? `${transferWindowOpen ? "Closes" : "Opens"} in ${formatCountdown(remaining)}`
+            : (transferWindowOpen ? "Closes any moment" : "Closed")}
+        </Pill>
+      </div>
+    </Panel>
+  );
+}
+
+function TransfersTab({ teams, squads, transfers, logTransfer, logAdminReward, setTransfers, auctions, createAuction, placeBid, finalizeAuction, respondToAuction, deleteBid, deleteTransfer, editAuctionPlayerName, nowTick, myTeamId, playerDatabase, squadStats, transferListings, wantedListings, addTransferListing, removeTransferListing, addWantedListing, removeWantedListing, sendMarketMessage, transferWindow, transferWindowOpen, season, swapOffers, offerSwap, respondToSwapOffer, hasUsedSwapThisWindow }) {
   const [deletingId, setDeletingId] = useState(null);
   const [deletePin, setDeletePin] = useState("");
   const [deleteErr, setDeleteErr] = useState("");
@@ -3042,6 +3342,8 @@ function TransfersTab({ teams, squads, transfers, logTransfer, logAdminReward, s
 
   return (
     <div className="grid gap-4">
+      <TransferWindowBanner transferWindow={transferWindow} transferWindowOpen={transferWindowOpen} nowTick={nowTick} />
+
       <AuctionsPanel teams={teams} squads={squads} auctions={auctions} createAuction={createAuction}
         placeBid={placeBid} finalizeAuction={finalizeAuction} respondToAuction={respondToAuction}
         deleteBid={deleteBid} editAuctionPlayerName={editAuctionPlayerName} myTeamId={myTeamId}
@@ -3051,7 +3353,8 @@ function TransfersTab({ teams, squads, transfers, logTransfer, logAdminReward, s
         transferListings={transferListings} wantedListings={wantedListings}
         addTransferListing={addTransferListing} removeTransferListing={removeTransferListing}
         addWantedListing={addWantedListing} removeWantedListing={removeWantedListing}
-        sendMarketMessage={sendMarketMessage} />
+        sendMarketMessage={sendMarketMessage} season={season} swapOffers={swapOffers}
+        offerSwap={offerSwap} respondToSwapOffer={respondToSwapOffer} hasUsedSwapThisWindow={hasUsedSwapThisWindow} />
 
       <Panel style={{ padding: 18 }}>
         <SectionTitle icon={Repeat}>Transfer History</SectionTitle>
@@ -3647,7 +3950,7 @@ function StandingsTab({ teams, standings, fixtures }) {
           rows={standings.map((r) => {
             const t = teams.find((x) => x.id === r.id);
             return [
-              r.position === 1 ? <Pill tone="gold">1</Pill> : r.position, t?.crest ? `${t.crest} ${t.name}` : t?.name, t?.manager,
+              r.position === 1 ? <Pill tone="gold">1</Pill> : r.position, t?.name, t?.manager,
               r.played, r.w, r.d, r.l, r.gf, r.ga, r.gd, <b>{r.points}</b>,
               <FormDots results={formGuide[r.id] || []} />, money(r.nextCap),
             ];
@@ -4012,7 +4315,7 @@ function RulesTab({ teams, standings }) {
   );
 }
 
-function AdminTab({ teams, squads, myTeamId, playerDatabase, adminPin, logAdminReward, resetAll, changeAdminPin, addFundsToTeam, addEarned86Slot, exportBackup, restoreBackup, restoreFromNightlyBackup, endSeason, season, seasonHistory, standings, importPlayerDatabase, clearPlayerDatabase, teamLockOverride, toggleTeamLockOverride, clearChat, resetTeamPassword, squadStats }) {
+function AdminTab({ teams, squads, myTeamId, playerDatabase, adminPin, logAdminReward, resetAll, changeAdminPin, addFundsToTeam, addEarned86Slot, exportBackup, restoreBackup, restoreFromNightlyBackup, endSeason, season, seasonHistory, standings, importPlayerDatabase, clearPlayerDatabase, teamLockOverride, toggleTeamLockOverride, clearChat, resetTeamPassword, squadStats, transferWindow, setTransferWindowDates, clearTransferWindow }) {
   const [unlocked, setUnlocked] = useState(false);
   const [pinInput, setPinInput] = useState("");
   const [err, setErr] = useState("");
@@ -4054,7 +4357,8 @@ function AdminTab({ teams, squads, myTeamId, playerDatabase, adminPin, logAdminR
       <AdminTools teams={teams} resetAll={resetAll} changeAdminPin={changeAdminPin}
         addFundsToTeam={addFundsToTeam} addEarned86Slot={addEarned86Slot}
         teamLockOverride={teamLockOverride} toggleTeamLockOverride={toggleTeamLockOverride} clearChat={clearChat}
-        resetTeamPassword={resetTeamPassword} />
+        resetTeamPassword={resetTeamPassword}
+        transferWindow={transferWindow} setTransferWindowDates={setTransferWindowDates} clearTransferWindow={clearTransferWindow} />
     </div>
   );
 }
@@ -4597,7 +4901,7 @@ function EndSeasonTools({ endSeason, season, seasonHistory, standings, teams }) 
   );
 }
 
-function AdminTools({ teams, resetAll, changeAdminPin, addFundsToTeam, addEarned86Slot, teamLockOverride, toggleTeamLockOverride, clearChat, resetTeamPassword }) {
+function AdminTools({ teams, resetAll, changeAdminPin, addFundsToTeam, addEarned86Slot, teamLockOverride, toggleTeamLockOverride, clearChat, resetTeamPassword, transferWindow, setTransferWindowDates, clearTransferWindow }) {
   const [pin, setPin] = useState("");
   const [msg, setMsg] = useState(null); // { text, tone }
   const [showChangePin, setShowChangePin] = useState(false);
@@ -4610,8 +4914,24 @@ function AdminTools({ teams, resetAll, changeAdminPin, addFundsToTeam, addEarned
   const [slotAmount, setSlotAmount] = useState(1);
 
   const [pwTeam, setPwTeam] = useState(teams[0]?.id || "");
+  const [windowOpens, setWindowOpens] = useState("");
+  const [windowCloses, setWindowCloses] = useState("");
 
   const show = (text, tone) => setMsg({ text, tone });
+
+  const doSetWindow = () => {
+    const opensAt = windowOpens ? new Date(windowOpens).getTime() : null;
+    const closesAt = windowCloses ? new Date(windowCloses).getTime() : null;
+    const err = setTransferWindowDates(pin, opensAt, closesAt);
+    if (err) show(err, "red");
+    else show("Transfer window set.", "green");
+  };
+
+  const doClearWindow = () => {
+    const err = clearTransferWindow(pin);
+    if (err) show(err, "red");
+    else show("Transfer window cleared — the market is open with no restriction.", "green");
+  };
 
   const doReset = async () => {
     setMsg(null);
@@ -4764,6 +5084,31 @@ function AdminTools({ teams, resetAll, changeAdminPin, addFundsToTeam, addEarned
             </Select>
           </Field>
           <Btn onClick={doResetTeamPassword}>Clear Password</Btn>
+        </div>
+      </div>
+
+      {/* Transfer window */}
+      <div style={{ paddingTop: 18, marginTop: 18, borderTop: `1px solid ${C.border}` }}>
+        <div style={{ color: C.text, fontWeight: 700, fontSize: 13, marginBottom: 6 }}>Transfer Window</div>
+        <div style={{ color: C.muted, fontSize: 11.5, marginBottom: 10 }}>
+          Set when the market opens and closes — auctions, Transfer List listings, and Wanted ads all lock
+          automatically outside this window. Leave unset (or clear it) and the market stays open all the time.
+          Currently:{" "}
+          <b style={{ color: transferWindow.opensAt ? C.gold : C.muted }}>
+            {transferWindow.opensAt && transferWindow.closesAt
+              ? `${new Date(transferWindow.opensAt).toLocaleString()} → ${new Date(transferWindow.closesAt).toLocaleString()}`
+              : "No window set — always open"}
+          </b>
+        </div>
+        <div className="flex items-end gap-2 flex-wrap">
+          <Field label="Opens">
+            <TextInput type="datetime-local" value={windowOpens} onChange={(e) => setWindowOpens(e.target.value)} />
+          </Field>
+          <Field label="Closes">
+            <TextInput type="datetime-local" value={windowCloses} onChange={(e) => setWindowCloses(e.target.value)} />
+          </Field>
+          <Btn onClick={doSetWindow}>Set Window</Btn>
+          <Btn variant="outline" onClick={doClearWindow}>Clear (Always Open)</Btn>
         </div>
       </div>
 
