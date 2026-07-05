@@ -936,23 +936,33 @@ export default function EafcLeagueApp() {
 
   const createAuction = (form) => {
     if (!transferWindowOpen) return "The transfer window is closed — auctions can't be started right now.";
+    if (!myTeamId) return "Pick your team first (top right) before starting an auction.";
     if (!form.name.trim()) return "Enter a player name.";
-    if (!form.startingBidder) return "Choose which team is making the opening bid.";
-    if (form.startingBidder === form.seller) return "The opening bidder can't be the same team as the seller.";
+
+    // A player can only ever belong to one fantasy team at a time. If someone already owns them,
+    // the auction goes through that team as seller regardless of what was picked in the form — you
+    // can't route around the actual owner by claiming the player is a free agent or someone else's.
+    const currentOwnerId = teams.find((t) =>
+      [...(squads[t.id]?.starters || []), ...(squads[t.id]?.reserves || [])].some((p) => p && p.name === form.name.trim())
+    )?.id;
+    const actualSeller = currentOwnerId || form.seller;
+    const startingBidder = myTeamId;
+    if (startingBidder === actualSeller) return "You already own this player.";
+
     const minBid = Math.max(Number(form.minBid) || 0, 0.25);
-    const needsApproval = teamById[form.seller] ? true : false; // real team owns this player — they must accept first
+    const needsApproval = teamById[actualSeller] ? true : false; // real team owns this player — they must accept first
     const auction = {
       id: uid(),
       player: {
         name: form.name, position: form.position, rating: Number(form.rating) || 0,
         club: form.club, age: Number(form.age) || 0, wage: Number(form.wage) || 0,
       },
-      seller: form.seller,
+      seller: actualSeller,
       minBid,
       currentBid: minBid,
-      currentBidder: form.startingBidder,
-      bidsByTeam: { [form.startingBidder]: minBid }, // teamId -> that team's own highest bid in this auction
-      history: [{ id: uid(), team: form.startingBidder, amount: minBid, time: Date.now() }],
+      currentBidder: startingBidder,
+      bidsByTeam: { [startingBidder]: minBid }, // teamId -> that team's own highest bid in this auction
+      history: [{ id: uid(), team: startingBidder, amount: minBid, time: Date.now() }],
       // Bidding (and the 24h clock) only starts once the owning team accepts — free agents need no approval.
       deadline: needsApproval ? null : Date.now() + AUCTION_DURATION_MS,
       status: needsApproval ? "pending" : "open",
@@ -1496,6 +1506,7 @@ export default function EafcLeagueApp() {
     { id: "chat", label: "League Chat", icon: MessageCircle },
     { id: "messages", label: "Messages", icon: Send },
     { id: "rules", label: "Rules", icon: BookOpen },
+    { id: "playerdb", label: "Player Database", icon: Search },
     { id: "admin", label: "Admin", icon: Lock },
   ];
 
@@ -1644,6 +1655,9 @@ export default function EafcLeagueApp() {
         )}
         {tab === "rules" && (
           <RulesTab teams={teams} standings={standings} />
+        )}
+        {tab === "playerdb" && (
+          <PlayerDatabaseTab teams={teams} squads={squads} playerDatabase={playerDatabase} />
         )}
         {tab === "admin" && (
           <AdminTab teams={teams} squads={squads} myTeamId={myTeamId} playerDatabase={playerDatabase}
@@ -2060,8 +2074,9 @@ function ActivityTicker({ activity, clearActivity }) {
 
   const doClear = () => {
     const e = clearActivity(pin);
+    setPin("");
     if (e) setErr(e);
-    else { setClearing(false); setPin(""); setErr(""); }
+    else { setClearing(false); setErr(""); }
   };
 
   const THREE_HOURS_MS = 3 * 60 * 60 * 1000;
@@ -2668,9 +2683,9 @@ function AuctionsPanel({ teams, squads, auctions, createAuction, placeBid, final
             </Select>
           </Field>
           <Field label="Opening bidder">
-            <Select value={form.startingBidder} onChange={(e) => setForm((f) => ({ ...f, startingBidder: e.target.value }))}>
-              {teams.filter((t) => t.id !== form.seller).map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
-            </Select>
+            <div style={{ ...inputStyle, opacity: 0.85 }}>
+              {myTeamId ? teams.find((t) => t.id === myTeamId)?.name : "Pick your team (top right) first"}
+            </div>
           </Field>
           <Field label="Opening bid (£M)">
             <TextInput type="number" step="0.25" value={form.minBid} onChange={(e) => setForm((f) => ({ ...f, minBid: e.target.value }))} />
@@ -2824,9 +2839,6 @@ function PendingAuctionCard({ auction, teams, respondToAuction, editAuctionPlaye
 }
 
 function AuctionCard({ auction, teams, now, placeBid, finalizeAuction, deleteBid, editAuctionPlayerName, myTeamId, squadStats }) {
-  const [bidTeam, setBidTeam] = useState(
-    (myTeamId && myTeamId !== auction.currentBidder) ? myTeamId : (teams.find((t) => t.id !== auction.currentBidder)?.id || teams[0].id)
-  );
   const [bidAmount, setBidAmount] = useState("");
   const [err, setErr] = useState("");
   const [deletingBidId, setDeletingBidId] = useState(null);
@@ -2838,20 +2850,21 @@ function AuctionCard({ auction, teams, now, placeBid, finalizeAuction, deleteBid
   const requiredMin = auction.currentBid > 0 ? auction.currentBid + 0.25 : Math.max(auction.minBid, 0.25);
   const bidderCount = Object.keys(auction.bidsByTeam).length;
 
-  const bidTeamObj = teams.find((t) => t.id === bidTeam);
-  const bidTeamCurrentWage = squadStats[bidTeam]?.wageM || 0;
+  const bidTeamObj = teams.find((t) => t.id === myTeamId);
+  const bidTeamCurrentWage = squadStats[myTeamId]?.wageM || 0;
   const projectedWage = bidTeamCurrentWage + (Number(auction.player.wage) || 0) / 1000;
   const wageCapBreach = bidTeamObj && projectedWage > bidTeamObj.wageCap;
 
   const submitBid = () => {
-    const e = placeBid(auction.id, bidTeam, bidAmount || requiredMin);
+    const e = placeBid(auction.id, myTeamId, bidAmount || requiredMin);
     if (e) setErr(e); else { setErr(""); setBidAmount(""); }
   };
 
   const confirmDeleteBid = () => {
     const e = deleteBid(auction.id, deletingBidId, deletePin);
+    setDeletePin("");
     if (e) setDeleteErr(e);
-    else { setDeletingBidId(null); setDeletePin(""); setDeleteErr(""); }
+    else { setDeletingBidId(null); setDeleteErr(""); }
   };
 
   return (
@@ -2881,20 +2894,22 @@ function AuctionCard({ auction, teams, now, placeBid, finalizeAuction, deleteBid
       </div>
 
       {!ended ? (
-        <div className="flex items-end gap-2 flex-wrap">
-          <Field label="Bidding team">
-            <Select value={bidTeam} onChange={(e) => setBidTeam(e.target.value)}>
-              {teams.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
-            </Select>
-          </Field>
-          <Field label={`Bid (£M) — min ${money(requiredMin)}`}>
-            <TextInput type="number" step="0.25" placeholder={String(requiredMin)} value={bidAmount} onChange={(e) => setBidAmount(e.target.value)} />
-          </Field>
-          <Btn onClick={submitBid}>Place bid</Btn>
-          {wageCapBreach && (
-            <Pill tone="red">Would breach {bidTeamObj.name}'s wage cap ({money(projectedWage)} / {money(bidTeamObj.wageCap)})</Pill>
-          )}
-        </div>
+        myTeamId ? (
+          <div className="flex items-end gap-2 flex-wrap">
+            <Field label="Bidding as">
+              <div style={{ ...inputStyle, opacity: 0.85 }}>{bidTeamObj?.name}</div>
+            </Field>
+            <Field label={`Bid (£M) — min ${money(requiredMin)}`}>
+              <TextInput type="number" step="0.25" placeholder={String(requiredMin)} value={bidAmount} onChange={(e) => setBidAmount(e.target.value)} />
+            </Field>
+            <Btn onClick={submitBid}>Place bid</Btn>
+            {wageCapBreach && (
+              <Pill tone="red">Would breach {bidTeamObj.name}'s wage cap ({money(projectedWage)} / {money(bidTeamObj.wageCap)})</Pill>
+            )}
+          </div>
+        ) : (
+          <div style={{ color: C.muted, fontSize: 12.5 }}>Pick your team (top right) to place a bid.</div>
+        )
       ) : (
         <Btn variant="danger" onClick={() => finalizeAuction(auction.id)}>Finalize auction</Btn>
       )}
@@ -2953,6 +2968,7 @@ function AdminPlayerRewards({ teams, squads, logAdminReward, myTeamId, playerDat
   const submit = () => {
     const msg = logAdminReward(pin, form);
     setWarning(msg || "");
+    setPin("");
     if (!msg) setForm({ ...blank, to: form.to });
   };
 
@@ -3094,8 +3110,8 @@ function PlayerMarket({ teams, squads, myTeamId, transferListings, wantedListing
 
   const doRemoveListing = (id) => {
     const err = removeTransferListing(id, removePin[id] || "");
-    if (!err) setRemovePin((p) => ({ ...p, [id]: "" }));
-    else setListMsg({ text: err, tone: "red" });
+    setRemovePin((p) => ({ ...p, [id]: "" }));
+    if (err) setListMsg({ text: err, tone: "red" });
   };
 
   const doRespondSwap = (offerId, accept) => {
@@ -3125,8 +3141,8 @@ function PlayerMarket({ teams, squads, myTeamId, transferListings, wantedListing
 
   const doRemoveWanted = (id) => {
     const err = removeWantedListing(id, wantRemovePin[id] || "");
-    if (!err) setWantRemovePin((p) => ({ ...p, [id]: "" }));
-    else setWantMsg({ text: err, tone: "red" });
+    setWantRemovePin((p) => ({ ...p, [id]: "" }));
+    if (err) setWantMsg({ text: err, tone: "red" });
   };
 
   return (
@@ -3344,8 +3360,9 @@ function TransfersTab({ teams, squads, transfers, logTransfer, logAdminReward, s
 
   const confirmDelete = () => {
     const err = deleteTransfer(deletePin, deletingId);
+    setDeletePin("");
     if (err) setDeleteErr(err);
-    else { setDeletingId(null); setDeletePin(""); setDeleteErr(""); }
+    else { setDeletingId(null); setDeleteErr(""); }
   };
 
   return (
@@ -4256,6 +4273,124 @@ function ChatTab({ chat, setChat, teams, myTeamId, markChatSeen }) {
 }
 
 /* --------------------------------- Rules ---------------------------------- */
+function PlayerDatabaseTab({ teams, squads, playerDatabase }) {
+  const [query, setQuery] = useState("");
+  const [sortKey, setSortKey] = useState("rating");
+  const [sortDir, setSortDir] = useState(-1);
+
+  const allPlayers = useMemo(() => {
+    // Who currently owns each player, by name — this overrides the original (Sofifa/import) club
+    // the moment a fantasy team actually signs them, since a player can only belong to one team.
+    const ownerByName = {};
+    teams.forEach((t) => {
+      [...(squads[t.id]?.starters || []), ...(squads[t.id]?.reserves || [])].forEach((p) => {
+        if (p) ownerByName[p.name] = t.name;
+      });
+    });
+
+    // Combine the imported database with any players that only exist because they were signed
+    // directly (instant rewards, manual entries) and never went through an import.
+    const byName = {};
+    playerDatabase.forEach((p) => { if (p.name) byName[p.name] = { ...p }; });
+    teams.forEach((t) => {
+      [...(squads[t.id]?.starters || []), ...(squads[t.id]?.reserves || [])].forEach((p) => {
+        if (p && !byName[p.name]) byName[p.name] = { ...p };
+      });
+    });
+
+    return Object.values(byName).map((p) => ({
+      ...p,
+      ownedBy: ownerByName[p.name] || null,
+      displayClub: ownerByName[p.name] || p.club,
+    }));
+  }, [playerDatabase, teams, squads]);
+
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    let list = !q ? allPlayers : allPlayers.filter((p) =>
+      p.name.toLowerCase().includes(q) || (p.displayClub || "").toLowerCase().includes(q) || (p.position || "").toLowerCase().includes(q)
+    );
+    list = [...list].sort((a, b) => {
+      const av = a[sortKey], bv = b[sortKey];
+      if (typeof av === "string") return (av || "").localeCompare(bv || "") * sortDir;
+      return ((Number(av) || 0) - (Number(bv) || 0)) * sortDir;
+    });
+    return list;
+  }, [allPlayers, query, sortKey, sortDir]);
+
+  const toggleSort = (key) => {
+    if (sortKey !== key) { setSortKey(key); setSortDir(1); return; }
+    setSortDir((d) => -d);
+  };
+
+  const columns = [
+    { key: "name", label: "Player" },
+    { key: "position", label: "Pos" },
+    { key: "rating", label: "Rating" },
+    { key: "displayClub", label: "Club / Owner" },
+    { key: "age", label: "Age" },
+    { key: "value", label: "Value" },
+    { key: "wage", label: "Wage (£k)" },
+  ];
+
+  return (
+    <Panel style={{ padding: 18 }}>
+      <SectionTitle icon={Search}>Player Database</SectionTitle>
+      <div style={{ color: C.muted, fontSize: 12.5, marginBottom: 14, lineHeight: 1.6 }}>
+        Every player either uploaded to the site (Sofifa import or pasted CSV) or currently signed to a squad —
+        {" "}<b style={{ color: C.gold }}>{allPlayers.length} total</b>. Once a fantasy team wins a player at auction,
+        this list shows that team's name instead of their original real-world club.
+      </div>
+
+      <Field label="Search by name, club/team, or position">
+        <TextInput value={query} onChange={(e) => setQuery(e.target.value)} placeholder="e.g. Haaland, Arsenal, ST…" />
+      </Field>
+
+      <div style={{ overflowX: "auto", marginTop: 14 }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5, minWidth: 700 }}>
+          <thead>
+            <tr>
+              {columns.map((col) => (
+                <th key={col.key} onClick={() => toggleSort(col.key)}
+                  style={{
+                    color: sortKey === col.key ? C.gold : C.muted, fontSize: 10.5, textTransform: "uppercase",
+                    padding: "6px 8px", textAlign: col.key === "name" || col.key === "displayClub" ? "left" : "center",
+                    borderBottom: `1px solid ${C.border}`, cursor: "pointer", userSelect: "none", whiteSpace: "nowrap",
+                  }}>
+                  {col.label}{sortKey === col.key ? (sortDir === 1 ? " ▲" : " ▼") : ""}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {filtered.length === 0 && (
+              <tr><td colSpan={columns.length} style={{ padding: 16, textAlign: "center", color: C.muted }}>No players match that search.</td></tr>
+            )}
+            {filtered.slice(0, 300).map((p, i) => (
+              <tr key={p.name + i} style={{ background: i % 2 ? C.panelAlt : "transparent" }}>
+                <td style={{ padding: "6px 8px", borderBottom: `1px solid ${C.border}33`, color: C.text, fontWeight: 600 }}>{p.name}</td>
+                <td style={{ padding: "6px 8px", borderBottom: `1px solid ${C.border}33`, textAlign: "center", color: C.text }}>{p.position}</td>
+                <td style={{ padding: "6px 8px", borderBottom: `1px solid ${C.border}33`, textAlign: "center", color: C.text }}>{p.rating}</td>
+                <td style={{ padding: "6px 8px", borderBottom: `1px solid ${C.border}33`, color: p.ownedBy ? C.gold : C.text }}>
+                  {p.displayClub}{p.ownedBy && <span style={{ color: C.muted, fontSize: 10.5, textTransform: "uppercase", marginLeft: 6 }}>Owned</span>}
+                </td>
+                <td style={{ padding: "6px 8px", borderBottom: `1px solid ${C.border}33`, textAlign: "center", color: C.text }}>{p.age}</td>
+                <td style={{ padding: "6px 8px", borderBottom: `1px solid ${C.border}33`, textAlign: "center", color: C.text }}>{money(p.value)}</td>
+                <td style={{ padding: "6px 8px", borderBottom: `1px solid ${C.border}33`, textAlign: "center", color: C.text }}>{moneyK(p.wage)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {filtered.length > 300 && (
+          <div style={{ color: C.muted, fontSize: 11.5, textAlign: "center", padding: 10 }}>
+            Showing first 300 of {filtered.length} — narrow your search to see more precisely.
+          </div>
+        )}
+      </div>
+    </Panel>
+  );
+}
+
 function RulesTab({ teams, standings }) {
   const n = teams.length;
   return (
@@ -4309,6 +4444,7 @@ function AddPrizeTools({ teams, addPrize }) {
 
   const add = () => {
     const err = addPrize(pin, form);
+    setPin("");
     if (err) setMsg({ text: err, tone: "red" });
     else { setMsg({ text: "Prize added.", tone: "green" }); setForm(blank); }
   };
@@ -4412,6 +4548,7 @@ function BackupTools({ exportBackup, restoreBackup, restoreFromNightlyBackup }) 
     reader.onload = () => {
       const err = restoreBackup(pin, reader.result);
       setBusy(false);
+      setPin("");
       if (err) setMsg({ text: err, tone: "red" });
       else setMsg({ text: "Backup restored.", tone: "green" });
     };
@@ -4435,6 +4572,7 @@ function BackupTools({ exportBackup, restoreBackup, restoreFromNightlyBackup }) 
     setRestoringKey(key);
     const err = await restoreFromNightlyBackup(pin, key);
     setRestoringKey(null);
+    setPin("");
     if (err) setMsg({ text: err, tone: "red" });
     else setMsg({ text: "Restored from automatic backup.", tone: "green" });
   };
@@ -4629,6 +4767,7 @@ function SofifaImport({ importPlayerDatabase }) {
       const team = await sofifaFetch(`/team/${selected.id}/${roster}`);
       const players = (team.players || []).map((p) => mapSofifaPlayer(p, team.name));
       const err = importPlayerDatabase(pin, players, "merge");
+      setPin("");
       if (err) setMsg({ text: err, tone: "red" });
       else setMsg({ text: `Imported ${players.length} players from ${team.name}.`, tone: "green" });
     } catch (e) {
@@ -4655,6 +4794,7 @@ function SofifaImport({ importPlayerDatabase }) {
         await sleep(250); // stay comfortably under Sofifa's 60 requests/minute limit
       }
       const err = importPlayerDatabase(pin, allPlayers, "merge");
+      setPin("");
       if (err) setMsg({ text: err, tone: "red" });
       else setMsg({ text: `Imported ${allPlayers.length} players from ${clubTeams.length} clubs in ${selected.name}.`, tone: "green" });
     } catch (e) {
@@ -4761,6 +4901,7 @@ function PlayerDatabaseTools({ playerDatabase, importPlayerDatabase, clearPlayer
   const doImport = (mode) => {
     const players = buildPlayers();
     const err = importPlayerDatabase(pin, players, mode);
+    setPin("");
     if (err) setMsg({ text: err, tone: "red" });
     else {
       setMsg({ text: `Imported ${players.length} players (${mode === "replace" ? "replaced database" : "merged into existing database"}).`, tone: "green" });
@@ -4771,6 +4912,7 @@ function PlayerDatabaseTools({ playerDatabase, importPlayerDatabase, clearPlayer
   const doClear = () => {
     if (!window.confirm("Clear the entire imported player database? This doesn't affect any squads or transfers, just the autocomplete list.")) return;
     const err = clearPlayerDatabase(pin);
+    setPin("");
     if (err) setMsg({ text: err, tone: "red" });
     else setMsg({ text: "Player database cleared.", tone: "green" });
   };
@@ -4888,8 +5030,9 @@ function EndSeasonTools({ endSeason, season, seasonHistory, standings, teams }) 
 
   const doEndSeason = () => {
     const err = endSeason(pin);
+    setPin("");
     if (err) setMsg({ text: err, tone: "red" });
-    else { setMsg({ text: `Season ${season} archived — welcome to Season ${season + 1}.`, tone: "green" }); setPin(""); }
+    else setMsg({ text: `Season ${season} archived — welcome to Season ${season + 1}.`, tone: "green" });
   };
 
   return (
@@ -4969,12 +5112,14 @@ function AdminTools({ teams, resetAll, changeAdminPin, addFundsToTeam, addEarned
     const opensAt = windowOpens ? new Date(windowOpens).getTime() : null;
     const closesAt = windowCloses ? new Date(windowCloses).getTime() : null;
     const err = setTransferWindowDates(pin, opensAt, closesAt);
+    setPin("");
     if (err) show(err, "red");
     else show("Transfer window set.", "green");
   };
 
   const doClearWindow = () => {
     const err = clearTransferWindow(pin);
+    setPin("");
     if (err) show(err, "red");
     else show("Transfer window cleared — the market is open with no restriction.", "green");
   };
@@ -4982,6 +5127,7 @@ function AdminTools({ teams, resetAll, changeAdminPin, addFundsToTeam, addEarned
   const doReset = async () => {
     setMsg(null);
     const err = await resetAll(pin);
+    setPin("");
     if (err) show(err, "red");
     else show("League data has been reset.", "green");
   };
@@ -4989,18 +5135,21 @@ function AdminTools({ teams, resetAll, changeAdminPin, addFundsToTeam, addEarned
   const doClearChat = () => {
     setMsg(null);
     const err = clearChat(pin);
+    setPin("");
     if (err) show(err, "red");
     else show("League Chat has been cleared.", "green");
   };
 
   const doResetTeamPassword = () => {
     const err = resetTeamPassword(pin, pwTeam);
+    setPin("");
     if (err) show(err, "red");
     else show(`${teams.find((t) => t.id === pwTeam)?.name}'s password has been cleared — it can be re-claimed with a new one.`, "green");
   };
 
   const doChangePin = () => {
     const err = changeAdminPin(pin, newPinInput);
+    setPin("");
     if (err) show(err, "red");
     else {
       show("Admin PIN updated.", "green");
@@ -5011,6 +5160,7 @@ function AdminTools({ teams, resetAll, changeAdminPin, addFundsToTeam, addEarned
 
   const doAddFunds = () => {
     const err = addFundsToTeam(pin, fundsTeam, fundsAmount);
+    setPin("");
     if (err) show(err, "red");
     else {
       const t = teams.find((x) => x.id === fundsTeam);
@@ -5021,6 +5171,7 @@ function AdminTools({ teams, resetAll, changeAdminPin, addFundsToTeam, addEarned
 
   const doAddSlot = () => {
     const err = addEarned86Slot(pin, slotTeam, slotAmount);
+    setPin("");
     if (err) show(err, "red");
     else {
       const t = teams.find((x) => x.id === slotTeam);
@@ -5033,8 +5184,8 @@ function AdminTools({ teams, resetAll, changeAdminPin, addFundsToTeam, addEarned
     <Panel style={{ padding: 18, border: `1px solid ${C.red}55` }}>
       <SectionTitle icon={Lock}>Admin Tools</SectionTitle>
       <div style={{ color: C.muted, fontSize: 12.5, marginBottom: 14 }}>
-        These actions affect the whole league for everyone using this app. Enter the admin PIN once below, then use
-        any of the tools. Default PIN is <b style={{ color: C.gold }}>2026</b>.
+        These actions affect the whole league for everyone using this app. The PIN field clears itself after every
+        action, so you'll need to re-enter it each time. Default PIN is <b style={{ color: C.gold }}>2026</b>.
       </div>
 
       <div style={{ maxWidth: 280, marginBottom: 18 }}>
