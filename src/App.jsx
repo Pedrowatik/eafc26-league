@@ -115,6 +115,7 @@ function defaultTeams() {
     earned86: 0,
     notes: "",
     formation: "4-4-2",
+    password: "",
   }));
 }
 
@@ -304,7 +305,6 @@ export default function EafcLeagueApp() {
   const [activity, setActivity] = useState([]);
   const [chat, setChat] = useState([]);
   const [playerDatabase, setPlayerDatabase] = useState([]); // imported from Sofifa for autocomplete
-  const [claimedTeams, setClaimedTeams] = useState({}); // { [teamId]: true } — which teams are already picked by someone
   const [injuries, setInjuries] = useState({}); // { [teamId]: { [playerName]: lastInjuredMatchday } }
   const [teamLockOverride, setTeamLockOverride] = useState(false); // admin toggle to allow re-picks mid-season
   const [cardTally, setCardTally] = useState({}); // { [teamId]: { [playerName]: seasonYellowCount } }
@@ -342,7 +342,6 @@ export default function EafcLeagueApp() {
     if (data.activity) setActivity(data.activity);
     if (data.chat) setChat(data.chat);
     if (data.playerDatabase) setPlayerDatabase(data.playerDatabase);
-    if (data.claimedTeams) setClaimedTeams(data.claimedTeams);
     if (data.injuries) setInjuries(data.injuries);
     if (data.teamLockOverride !== undefined) setTeamLockOverride(data.teamLockOverride);
     if (data.cardTally) setCardTally(data.cardTally);
@@ -397,7 +396,7 @@ export default function EafcLeagueApp() {
         const savedAt = Date.now();
         await storage.set(
           STORAGE_KEY,
-          JSON.stringify({ teams, squads, transfers, fixtures, prizes, events, auctions, adminPin, season, seasonHistory, activity, chat, playerDatabase, claimedTeams, injuries, teamLockOverride, cardTally, suspensions, transferListings, wantedListings, privateMessages, savedAt }),
+          JSON.stringify({ teams, squads, transfers, fixtures, prizes, events, auctions, adminPin, season, seasonHistory, activity, chat, playerDatabase, injuries, teamLockOverride, cardTally, suspensions, transferListings, wantedListings, privateMessages, savedAt }),
           true
         );
         knownSavedAtRef.current = savedAt;
@@ -408,7 +407,7 @@ export default function EafcLeagueApp() {
       }
     }, 500);
     return () => clearTimeout(t);
-  }, [teams, squads, transfers, fixtures, prizes, events, auctions, adminPin, season, seasonHistory, activity, chat, playerDatabase, claimedTeams, injuries, teamLockOverride, cardTally, suspensions, transferListings, wantedListings, privateMessages, loaded]);
+  }, [teams, squads, transfers, fixtures, prizes, events, auctions, adminPin, season, seasonHistory, activity, chat, playerDatabase, injuries, teamLockOverride, cardTally, suspensions, transferListings, wantedListings, privateMessages, loaded]);
 
   // live sync: poll for other people's changes and pull them in automatically. Skipped while we
   // have our own unsaved edit in flight, so we don't clobber it with a slightly stale copy.
@@ -459,21 +458,28 @@ export default function EafcLeagueApp() {
     return unsubscribe;
   }, [loaded, applyRemoteData]);
 
-  const chooseMyTeam = async (teamId) => {
+  // Logging in as a team now requires that team's password — set on first claim, then required
+  // on every device from then on. This is what actually makes "my team" recognizable across
+  // devices, rather than being tied to whichever browser happened to pick it first.
+  const chooseMyTeam = async (teamId, passwordAttempt) => {
+    if (!teamId) {
+      setMyTeamId(null);
+      try { await storage.set(MY_TEAM_KEY, "", false); } catch (e) { /* best effort */ }
+      return null;
+    }
     if (myTeamId && teamId !== myTeamId && !allMatchdaysComplete && !teamLockOverride) {
       return "You've already picked your team for this season — that's locked in until all matchdays are complete (or an admin unlocks it).";
     }
-    if (teamId && claimedTeams[teamId] && teamId !== myTeamId) {
-      return "That team's already been picked by someone else.";
+    const team = teams.find((t) => t.id === teamId);
+    if (!team) return "Team not found.";
+    if (!team.password) {
+      if (!passwordAttempt || passwordAttempt.length < 3) return "Choose a password (at least 3 characters) to claim this team.";
+      setTeams((ts) => ts.map((t) => (t.id === teamId ? { ...t, password: passwordAttempt } : t)));
+    } else if (passwordAttempt !== team.password) {
+      return "Incorrect password for that team.";
     }
-    setClaimedTeams((prev) => {
-      const next = { ...prev };
-      if (myTeamId) delete next[myTeamId]; // release whatever we had before
-      if (teamId) next[teamId] = true;
-      return next;
-    });
     setMyTeamId(teamId);
-    try { await storage.set(MY_TEAM_KEY, teamId || "", false); } catch (e) { /* best effort */ }
+    try { await storage.set(MY_TEAM_KEY, teamId, false); } catch (e) { /* best effort */ }
     return null;
   };
 
@@ -552,15 +558,6 @@ export default function EafcLeagueApp() {
     const timers = mentionToasts.map((t) => setTimeout(() => dismissToast(t.id), 8000));
     return () => timers.forEach(clearTimeout);
   }, [mentionToasts]);
-
-  // If someone picked a team before this feature existed, register their existing pick so it
-  // shows as taken for everyone else too, without needing them to re-pick.
-  useEffect(() => {
-    if (!loaded || !myTeamId) return;
-    if (!claimedTeams[myTeamId]) {
-      setClaimedTeams((prev) => ({ ...prev, [myTeamId]: true }));
-    }
-  }, [loaded, myTeamId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Ticking clock so budgets/statuses recompute live as the 12h/24h ratification windows pass.
   const [nowTick, setNowTick] = useState(Date.now());
@@ -1238,6 +1235,15 @@ export default function EafcLeagueApp() {
     return null;
   };
 
+  // Clears a team's password so it becomes "unclaimed" again — useful if someone forgets their
+  // password or a team needs to be handed to a different person.
+  const resetTeamPassword = (pinAttempt, teamId) => {
+    if (pinAttempt !== adminPin) return "Incorrect PIN.";
+    if (!teamId) return "Choose a team.";
+    setTeams((ts) => ts.map((t) => (t.id === teamId ? { ...t, password: "" } : t)));
+    return null;
+  };
+
   /* ------------------------------- player market ------------------------------- */
   const addTransferListing = (player, askingPrice, notes) => {
     if (!myTeamId) return "Pick your team first (top right) before listing a player.";
@@ -1363,7 +1369,7 @@ export default function EafcLeagueApp() {
             </div>
           </div>
           <div className="flex items-center gap-3">
-            <MyTeamPicker teams={teams} myTeamId={myTeamId} chooseMyTeam={chooseMyTeam} claimedTeams={claimedTeams} />
+            <MyTeamPicker teams={teams} myTeamId={myTeamId} chooseMyTeam={chooseMyTeam} />
             <SyncIndicator syncState={syncState} lastSyncedAt={lastSyncedAt} onRefresh={() => pullLatest(true)} />
             <SaveIndicator state={saveState} />
           </div>
@@ -1470,7 +1476,8 @@ export default function EafcLeagueApp() {
             exportBackup={exportBackup} restoreBackup={restoreBackup} restoreFromNightlyBackup={restoreFromNightlyBackup}
             endSeason={endSeason} season={season} seasonHistory={seasonHistory} standings={standings}
             importPlayerDatabase={importPlayerDatabase} clearPlayerDatabase={clearPlayerDatabase}
-            teamLockOverride={teamLockOverride} toggleTeamLockOverride={toggleTeamLockOverride} clearChat={clearChat} />
+            teamLockOverride={teamLockOverride} toggleTeamLockOverride={toggleTeamLockOverride} clearChat={clearChat}
+            resetTeamPassword={resetTeamPassword} />
         )}
       </div>
 
@@ -1510,52 +1517,80 @@ export default function EafcLeagueApp() {
   );
 }
 
-function MyTeamPicker({ teams, myTeamId, chooseMyTeam, claimedTeams }) {
+function MyTeamPicker({ teams, myTeamId, chooseMyTeam }) {
   const [open, setOpen] = useState(false);
+  const [selecting, setSelecting] = useState(null); // team id currently entering a password for
+  const [pw, setPw] = useState("");
   const [err, setErr] = useState("");
   const mine = teams.find((t) => t.id === myTeamId);
 
-  const pick = async (teamId) => {
+  const startSelect = (teamId) => {
+    setSelecting(teamId);
+    setPw("");
     setErr("");
-    const error = await chooseMyTeam(teamId);
+  };
+
+  const submitLogin = async () => {
+    const error = await chooseMyTeam(selecting, pw);
     if (error) setErr(error);
-    else setOpen(false);
+    else { setOpen(false); setSelecting(null); setPw(""); }
   };
 
   return (
     <div style={{ position: "relative" }}>
-      <button onClick={() => setOpen((o) => !o)} className="flex items-center gap-2"
+      <button onClick={() => { setOpen((o) => !o); setSelecting(null); setErr(""); }} className="flex items-center gap-2"
         style={{ background: "transparent", border: `1px solid ${C.border}`, borderRadius: 9, padding: "6px 12px", cursor: "pointer", color: mine ? C.gold : C.muted, fontSize: 12.5, fontWeight: 700 }}>
         <UserCircle2 size={15} />
         {mine ? mine.name : "Which team am I?"}
       </button>
       {open && (
-        <div style={{ position: "absolute", right: 0, top: "calc(100% + 6px)", background: C.panel, border: `1px solid ${C.border}`, borderRadius: 10, padding: 8, zIndex: 30, minWidth: 200, boxShadow: "0 8px 24px rgba(0,0,0,0.4)" }}>
-          <div style={{ color: C.muted, fontSize: 10.5, textTransform: "uppercase", padding: "4px 8px" }}>This device only — not shared</div>
-          {teams.map((t) => {
-            const takenByOther = claimedTeams[t.id] && t.id !== myTeamId;
-            return (
-              <button key={t.id} onClick={() => !takenByOther && pick(t.id)} disabled={takenByOther}
-                className="flex items-center justify-between"
-                style={{
-                  width: "100%", textAlign: "left", background: t.id === myTeamId ? `${C.gold}22` : "transparent",
-                  border: "none", borderRadius: 7, padding: "7px 8px", cursor: takenByOther ? "not-allowed" : "pointer",
-                  color: takenByOther ? C.muted : (t.id === myTeamId ? C.gold : C.text), fontSize: 13,
-                  opacity: takenByOther ? 0.55 : 1,
-                }}>
-                {t.name}
-                {t.id === myTeamId && <Check size={13} />}
-                {takenByOther && <span style={{ fontSize: 10.5, textTransform: "uppercase" }}>Taken</span>}
-              </button>
-            );
-          })}
-          {myTeamId && (
-            <button onClick={() => { chooseMyTeam(null); setOpen(false); }}
-              style={{ width: "100%", textAlign: "left", background: "transparent", border: "none", borderRadius: 7, padding: "7px 8px", cursor: "pointer", color: C.muted, fontSize: 12 }}>
-              Clear selection
-            </button>
+        <div style={{ position: "absolute", right: 0, top: "calc(100% + 6px)", background: C.panel, border: `1px solid ${C.border}`, borderRadius: 10, padding: 8, zIndex: 30, minWidth: 220, boxShadow: "0 8px 24px rgba(0,0,0,0.4)" }}>
+          {!selecting ? (
+            <>
+              <div style={{ color: C.muted, fontSize: 10.5, textTransform: "uppercase", padding: "4px 8px" }}>
+                Log in with your team's password — works on any device
+              </div>
+              {teams.map((t) => (
+                <button key={t.id} onClick={() => startSelect(t.id)}
+                  className="flex items-center justify-between"
+                  style={{
+                    width: "100%", textAlign: "left", background: t.id === myTeamId ? `${C.gold}22` : "transparent",
+                    border: "none", borderRadius: 7, padding: "7px 8px", cursor: "pointer",
+                    color: t.id === myTeamId ? C.gold : C.text, fontSize: 13,
+                  }}>
+                  {t.name}
+                  <div className="flex items-center gap-1">
+                    {t.id === myTeamId && <Check size={13} />}
+                    {!t.password && <span style={{ fontSize: 10, color: C.muted, textTransform: "uppercase" }}>Unclaimed</span>}
+                  </div>
+                </button>
+              ))}
+              {myTeamId && (
+                <button onClick={() => { chooseMyTeam(null); setOpen(false); }}
+                  style={{ width: "100%", textAlign: "left", background: "transparent", border: "none", borderRadius: 7, padding: "7px 8px", cursor: "pointer", color: C.muted, fontSize: 12, marginTop: 4 }}>
+                  Log out on this device
+                </button>
+              )}
+            </>
+          ) : (
+            <div style={{ padding: 6 }}>
+              <div style={{ color: C.gold, fontWeight: 700, fontSize: 13, marginBottom: 6 }}>{teams.find((t) => t.id === selecting)?.name}</div>
+              <div style={{ color: C.muted, fontSize: 11, marginBottom: 8 }}>
+                {teams.find((t) => t.id === selecting)?.password
+                  ? "Enter this team's password."
+                  : "This team hasn't been claimed yet — choose a password to claim it (you'll use this same password to log in from any other device)."}
+              </div>
+              <TextInput type="password" placeholder="Password" value={pw}
+                onChange={(e) => setPw(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter") submitLogin(); }}
+                style={{ width: "100%", marginBottom: 8 }} />
+              <div className="flex gap-2">
+                <Btn size="sm" onClick={submitLogin}>{teams.find((t) => t.id === selecting)?.password ? "Log in" : "Claim team"}</Btn>
+                <Btn size="sm" variant="outline" onClick={() => setSelecting(null)}>Back</Btn>
+              </div>
+              {err && <div style={{ color: C.red, fontSize: 11.5, marginTop: 6 }}>{err}</div>}
+            </div>
           )}
-          {err && <div style={{ color: C.red, fontSize: 11.5, padding: "6px 8px" }}>{err}</div>}
         </div>
       )}
     </div>
@@ -3875,7 +3910,7 @@ function RulesTab({ teams, standings }) {
   );
 }
 
-function AdminTab({ teams, squads, myTeamId, playerDatabase, adminPin, logAdminReward, resetAll, changeAdminPin, addFundsToTeam, addEarned86Slot, exportBackup, restoreBackup, restoreFromNightlyBackup, endSeason, season, seasonHistory, standings, importPlayerDatabase, clearPlayerDatabase, teamLockOverride, toggleTeamLockOverride, clearChat }) {
+function AdminTab({ teams, squads, myTeamId, playerDatabase, adminPin, logAdminReward, resetAll, changeAdminPin, addFundsToTeam, addEarned86Slot, exportBackup, restoreBackup, restoreFromNightlyBackup, endSeason, season, seasonHistory, standings, importPlayerDatabase, clearPlayerDatabase, teamLockOverride, toggleTeamLockOverride, clearChat, resetTeamPassword }) {
   const [unlocked, setUnlocked] = useState(false);
   const [pinInput, setPinInput] = useState("");
   const [err, setErr] = useState("");
@@ -3916,7 +3951,8 @@ function AdminTab({ teams, squads, myTeamId, playerDatabase, adminPin, logAdminR
 
       <AdminTools teams={teams} resetAll={resetAll} changeAdminPin={changeAdminPin}
         addFundsToTeam={addFundsToTeam} addEarned86Slot={addEarned86Slot}
-        teamLockOverride={teamLockOverride} toggleTeamLockOverride={toggleTeamLockOverride} clearChat={clearChat} />
+        teamLockOverride={teamLockOverride} toggleTeamLockOverride={toggleTeamLockOverride} clearChat={clearChat}
+        resetTeamPassword={resetTeamPassword} />
     </div>
   );
 }
@@ -4459,7 +4495,7 @@ function EndSeasonTools({ endSeason, season, seasonHistory, standings, teams }) 
   );
 }
 
-function AdminTools({ teams, resetAll, changeAdminPin, addFundsToTeam, addEarned86Slot, teamLockOverride, toggleTeamLockOverride, clearChat }) {
+function AdminTools({ teams, resetAll, changeAdminPin, addFundsToTeam, addEarned86Slot, teamLockOverride, toggleTeamLockOverride, clearChat, resetTeamPassword }) {
   const [pin, setPin] = useState("");
   const [msg, setMsg] = useState(null); // { text, tone }
   const [showChangePin, setShowChangePin] = useState(false);
@@ -4470,6 +4506,8 @@ function AdminTools({ teams, resetAll, changeAdminPin, addFundsToTeam, addEarned
 
   const [slotTeam, setSlotTeam] = useState(teams[0]?.id || "");
   const [slotAmount, setSlotAmount] = useState(1);
+
+  const [pwTeam, setPwTeam] = useState(teams[0]?.id || "");
 
   const show = (text, tone) => setMsg({ text, tone });
 
@@ -4485,6 +4523,12 @@ function AdminTools({ teams, resetAll, changeAdminPin, addFundsToTeam, addEarned
     const err = clearChat(pin);
     if (err) show(err, "red");
     else show("League Chat has been cleared.", "green");
+  };
+
+  const doResetTeamPassword = () => {
+    const err = resetTeamPassword(pin, pwTeam);
+    if (err) show(err, "red");
+    else show(`${teams.find((t) => t.id === pwTeam)?.name}'s password has been cleared — it can be re-claimed with a new one.`, "green");
   };
 
   const doChangePin = () => {
@@ -4602,6 +4646,23 @@ function AdminTools({ teams, resetAll, changeAdminPin, addFundsToTeam, addEarned
           onClick={() => { const e = toggleTeamLockOverride(pin); if (e) show(e, "red"); else show(teamLockOverride ? "Team selection re-locked." : "Team selection unlocked for everyone.", "green"); }}>
           {teamLockOverride ? "Re-lock team selection" : "Unlock team selection"}
         </Btn>
+      </div>
+
+      {/* Reset a team's password */}
+      <div style={{ paddingTop: 18, marginTop: 18, borderTop: `1px solid ${C.border}` }}>
+        <div style={{ color: C.text, fontWeight: 700, fontSize: 13, marginBottom: 6 }}>Reset a Team's Password</div>
+        <div style={{ color: C.muted, fontSize: 11.5, marginBottom: 10 }}>
+          If someone forgets their team's login password, or a team needs handing to a different person, clear it
+          here — the team becomes unclaimed again and whoever logs in next sets a fresh password.
+        </div>
+        <div className="flex items-end gap-2 flex-wrap">
+          <Field label="Team">
+            <Select value={pwTeam} onChange={(e) => setPwTeam(e.target.value)}>
+              {teams.map((t) => <option key={t.id} value={t.id}>{t.name}{t.password ? "" : " (unclaimed)"}</option>)}
+            </Select>
+          </Field>
+          <Btn onClick={doResetTeamPassword}>Clear Password</Btn>
+        </div>
       </div>
 
       {msg && (
