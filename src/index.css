@@ -20,3 +20,8 @@ body {
 .hud-font {
   font-family: 'Oswald', 'Segoe UI', sans-serif;
 }
+
+@keyframes ticker-scroll {
+  0% { transform: translateX(0); }
+  100% { transform: translateX(-100%); }
+}

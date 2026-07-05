@@ -1031,6 +1031,12 @@ export default function EafcLeagueApp() {
     return null;
   };
 
+  const clearActivity = (pinAttempt) => {
+    if (pinAttempt !== adminPin) return "Incorrect PIN.";
+    setActivity([]);
+    return null;
+  };
+
   const addFundsToTeam = (pinAttempt, teamId, amount) => {
     if (pinAttempt !== adminPin) return "Incorrect PIN.";
     const amt = Number(amount);
@@ -1153,7 +1159,7 @@ export default function EafcLeagueApp() {
         {tab === "dashboard" && (
           <Dashboard teams={teams} squads={squads} standings={standings} budgetStats={budgetStats} prizeTotal={prizeTotal}
             taxCollected={taxCollected} events={events} setEvents={setEvents} setTab={setTab}
-            activity={activity} myTeamId={myTeamId} season={season} />
+            activity={activity} myTeamId={myTeamId} season={season} clearActivity={clearActivity} />
         )}
         {tab === "squads" && (
           <SquadsTab teams={teams} squads={squads} squadStats={squadStats} renameTeam={renameTeam}
@@ -1316,7 +1322,7 @@ function HudStatChip({ label, value, tone }) {
   );
 }
 
-function Dashboard({ teams, squads, standings, budgetStats, prizeTotal, taxCollected, events, setEvents, setTab, activity, myTeamId, season }) {
+function Dashboard({ teams, squads, standings, budgetStats, prizeTotal, taxCollected, events, setEvents, setTab, activity, myTeamId, season, clearActivity }) {
   const [newEvent, setNewEvent] = useState({ title: "", type: "League", date: "" });
   const leader = standings[0];
   const leaderTeam = teams.find((t) => t.id === leader?.id);
@@ -1434,8 +1440,7 @@ function Dashboard({ teams, squads, standings, budgetStats, prizeTotal, taxColle
             <PlayerSearchInner teams={teams} squads={squads} />
           </Panel>
           <Panel>
-            <SectionTitle>Recent Activity</SectionTitle>
-            <RecentActivityInner activity={activity} />
+            <ActivityTicker activity={activity} clearActivity={clearActivity} />
           </Panel>
         </div>
 
@@ -1559,6 +1564,46 @@ function RecentActivity({ activity }) {
       <SectionTitle icon={CalendarClock}>Recent Activity</SectionTitle>
       <RecentActivityInner activity={activity} />
     </Panel>
+  );
+}
+
+function ActivityTicker({ activity, clearActivity }) {
+  const [clearing, setClearing] = useState(false);
+  const [pin, setPin] = useState("");
+  const [err, setErr] = useState("");
+
+  const doClear = () => {
+    const e = clearActivity(pin);
+    if (e) setErr(e);
+    else { setClearing(false); setPin(""); setErr(""); }
+  };
+
+  const items = activity.slice(0, 20);
+  const tickerText = items.length > 0
+    ? items.map((a) => a.text).join("     •     ")
+    : "Nothing's happened yet — actions across the league will show up here.";
+  const duration = Math.max(items.length * 6, 14);
+
+  return (
+    <>
+      <SectionTitle right={
+        <Btn size="sm" variant="ghost" icon={Trash2} onClick={() => setClearing((c) => !c)}>Clear</Btn>
+      }>Recent Activity</SectionTitle>
+
+      {clearing && (
+        <div className="flex items-center gap-2 flex-wrap" style={{ marginBottom: 10 }}>
+          <TextInput type="password" placeholder="Admin PIN" value={pin} onChange={(e) => setPin(e.target.value)} style={{ width: 120 }} />
+          <Btn size="sm" variant="danger" onClick={doClear}>Clear all activity</Btn>
+          {err && <span style={{ color: C.red, fontSize: 11.5 }}>{err}</span>}
+        </div>
+      )}
+
+      <div style={{ overflow: "hidden", whiteSpace: "nowrap", borderTop: `1px solid ${C.border}`, borderBottom: `1px solid ${C.border}`, padding: "12px 0" }}>
+        <div style={{ display: "inline-block", paddingLeft: "100%", animation: `ticker-scroll ${duration}s linear infinite` }}>
+          <span className="hud-font" style={{ color: C.text, fontSize: 14, letterSpacing: "0.02em" }}>{tickerText}</span>
+        </div>
+      </div>
+    </>
   );
 }
 
