@@ -112,6 +112,7 @@ function defaultTeams() {
     wageCap: BASE_WAGE_CAP,
     earned86: 0,
     notes: "",
+    formation: "4-4-2",
   }));
 }
 
@@ -303,6 +304,8 @@ export default function EafcLeagueApp() {
   const [claimedTeams, setClaimedTeams] = useState({}); // { [teamId]: true } — which teams are already picked by someone
   const [injuries, setInjuries] = useState({}); // { [teamId]: { [playerName]: lastInjuredMatchday } }
   const [teamLockOverride, setTeamLockOverride] = useState(false); // admin toggle to allow re-picks mid-season
+  const [cardTally, setCardTally] = useState({}); // { [teamId]: { [playerName]: seasonYellowCount } }
+  const [suspensions, setSuspensions] = useState({}); // { [teamId]: { [playerName]: true } } — cleared once that team completes one more fixture
   const [chatLastSeen, setChatLastSeen] = useState(0); // personal — timestamp of last time this device checked chat
   const [mentionToasts, setMentionToasts] = useState([]); // ephemeral "flash" alerts for @team mentions
   const [myTeamId, setMyTeamId] = useState(null); // personal — which team is "me" on this device
@@ -335,6 +338,8 @@ export default function EafcLeagueApp() {
     if (data.claimedTeams) setClaimedTeams(data.claimedTeams);
     if (data.injuries) setInjuries(data.injuries);
     if (data.teamLockOverride !== undefined) setTeamLockOverride(data.teamLockOverride);
+    if (data.cardTally) setCardTally(data.cardTally);
+    if (data.suspensions) setSuspensions(data.suspensions);
   }, []);
 
   // load once
@@ -376,7 +381,7 @@ export default function EafcLeagueApp() {
         const savedAt = Date.now();
         await storage.set(
           STORAGE_KEY,
-          JSON.stringify({ teams, squads, transfers, fixtures, prizes, events, auctions, adminPin, season, seasonHistory, activity, chat, playerDatabase, claimedTeams, injuries, teamLockOverride, savedAt }),
+          JSON.stringify({ teams, squads, transfers, fixtures, prizes, events, auctions, adminPin, season, seasonHistory, activity, chat, playerDatabase, claimedTeams, injuries, teamLockOverride, cardTally, suspensions, savedAt }),
           true
         );
         knownSavedAtRef.current = savedAt;
@@ -387,7 +392,7 @@ export default function EafcLeagueApp() {
       }
     }, 500);
     return () => clearTimeout(t);
-  }, [teams, squads, transfers, fixtures, prizes, events, auctions, adminPin, season, seasonHistory, activity, chat, playerDatabase, claimedTeams, injuries, teamLockOverride, loaded]);
+  }, [teams, squads, transfers, fixtures, prizes, events, auctions, adminPin, season, seasonHistory, activity, chat, playerDatabase, claimedTeams, injuries, teamLockOverride, cardTally, suspensions, loaded]);
 
   // live sync: poll for other people's changes and pull them in automatically. Skipped while we
   // have our own unsaved edit in flight, so we don't clobber it with a slightly stale copy.
@@ -876,6 +881,14 @@ export default function EafcLeagueApp() {
     return err;
   };
 
+  // Admin-only: remove a transfer record entirely (covers auction wins, losing-bid tax charges,
+  // and instant admin rewards) — regular users can no longer delete these.
+  const deleteTransfer = (pinAttempt, id) => {
+    if (pinAttempt !== adminPin) return "Incorrect PIN.";
+    setTransfers((all) => all.filter((x) => x.id !== id));
+    return null;
+  };
+
   // Admin-only: remove a specific bid (e.g. a mis-click or joke bid) and recompute who's currently
   // winning from whatever bids remain.
   const deleteBid = (auctionId, bidId, pinAttempt) => {
@@ -1173,7 +1186,7 @@ export default function EafcLeagueApp() {
   /* --------------------------------- render --------------------------------- */
   const TABS = [
     { id: "dashboard", label: "Dashboard", icon: Home },
-    { id: "squads", label: "Squad Lists", icon: Users },
+    { id: "squads", label: "Squad List", icon: Users },
     { id: "budgets", label: "Budgets & Wages", icon: Wallet },
     { id: "transfers", label: "Transfers", icon: Repeat },
     { id: "fixtures", label: "Fixtures", icon: Swords },
@@ -1279,7 +1292,7 @@ export default function EafcLeagueApp() {
         )}
         {tab === "squads" && (
           <SquadsTab teams={teams} squads={squads} squadStats={squadStats} renameTeam={renameTeam}
-            setTab={setTab} movePlayerToGroup={movePlayerToGroup} reorderPlayer={reorderPlayer} />
+            setTab={setTab} movePlayerToGroup={movePlayerToGroup} reorderPlayer={reorderPlayer} myTeamId={myTeamId} />
         )}
         {tab === "budgets" && (
           <BudgetsTab teams={teams} budgetStats={budgetStats} renameTeam={renameTeam} />
@@ -1288,15 +1301,16 @@ export default function EafcLeagueApp() {
           <TransfersTab teams={teams} squads={squads} transfers={transfers} logTransfer={logTransfer}
             setTransfers={setTransfers} auctions={auctions} createAuction={createAuction}
             placeBid={placeBid} finalizeAuction={finalizeAuction} respondToAuction={respondToAuction}
-            deleteBid={deleteBid} editAuctionPlayerName={editAuctionPlayerName} nowTick={nowTick}
+            deleteBid={deleteBid} deleteTransfer={deleteTransfer} editAuctionPlayerName={editAuctionPlayerName} nowTick={nowTick}
             myTeamId={myTeamId} playerDatabase={playerDatabase} />
         )}
         {tab === "fixtures" && (
           <FixturesTab teams={teams} fixtures={fixtures} setFixtures={setFixtures} logActivity={logActivity}
-            myTeamId={myTeamId} squads={squads} injuries={injuries} generateInjuries={generateInjuries} />
+            myTeamId={myTeamId} squads={squads} injuries={injuries} generateInjuries={generateInjuries}
+            cardTally={cardTally} setCardTally={setCardTally} suspensions={suspensions} setSuspensions={setSuspensions} />
         )}
         {tab === "standings" && (
-          <StandingsTab teams={teams} standings={standings} />
+          <StandingsTab teams={teams} standings={standings} fixtures={fixtures} />
         )}
         {tab === "prizes" && (
           <PrizesTab prizes={prizes} setPrizes={setPrizes} taxCollected={taxCollected} prizeTotal={prizeTotal}
@@ -1763,7 +1777,62 @@ function Table({ head, rows, dense }) {
 }
 
 /* -------------------------------- Squads ---------------------------------- */
-function SquadsTab({ teams, squads, squadStats, renameTeam, setTab, movePlayerToGroup, reorderPlayer }) {
+const FORMATIONS = {
+  "4-4-2": [1, 4, 4, 2],
+  "4-3-3": [1, 4, 3, 3],
+  "3-5-2": [1, 3, 5, 2],
+  "4-5-1": [1, 4, 5, 1],
+  "3-4-3": [1, 3, 4, 3],
+  "5-3-2": [1, 5, 3, 2],
+};
+
+function FormationPitch({ formation, starters }) {
+  const rows = FORMATIONS[formation] || FORMATIONS["4-4-2"];
+  const xi = starters.slice(0, 11);
+  let idx = 0;
+  const rowPlayers = rows.map((count) => {
+    const slice = xi.slice(idx, idx + count);
+    idx += count;
+    return slice;
+  });
+  const displayRows = [...rowPlayers].reverse(); // GK last in the data, shown at the bottom of the pitch
+
+  const initials = (name) => name.split(" ").map((w) => w[0]).slice(0, 2).join("").toUpperCase();
+  const shortName = (name) => name.split(" ").slice(-1)[0];
+
+  return (
+    <div style={{
+      background: "linear-gradient(180deg, #1c6b41 0%, #154f31 100%)",
+      borderRadius: 8, border: `1px solid ${C.border}`, padding: "18px 8px",
+      display: "flex", flexDirection: "column", justifyContent: "space-between", gap: 10,
+      minHeight: 420, position: "relative", overflow: "hidden",
+    }}>
+      <div style={{ position: "absolute", top: "50%", left: 0, right: 0, height: 1, background: "rgba(255,255,255,0.25)" }} />
+      <div style={{ position: "absolute", top: "50%", left: "50%", width: 60, height: 60, marginTop: -30, marginLeft: -30, borderRadius: "50%", border: "1px solid rgba(255,255,255,0.25)" }} />
+      {displayRows.map((row, i) => (
+        <div key={i} className="flex justify-center gap-3 flex-wrap" style={{ position: "relative", zIndex: 1 }}>
+          {row.map((p, j) => (
+            <div key={j} style={{ textAlign: "center", width: 46 }}>
+              <div style={{
+                width: 32, height: 32, borderRadius: "50%", margin: "0 auto",
+                background: p ? C.gold : "rgba(255,255,255,0.15)", color: p ? C.dark : "rgba(255,255,255,0.5)",
+                display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 800, fontSize: 10.5,
+                border: p ? "none" : "2px dashed rgba(255,255,255,0.3)",
+              }}>
+                {p ? initials(p.name) : "?"}
+              </div>
+              <div style={{ color: "#fff", fontSize: 9.5, marginTop: 3, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                {p ? shortName(p.name) : "Empty"}
+              </div>
+            </div>
+          ))}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function SquadsTab({ teams, squads, squadStats, renameTeam, setTab, movePlayerToGroup, reorderPlayer, myTeamId }) {
   const [activeTeam, setActiveTeam] = useState(teams[0].id);
   const [moveError, setMoveError] = useState("");
   const team = teams.find((t) => t.id === activeTeam);
@@ -1800,16 +1869,39 @@ function SquadsTab({ teams, squads, squadStats, renameTeam, setTab, movePlayerTo
         </SectionTitle>
         <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", marginBottom: 16 }}>
           <Field label="Team name">
-            <TextInput value={team.name} onChange={(e) => renameTeam(team.id, { name: e.target.value })} />
+            {activeTeam === myTeamId ? (
+              <TextInput value={team.name} onChange={(e) => renameTeam(team.id, { name: e.target.value })} />
+            ) : (
+              <div style={{ ...inputStyle, opacity: 0.7 }}>{team.name}</div>
+            )}
           </Field>
           <Field label="Manager">
-            <TextInput value={team.manager} onChange={(e) => renameTeam(team.id, { manager: e.target.value })} />
+            {activeTeam === myTeamId ? (
+              <TextInput value={team.manager} onChange={(e) => renameTeam(team.id, { manager: e.target.value })} />
+            ) : (
+              <div style={{ ...inputStyle, opacity: 0.7 }}>{team.manager}</div>
+            )}
           </Field>
           <Field label="Earned extra 86+ slots">
-            <TextInput type="number" min={0} value={team.earned86}
-              onChange={(e) => renameTeam(team.id, { earned86: Number(e.target.value) || 0 })} />
+            <div style={{ ...inputStyle, opacity: 0.7 }} title="Set via Admin Tools in the Admin tab">
+              {team.earned86 || 0}
+            </div>
+          </Field>
+          <Field label="Formation">
+            {activeTeam === myTeamId ? (
+              <Select value={team.formation || "4-4-2"} onChange={(e) => renameTeam(team.id, { formation: e.target.value })}>
+                {Object.keys(FORMATIONS).map((f) => <option key={f} value={f}>{f}</option>)}
+              </Select>
+            ) : (
+              <div style={{ ...inputStyle, opacity: 0.7 }}>{team.formation || "4-4-2"}</div>
+            )}
           </Field>
         </div>
+        {activeTeam !== myTeamId && (
+          <div style={{ color: C.muted, fontSize: 11, marginBottom: 12 }}>
+            {myTeamId ? "You can only edit your own team's name, manager, and formation." : "Pick your team (top right) to edit its name, manager, and formation."}
+          </div>
+        )}
 
         <div className="flex flex-wrap gap-2" style={{ marginBottom: 16 }}>
           <Pill tone="muted">{stat.filled}/26 registered</Pill>
@@ -1824,7 +1916,7 @@ function SquadsTab({ teams, squads, squadStats, renameTeam, setTab, movePlayerTo
           Player details (name, position, rating, club, age, value, wage) are only entered once, on the Transfers
           tab. Here you can reorganize who's already signed: click a column header to sort, use the arrows to move
           a player between the starting squad and reserves, or reorder players within a list (only available when
-          not sorted) to arrange your starting XI.
+          not sorted) to arrange your starting XI — the first 11 slots are shown on the formation pitch.
         </div>
 
         {moveError && (
@@ -1833,9 +1925,12 @@ function SquadsTab({ teams, squads, squadStats, renameTeam, setTab, movePlayerTo
           </div>
         )}
 
-        <SquadTable title={`Starting Squad (${STARTER_SLOTS} slots)`} players={sq.starters} labelForIdx={(i) => i + 1}
-          group="starters" onMove={(index) => move("starters", index, "reserves")} moveLabel="Bench" moveIcon={ChevronDown}
-          reorderPlayer={(index, dir) => reorderPlayer(activeTeam, "starters", index, dir)} />
+        <div className="grid gap-4" style={{ gridTemplateColumns: "1.7fr 1fr", alignItems: "start" }}>
+          <SquadTable title={`Starting Squad (${STARTER_SLOTS} slots)`} players={sq.starters} labelForIdx={(i) => i + 1}
+            group="starters" onMove={(index) => move("starters", index, "reserves")} moveLabel="Bench" moveIcon={ChevronDown}
+            reorderPlayer={(index, dir) => reorderPlayer(activeTeam, "starters", index, dir)} minWidth={600} />
+          <FormationPitch formation={team.formation || "4-4-2"} starters={sq.starters} />
+        </div>
         <div style={{ height: 18 }} />
         <SquadTable title={`Reserves (${RESERVE_SLOTS} slots)`} players={sq.reserves} labelForIdx={(i) => `R${i + 1}`}
           group="reserves" onMove={(index) => move("reserves", index, "starters")} moveLabel="Start" moveIcon={ChevronUp}
@@ -1856,7 +1951,7 @@ const SORTABLE_COLUMNS = [
   { key: "wage", label: "Wage (£k)" },
 ];
 
-function SquadTable({ title, players, labelForIdx, group, onMove, moveLabel, moveIcon: MoveIcon, reorderPlayer }) {
+function SquadTable({ title, players, labelForIdx, group, onMove, moveLabel, moveIcon: MoveIcon, reorderPlayer, minWidth = 780 }) {
   const [sortKey, setSortKey] = useState(null);
   const [sortDir, setSortDir] = useState(1); // 1 = asc, -1 = desc
 
@@ -1885,20 +1980,20 @@ function SquadTable({ title, players, labelForIdx, group, onMove, moveLabel, mov
     <div>
       <div style={{ color: C.gold, fontWeight: 700, fontSize: 13, marginBottom: 8 }}>{title}</div>
       <div style={{ overflowX: "auto" }}>
-        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5, minWidth: 780 }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12, minWidth }}>
           <thead>
             <tr>
               {SORTABLE_COLUMNS.map((col, i) => (
                 <th key={i} onClick={() => col.key && toggleSort(col.key)}
                   style={{
-                    color: sortKey === col.key ? C.gold : C.muted, fontSize: 10.5, textTransform: "uppercase",
-                    padding: "5px 6px", textAlign: i === 1 ? "left" : "center", borderBottom: `1px solid ${C.border}`,
+                    color: sortKey === col.key ? C.gold : C.muted, fontSize: 10, textTransform: "uppercase",
+                    padding: "5px 4px", textAlign: i === 1 ? "left" : "center", borderBottom: `1px solid ${C.border}`,
                     cursor: col.key ? "pointer" : "default", userSelect: "none", whiteSpace: "nowrap",
                   }}>
                   {col.label}{sortKey === col.key ? (sortDir === 1 ? " ▲" : " ▼") : ""}
                 </th>
               ))}
-              <th style={{ padding: "5px 6px", borderBottom: `1px solid ${C.border}` }}></th>
+              <th style={{ padding: "5px 4px", borderBottom: `1px solid ${C.border}` }}></th>
             </tr>
           </thead>
           <tbody>
@@ -1918,7 +2013,7 @@ function SquadTable({ title, players, labelForIdx, group, onMove, moveLabel, mov
 
 function SquadRow({ label, player, onMove, moveLabel, moveIcon: MoveIcon, canReorder, onMoveUp, onMoveDown }) {
   const filled = !!player;
-  const cellPad = { padding: "6px 8px", borderBottom: `1px solid ${C.border}33` };
+  const cellPad = { padding: "5px 6px", borderBottom: `1px solid ${C.border}33` };
   const highlight = filled && Number(player.rating) >= 86 ? { background: `${C.gold}1a` } : {};
   const emptyStyle = { color: C.muted, fontStyle: "italic" };
 
@@ -2440,7 +2535,17 @@ function AdminPlayerRewards({ teams, squads, logAdminReward, myTeamId, playerDat
   );
 }
 
-function TransfersTab({ teams, squads, transfers, logTransfer, logAdminReward, setTransfers, auctions, createAuction, placeBid, finalizeAuction, respondToAuction, deleteBid, editAuctionPlayerName, nowTick, myTeamId, playerDatabase }) {
+function TransfersTab({ teams, squads, transfers, logTransfer, logAdminReward, setTransfers, auctions, createAuction, placeBid, finalizeAuction, respondToAuction, deleteBid, deleteTransfer, editAuctionPlayerName, nowTick, myTeamId, playerDatabase }) {
+  const [deletingId, setDeletingId] = useState(null);
+  const [deletePin, setDeletePin] = useState("");
+  const [deleteErr, setDeleteErr] = useState("");
+
+  const confirmDelete = () => {
+    const err = deleteTransfer(deletePin, deletingId);
+    if (err) setDeleteErr(err);
+    else { setDeletingId(null); setDeletePin(""); setDeleteErr(""); }
+  };
+
   return (
     <div className="grid gap-4">
       <AuctionsPanel teams={teams} squads={squads} auctions={auctions} createAuction={createAuction}
@@ -2453,7 +2558,7 @@ function TransfersTab({ teams, squads, transfers, logTransfer, logAdminReward, s
         <div style={{ color: C.muted, fontSize: 11.5, marginBottom: 12, lineHeight: 1.6 }}>
           Every deal is ratified in two stages: the selling side is settled after 12 hours (budget credited, player
           leaves their squad); the buying side — the actual signing, squad placement, budget hit and tax — only
-          becomes official after the full 24 hours.
+          becomes official after the full 24 hours. Deleting a record requires the admin PIN.
         </div>
         <Table
           dense
@@ -2466,12 +2571,22 @@ function TransfersTab({ teams, squads, transfers, logTransfer, logAdminReward, s
               tx.to === "FA" ? "Non OCM" : teams.find((t) => t.id === tx.to)?.name || tx.to,
               money(tx.price), money(tx.tax), money(tx.finalCost),
               <Pill tone={st.tone}>{st.label}</Pill>,
-              <button onClick={() => setTransfers((all) => all.filter((x) => x.id !== tx.id))} style={{ background: "transparent", border: "none", cursor: "pointer", color: C.red }}>
+              <button onClick={() => { setDeletingId(tx.id); setDeletePin(""); setDeleteErr(""); }} style={{ background: "transparent", border: "none", cursor: "pointer", color: C.red }}>
                 <Trash2 size={14} />
               </button>,
             ];
           })}
         />
+        {deletingId && (
+          <div className="flex items-center gap-2 flex-wrap" style={{ marginTop: 12, background: C.panelAlt, borderRadius: 8, padding: 10 }}>
+            <Field label="Admin PIN to delete this record">
+              <TextInput type="password" value={deletePin} onChange={(e) => setDeletePin(e.target.value)} style={{ width: 140 }} />
+            </Field>
+            <Btn variant="danger" size="sm" onClick={confirmDelete}>Delete</Btn>
+            <Btn variant="outline" size="sm" onClick={() => setDeletingId(null)}>Cancel</Btn>
+            {deleteErr && <span style={{ color: C.red, fontSize: 11.5 }}>{deleteErr}</span>}
+          </div>
+        )}
       </Panel>
     </div>
   );
@@ -2539,7 +2654,7 @@ function MatchStatsPanel({ team1Name, team2Name, team1Players, team2Players, tea
       <div style={{ color: C.text, fontWeight: 700, fontSize: 13, marginBottom: 10 }}>Match Stats — required before saving</div>
       {(team1Injured?.length > 0 || team2Injured?.length > 0) && (
         <div style={{ color: C.red, fontSize: 11.5, marginBottom: 10, lineHeight: 1.5 }}>
-          Unavailable through injury: {team1Injured?.length > 0 && <span>{team1Name} — {team1Injured.join(", ")}</span>}
+          Unavailable (injury or suspension): {team1Injured?.length > 0 && <span>{team1Name} — {team1Injured.join(", ")}</span>}
           {team1Injured?.length > 0 && team2Injured?.length > 0 && "; "}
           {team2Injured?.length > 0 && <span>{team2Name} — {team2Injured.join(", ")}</span>}
         </div>
@@ -2586,7 +2701,7 @@ function generateRoundRobin(teamIds, doubleRound) {
   return legs;
 }
 
-function FixturesTab({ teams, fixtures, setFixtures, logActivity, myTeamId, squads, injuries, generateInjuries }) {
+function FixturesTab({ teams, fixtures, setFixtures, logActivity, myTeamId, squads, injuries, generateInjuries, cardTally, setCardTally, suspensions, setSuspensions }) {
   const blank = { matchday: 1, team1: myTeamId || teams[0].id, team2: teams.find((t) => t.id !== myTeamId)?.id || teams[1].id, date: todayISO(), proof: "" };
   const [form, setForm] = useState(blank);
   const [warning, setWarning] = useState("");
@@ -2629,9 +2744,12 @@ function FixturesTab({ teams, fixtures, setFixtures, logActivity, myTeamId, squa
     return new Set(Object.entries(teamInjuries).filter(([, until]) => until >= matchday).map(([name]) => name));
   };
 
+  const suspendedNamesFor = (teamId) => new Set(Object.keys(suspensions[teamId] || {}));
+
   const eligiblePlayersFor = (teamId, matchday) => {
     const hurt = injuredNamesFor(teamId, matchday);
-    return squadPlayersFor(teamId).filter((p) => !hurt.has(p.name));
+    const banned = suspendedNamesFor(teamId);
+    return squadPlayersFor(teamId).filter((p) => !hurt.has(p.name) && !banned.has(p.name));
   };
 
   const startResult = (f) => {
@@ -2690,6 +2808,34 @@ function FixturesTab({ teams, fixtures, setFixtures, logActivity, myTeamId, squa
       motm: resultForm.motm || null,
     };
     setFixtures((all) => all.map((x) => (x.id === f.id ? { ...x, score1: resultForm.score1, score2: resultForm.score2, stats } : x)));
+
+    // Suspensions aren't tied to matchday order — a ban is served the next time this specific team
+    // completes ANY fixture, whichever one that happens to be. So: first, anyone currently
+    // suspended on either team has now served their one match (they were excluded from selection,
+    // so this counts). Then apply fresh suspensions triggered by cards picked up in this match.
+    const newSuspensions = { ...suspensions };
+    if (newSuspensions[f.team1]) newSuspensions[f.team1] = {};
+    if (newSuspensions[f.team2]) newSuspensions[f.team2] = {};
+
+    const newTally = { ...cardTally };
+    [[f.team1, stats.team1], [f.team2, stats.team2]].forEach(([teamId, playerStats]) => {
+      const teamTally = { ...(newTally[teamId] || {}) };
+      playerStats.forEach((p) => {
+        if (p.yellow) {
+          teamTally[p.name] = (teamTally[p.name] || 0) + 1;
+          if (teamTally[p.name] % 3 === 0) {
+            newSuspensions[teamId] = { ...(newSuspensions[teamId] || {}), [p.name]: true };
+          }
+        }
+        if (p.red) {
+          newSuspensions[teamId] = { ...(newSuspensions[teamId] || {}), [p.name]: true };
+        }
+      });
+      newTally[teamId] = teamTally;
+    });
+    setCardTally(newTally);
+    setSuspensions(newSuspensions);
+
     const t1 = teams.find((t) => t.id === f.team1)?.name, t2 = teams.find((t) => t.id === f.team2)?.name;
     logActivity(buildResultSummary(t1, t2, resultForm.score1, resultForm.score2, f.matchday, stats), "fixture");
     setEnteringResultFor(null);
@@ -2854,7 +3000,7 @@ function FixturesTab({ teams, fixtures, setFixtures, logActivity, myTeamId, squa
                         <MatchStatsPanel
                           team1Name={t1} team2Name={t2}
                           team1Players={eligiblePlayersFor(f.team1, f.matchday)} team2Players={eligiblePlayersFor(f.team2, f.matchday)}
-                          team1Injured={[...injuredNamesFor(f.team1, f.matchday)]} team2Injured={[...injuredNamesFor(f.team2, f.matchday)]}
+                          team1Injured={[...injuredNamesFor(f.team1, f.matchday), ...suspendedNamesFor(f.team1)]} team2Injured={[...injuredNamesFor(f.team2, f.matchday), ...suspendedNamesFor(f.team2)]}
                           resultForm={resultForm} togglePlayed={togglePlayed} updateStat={updateStat}
                           setMotm={(name) => setResultForm((r) => ({ ...r, motm: name }))}
                           error={resultError}
@@ -2926,21 +3072,78 @@ function ProofModal({ fixture, teams, onClose }) {
 }
 
 /* -------------------------------- Standings ---------------------------------- */
-function StandingsTab({ teams, standings }) {
+function StandingsTab({ teams, standings, fixtures }) {
+  const teamById = useMemo(() => Object.fromEntries(teams.map((t) => [t.id, t])), [teams]);
+
+  const seasonAwards = useMemo(() => {
+    const goals = {}, assists = {}, motmCounts = {};
+    const bump = (map, teamId, name, amount) => {
+      const key = `${teamId}::${name}`;
+      if (!map[key]) map[key] = { name, teamId, count: 0 };
+      map[key].count += amount;
+    };
+    fixtures.forEach((f) => {
+      if (!f.stats) return;
+      (f.stats.team1 || []).forEach((p) => {
+        if (p.goals) bump(goals, f.team1, p.name, p.goals);
+        if (p.assists) bump(assists, f.team1, p.name, p.assists);
+      });
+      (f.stats.team2 || []).forEach((p) => {
+        if (p.goals) bump(goals, f.team2, p.name, p.goals);
+        if (p.assists) bump(assists, f.team2, p.name, p.assists);
+      });
+      if (f.stats.motm) {
+        const inTeam1 = (f.stats.team1 || []).some((p) => p.name === f.stats.motm);
+        bump(motmCounts, inTeam1 ? f.team1 : f.team2, f.stats.motm, 1);
+      }
+    });
+    const topN = (map) => Object.values(map).sort((a, b) => b.count - a.count).slice(0, 5);
+    return { topScorers: topN(goals), topAssisters: topN(assists), topMotm: topN(motmCounts) };
+  }, [fixtures]);
+
+  const hasAwards = seasonAwards.topScorers.length || seasonAwards.topAssisters.length || seasonAwards.topMotm.length;
+
   return (
-    <Panel style={{ padding: 18 }}>
-      <SectionTitle icon={Trophy}>Standings</SectionTitle>
-      <Table
-        head={["Pos", "Team", "Manager", "P", "W", "D", "L", "GF", "GA", "GD", "Pts", "Next Season Cap"]}
-        rows={standings.map((r) => {
-          const t = teams.find((x) => x.id === r.id);
-          return [
-            r.position === 1 ? <Pill tone="gold">1</Pill> : r.position, t?.name, t?.manager,
-            r.played, r.w, r.d, r.l, r.gf, r.ga, r.gd, <b>{r.points}</b>, money(r.nextCap),
-          ];
-        })}
-      />
-    </Panel>
+    <div className="grid gap-4">
+      <Panel style={{ padding: 18 }}>
+        <SectionTitle icon={Trophy}>Standings</SectionTitle>
+        <Table
+          head={["Pos", "Team", "Manager", "P", "W", "D", "L", "GF", "GA", "GD", "Pts", "Next Season Cap"]}
+          rows={standings.map((r) => {
+            const t = teams.find((x) => x.id === r.id);
+            return [
+              r.position === 1 ? <Pill tone="gold">1</Pill> : r.position, t?.name, t?.manager,
+              r.played, r.w, r.d, r.l, r.gf, r.ga, r.gd, <b>{r.points}</b>, money(r.nextCap),
+            ];
+          })}
+        />
+      </Panel>
+
+      <Panel style={{ padding: 18 }}>
+        <SectionTitle icon={Trophy}>Player of the Season</SectionTitle>
+        {!hasAwards ? (
+          <div style={{ color: C.muted, fontSize: 12.5 }}>No match stats logged yet — these fill in automatically as results with player stats get saved.</div>
+        ) : (
+          <div className="grid gap-4" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))" }}>
+            <div>
+              <div style={{ color: C.gold, fontWeight: 700, fontSize: 12.5, marginBottom: 8 }}>Top Scorers</div>
+              <Table dense head={["Player", "Team", "Goals"]}
+                rows={seasonAwards.topScorers.map((p) => [p.name, teamById[p.teamId]?.name || "—", p.count])} />
+            </div>
+            <div>
+              <div style={{ color: C.gold, fontWeight: 700, fontSize: 12.5, marginBottom: 8 }}>Top Assisters</div>
+              <Table dense head={["Player", "Team", "Assists"]}
+                rows={seasonAwards.topAssisters.map((p) => [p.name, teamById[p.teamId]?.name || "—", p.count])} />
+            </div>
+            <div>
+              <div style={{ color: C.gold, fontWeight: 700, fontSize: 12.5, marginBottom: 8 }}>Most MOTM Awards</div>
+              <Table dense head={["Player", "Team", "Awards"]}
+                rows={seasonAwards.topMotm.map((p) => [p.name, teamById[p.teamId]?.name || "—", p.count])} />
+            </div>
+          </div>
+        )}
+      </Panel>
+    </div>
   );
 }
 
