@@ -1369,9 +1369,9 @@ export default function EafcLeagueApp() {
             </div>
           </div>
           <div className="flex items-center gap-3">
-            <MyTeamPicker teams={teams} myTeamId={myTeamId} chooseMyTeam={chooseMyTeam} />
+            <MyTeamPicker teams={teams} myTeamId={myTeamId} chooseMyTeam={chooseMyTeam}
+              canSwitchTeam={!myTeamId || allMatchdaysComplete || teamLockOverride} />
             <SyncIndicator syncState={syncState} lastSyncedAt={lastSyncedAt} onRefresh={() => pullLatest(true)} />
-            <SaveIndicator state={saveState} />
           </div>
         </div>
       </div>
@@ -1517,7 +1517,7 @@ export default function EafcLeagueApp() {
   );
 }
 
-function MyTeamPicker({ teams, myTeamId, chooseMyTeam }) {
+function MyTeamPicker({ teams, myTeamId, chooseMyTeam, canSwitchTeam }) {
   const [open, setOpen] = useState(false);
   const [selecting, setSelecting] = useState(null); // team id currently entering a password for
   const [pw, setPw] = useState("");
@@ -1548,23 +1548,30 @@ function MyTeamPicker({ teams, myTeamId, chooseMyTeam }) {
           {!selecting ? (
             <>
               <div style={{ color: C.muted, fontSize: 10.5, textTransform: "uppercase", padding: "4px 8px" }}>
-                Log in with your team's password — works on any device
+                {myTeamId && !canSwitchTeam
+                  ? "Your team is locked in for this season"
+                  : "Log in with your team's password — works on any device"}
               </div>
-              {teams.map((t) => (
-                <button key={t.id} onClick={() => startSelect(t.id)}
-                  className="flex items-center justify-between"
-                  style={{
-                    width: "100%", textAlign: "left", background: t.id === myTeamId ? `${C.gold}22` : "transparent",
-                    border: "none", borderRadius: 7, padding: "7px 8px", cursor: "pointer",
-                    color: t.id === myTeamId ? C.gold : C.text, fontSize: 13,
-                  }}>
-                  {t.name}
-                  <div className="flex items-center gap-1">
-                    {t.id === myTeamId && <Check size={13} />}
-                    {!t.password && <span style={{ fontSize: 10, color: C.muted, textTransform: "uppercase" }}>Unclaimed</span>}
-                  </div>
-                </button>
-              ))}
+              {teams.map((t) => {
+                const isMine = t.id === myTeamId;
+                const disabled = !isMine && myTeamId && !canSwitchTeam;
+                return (
+                  <button key={t.id} onClick={() => !disabled && startSelect(t.id)} disabled={disabled}
+                    className="flex items-center justify-between"
+                    style={{
+                      width: "100%", textAlign: "left", background: isMine ? `${C.gold}22` : "transparent",
+                      border: "none", borderRadius: 7, padding: "7px 8px", cursor: disabled ? "not-allowed" : "pointer",
+                      color: disabled ? C.muted : (isMine ? C.gold : C.text), fontSize: 13, opacity: disabled ? 0.5 : 1,
+                    }}>
+                    {t.name}
+                    <div className="flex items-center gap-1">
+                      {isMine && <Check size={13} />}
+                      {disabled && <span style={{ fontSize: 10, textTransform: "uppercase" }}>Locked</span>}
+                      {!disabled && !isMine && !t.password && <span style={{ fontSize: 10, color: C.muted, textTransform: "uppercase" }}>Unclaimed</span>}
+                    </div>
+                  </button>
+                );
+              })}
               {myTeamId && (
                 <button onClick={() => { chooseMyTeam(null); setOpen(false); }}
                   style={{ width: "100%", textAlign: "left", background: "transparent", border: "none", borderRadius: 7, padding: "7px 8px", cursor: "pointer", color: C.muted, fontSize: 12, marginTop: 4 }}>
@@ -1595,16 +1602,6 @@ function MyTeamPicker({ teams, myTeamId, chooseMyTeam }) {
       )}
     </div>
   );
-}
-
-function SaveIndicator({ state }) {
-  if (state === "saving") return <span style={{ color: C.muted, fontSize: 12 }}>Saving…</span>;
-  if (state === "saved") return (
-    <span className="flex items-center gap-1" style={{ color: C.green, fontSize: 12 }}>
-      <CheckCircle2 size={13} /> Saved
-    </span>
-  );
-  return null;
 }
 
 function SyncIndicator({ syncState, lastSyncedAt, onRefresh }) {
