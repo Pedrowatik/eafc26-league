@@ -145,6 +145,8 @@ function defaultSquads() {
 const POSITIONS = ["GK", "CB", "LB", "RB", "LWB", "RWB", "CDM", "CM", "CAM", "LM", "RM", "LW", "RW", "ST", "CF"];
 
 const STORAGE_KEY = "eafc26-league-state-v1";
+const DM_STORAGE_KEY = "eafc26-private-messages-v1"; // saved separately so it can't be clobbered by unrelated saves
+const CHAT_STORAGE_KEY = "eafc26-league-chat-v1"; // same isolation as private messages, for the same reason
 const MY_TEAM_KEY = "eafc26-my-team"; // personal, per-device — not shared
 const CHAT_SEEN_KEY = "eafc26-chat-last-seen"; // personal — for the unread-mentions badge
 const DM_SEEN_KEY = "eafc26-dm-last-seen"; // personal — per-conversation read timestamps
@@ -340,7 +342,11 @@ export default function EafcLeagueApp() {
   // Tracks the newest "savedAt" timestamp we know about, whether from our own last save or
   // someone else's. Used to decide whether an incoming poll actually has newer data.
   const knownSavedAtRef = useRef(0);
+  const knownDmSavedAtRef = useRef(0); // same idea, but for the separate private-messages store
+  const knownChatSavedAtRef = useRef(0); // same idea, but for the separate league chat store
   const savingRef = useRef(false);
+  const dmSavingRef = useRef(false);
+  const chatSavingRef = useRef(false);
   useEffect(() => { savingRef.current = saveState === "saving"; }, [saveState]);
 
   const applyRemoteData = useCallback((data) => {
@@ -355,7 +361,6 @@ export default function EafcLeagueApp() {
     if (data.season) setSeason(data.season);
     if (data.seasonHistory) setSeasonHistory(data.seasonHistory);
     if (data.activity) setActivity(data.activity);
-    if (data.chat) setChat(data.chat);
     if (data.playerDatabase) setPlayerDatabase(data.playerDatabase);
     if (data.injuries) setInjuries(data.injuries);
     if (data.teamLockOverride !== undefined) setTeamLockOverride(data.teamLockOverride);
@@ -366,7 +371,6 @@ export default function EafcLeagueApp() {
     if (data.suspensions) setSuspensions(data.suspensions);
     if (data.transferListings) setTransferListings(data.transferListings);
     if (data.wantedListings) setWantedListings(data.wantedListings);
-    if (data.privateMessages) setPrivateMessages(data.privateMessages);
   }, []);
 
   // load once
@@ -401,6 +405,26 @@ export default function EafcLeagueApp() {
       } catch (e) {
         // no DMs checked yet
       }
+      try {
+        const dmRes = await storage.get(DM_STORAGE_KEY, true);
+        if (dmRes && dmRes.value) {
+          const dmData = JSON.parse(dmRes.value);
+          setPrivateMessages(dmData.messages || []);
+          knownDmSavedAtRef.current = dmData.savedAt || Date.now();
+        }
+      } catch (e) {
+        // no messages saved yet — fine, start fresh
+      }
+      try {
+        const chatRes = await storage.get(CHAT_STORAGE_KEY, true);
+        if (chatRes && chatRes.value) {
+          const chatData = JSON.parse(chatRes.value);
+          setChat(chatData.messages || []);
+          knownChatSavedAtRef.current = chatData.savedAt || Date.now();
+        }
+      } catch (e) {
+        // no chat saved yet — fine, start fresh
+      }
       setLoaded(true);
     })();
   }, [applyRemoteData]);
@@ -414,7 +438,7 @@ export default function EafcLeagueApp() {
         const savedAt = Date.now();
         await storage.set(
           STORAGE_KEY,
-          JSON.stringify({ teams, squads, transfers, fixtures, prizes, events, auctions, adminPin, season, seasonHistory, activity, chat, playerDatabase, injuries, teamLockOverride, cardTally, suspensions, transferListings, wantedListings, privateMessages, transferWindow, swapsUsed, swapOffers, savedAt }),
+          JSON.stringify({ teams, squads, transfers, fixtures, prizes, events, auctions, adminPin, season, seasonHistory, activity, playerDatabase, injuries, teamLockOverride, cardTally, suspensions, transferListings, wantedListings, transferWindow, swapsUsed, swapOffers, savedAt }),
           true
         );
         knownSavedAtRef.current = savedAt;
@@ -425,7 +449,45 @@ export default function EafcLeagueApp() {
       }
     }, 500);
     return () => clearTimeout(t);
-  }, [teams, squads, transfers, fixtures, prizes, events, auctions, adminPin, season, seasonHistory, activity, chat, playerDatabase, injuries, teamLockOverride, cardTally, suspensions, transferListings, wantedListings, privateMessages, transferWindow, swapsUsed, swapOffers, loaded]);
+  }, [teams, squads, transfers, fixtures, prizes, events, auctions, adminPin, season, seasonHistory, activity, playerDatabase, injuries, teamLockOverride, cardTally, suspensions, transferListings, wantedListings, transferWindow, swapsUsed, swapOffers, loaded]);
+
+  // Private messages save to their own separate key, on their own quick timer — this is what
+  // actually stops a message from getting silently erased if someone else's browser (with a
+  // slightly older copy of everything else) happens to save around the same moment.
+  useEffect(() => {
+    if (!loaded) return;
+    dmSavingRef.current = true;
+    const t = setTimeout(async () => {
+      try {
+        const savedAt = Date.now();
+        await storage.set(DM_STORAGE_KEY, JSON.stringify({ messages: privateMessages, savedAt }), true);
+        knownDmSavedAtRef.current = savedAt;
+      } catch (e) {
+        // best effort — the next poll/realtime cycle will reconcile
+      } finally {
+        dmSavingRef.current = false;
+      }
+    }, 300);
+    return () => clearTimeout(t);
+  }, [privateMessages, loaded]);
+
+  // Same isolation for League Chat — same reasoning as private messages above.
+  useEffect(() => {
+    if (!loaded) return;
+    chatSavingRef.current = true;
+    const t = setTimeout(async () => {
+      try {
+        const savedAt = Date.now();
+        await storage.set(CHAT_STORAGE_KEY, JSON.stringify({ messages: chat, savedAt }), true);
+        knownChatSavedAtRef.current = savedAt;
+      } catch (e) {
+        // best effort — the next poll/realtime cycle will reconcile
+      } finally {
+        chatSavingRef.current = false;
+      }
+    }, 300);
+    return () => clearTimeout(t);
+  }, [chat, loaded]);
 
   // live sync: poll for other people's changes and pull them in automatically. Skipped while we
   // have our own unsaved edit in flight, so we don't clobber it with a slightly stale copy.
@@ -475,6 +537,89 @@ export default function EafcLeagueApp() {
     });
     return unsubscribe;
   }, [loaded, applyRemoteData]);
+
+  // Same poll + realtime pattern as above, but for the separate private-messages store.
+  const pullLatestMessages = useCallback(async () => {
+    if (dmSavingRef.current) return;
+    try {
+      const res = await storage.get(DM_STORAGE_KEY, true);
+      if (res && res.value) {
+        const data = JSON.parse(res.value);
+        const remoteSavedAt = data.savedAt || 0;
+        if (remoteSavedAt > knownDmSavedAtRef.current) {
+          setPrivateMessages(data.messages || []);
+          knownDmSavedAtRef.current = remoteSavedAt;
+        }
+      }
+    } catch (e) {
+      // best effort
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!loaded) return;
+    const t = setInterval(() => pullLatestMessages(), SYNC_POLL_MS);
+    return () => clearInterval(t);
+  }, [loaded, pullLatestMessages]);
+
+  useEffect(() => {
+    if (!loaded) return;
+    const unsubscribe = subscribeToKey(DM_STORAGE_KEY, (row) => {
+      if (!row || !row.value) return;
+      try {
+        const data = JSON.parse(row.value);
+        const remoteSavedAt = data.savedAt || 0;
+        if (remoteSavedAt > knownDmSavedAtRef.current && !dmSavingRef.current) {
+          setPrivateMessages(data.messages || []);
+          knownDmSavedAtRef.current = remoteSavedAt;
+        }
+      } catch (e) {
+        // ignore malformed payloads
+      }
+    });
+    return unsubscribe;
+  }, [loaded]);
+
+  const pullLatestChat = useCallback(async () => {
+    if (chatSavingRef.current) return;
+    try {
+      const res = await storage.get(CHAT_STORAGE_KEY, true);
+      if (res && res.value) {
+        const data = JSON.parse(res.value);
+        const remoteSavedAt = data.savedAt || 0;
+        if (remoteSavedAt > knownChatSavedAtRef.current) {
+          setChat(data.messages || []);
+          knownChatSavedAtRef.current = remoteSavedAt;
+        }
+      }
+    } catch (e) {
+      // best effort
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!loaded) return;
+    const t = setInterval(() => pullLatestChat(), SYNC_POLL_MS);
+    return () => clearInterval(t);
+  }, [loaded, pullLatestChat]);
+
+  useEffect(() => {
+    if (!loaded) return;
+    const unsubscribe = subscribeToKey(CHAT_STORAGE_KEY, (row) => {
+      if (!row || !row.value) return;
+      try {
+        const data = JSON.parse(row.value);
+        const remoteSavedAt = data.savedAt || 0;
+        if (remoteSavedAt > knownChatSavedAtRef.current && !chatSavingRef.current) {
+          setChat(data.messages || []);
+          knownChatSavedAtRef.current = remoteSavedAt;
+        }
+      } catch (e) {
+        // ignore malformed payloads
+      }
+    });
+    return unsubscribe;
+  }, [loaded]);
 
   // Logging in as a team now requires that team's password — set on first claim, then required
   // on every device from then on. This is what actually makes "my team" recognizable across
