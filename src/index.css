@@ -30,7 +30,7 @@ body {
    so nothing about the desktop/laptop layout changes at all. Most grids in the app already use
    "repeat(auto-fit, minmax(...))" which adapts on its own; these are the few spots using a fixed
    two-column split that needs an explicit nudge to stack on a phone. */
-@media (max-width: 760px) {
+@media (max-width: 900px) {
   .stack-on-mobile {
     grid-template-columns: 1fr !important;
   }
