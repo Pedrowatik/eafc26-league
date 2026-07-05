@@ -4790,7 +4790,26 @@ function PlayerDatabaseTools({ playerDatabase, importPlayerDatabase, clearPlayer
       <SofifaImport importPlayerDatabase={importPlayerDatabase} />
 
       <div style={{ margin: "20px 0", paddingTop: 6, borderTop: `1px solid ${C.border}` }}>
-        <div style={{ color: C.text, fontWeight: 700, fontSize: 13, marginBottom: 10 }}>Or Paste From Anywhere Else</div>
+        <div style={{ color: C.text, fontWeight: 700, fontSize: 13, marginBottom: 10 }}>Or Paste / Upload From Anywhere Else</div>
+      </div>
+
+      <div className="flex items-center gap-2 flex-wrap" style={{ marginBottom: 12 }}>
+        <label style={{
+          cursor: "pointer", color: C.text, display: "inline-flex", alignItems: "center", gap: 6,
+          border: `1px solid ${C.border}`, borderRadius: 9, padding: "8px 14px", fontSize: 13.5, fontWeight: 700,
+        }}>
+          <Upload size={14} /> Upload a CSV file…
+          <input type="file" accept=".csv,text/csv" style={{ display: "none" }}
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              if (!file) return;
+              const reader = new FileReader();
+              reader.onload = () => setRaw(String(reader.result || ""));
+              reader.readAsText(file);
+              e.target.value = ""; // allow re-selecting the same file later
+            }} />
+        </label>
+        <span style={{ color: C.muted, fontSize: 11.5 }}>or paste the same kind of data directly below</span>
       </div>
 
       <Field label="Paste data here (tab or comma separated)">
