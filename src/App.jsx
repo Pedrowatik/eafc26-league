@@ -1199,6 +1199,30 @@ export default function EafcLeagueApp() {
     URL.revokeObjectURL(url);
   };
 
+  // Exports the whole imported player database (autocomplete list) as a CSV — same column format
+  // the paste/upload importer expects, so it can be re-imported elsewhere or just kept as a record.
+  const exportPlayerDatabaseCSV = () => {
+    const escapeCsv = (val) => {
+      const s = String(val ?? "");
+      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+    const header = ["Name", "Position", "Rating", "Club", "Age", "Value", "Wage"];
+    const lines = [header.join(",")];
+    playerDatabase.forEach((p) => {
+      lines.push([p.name, p.position, p.rating, p.club, p.age, p.value, p.wage].map(escapeCsv).join(","));
+    });
+    const blob = new Blob([lines.join("\n")], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, "-");
+    a.href = url;
+    a.download = `eafc26-player-database-${stamp}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
   const applyBackupData = (data) => {
     setTeams(data.teams || defaultTeams());
     setSquads(data.squads || defaultSquads());
@@ -1670,7 +1694,7 @@ export default function EafcLeagueApp() {
             teamLockOverride={teamLockOverride} toggleTeamLockOverride={toggleTeamLockOverride} clearChat={clearChat}
             resetTeamPassword={resetTeamPassword} squadStats={squadStats}
             transferWindow={transferWindow} setTransferWindowDates={setTransferWindowDates} clearTransferWindow={clearTransferWindow}
-            addPrize={addPrize} />
+            addPrize={addPrize} exportPlayerDatabaseCSV={exportPlayerDatabaseCSV} />
         )}
       </div>
 
@@ -4476,7 +4500,7 @@ function AddPrizeTools({ teams, addPrize }) {
   );
 }
 
-function AdminTab({ teams, squads, myTeamId, playerDatabase, adminPin, logAdminReward, resetAll, changeAdminPin, addFundsToTeam, addEarned86Slot, exportBackup, restoreBackup, restoreFromNightlyBackup, endSeason, season, seasonHistory, standings, importPlayerDatabase, clearPlayerDatabase, teamLockOverride, toggleTeamLockOverride, clearChat, resetTeamPassword, squadStats, transferWindow, setTransferWindowDates, clearTransferWindow, addPrize }) {
+function AdminTab({ teams, squads, myTeamId, playerDatabase, adminPin, logAdminReward, resetAll, changeAdminPin, addFundsToTeam, addEarned86Slot, exportBackup, restoreBackup, restoreFromNightlyBackup, endSeason, season, seasonHistory, standings, importPlayerDatabase, clearPlayerDatabase, teamLockOverride, toggleTeamLockOverride, clearChat, resetTeamPassword, squadStats, transferWindow, setTransferWindowDates, clearTransferWindow, addPrize, exportPlayerDatabaseCSV }) {
   const [unlocked, setUnlocked] = useState(false);
   const [pinInput, setPinInput] = useState("");
   const [err, setErr] = useState("");
@@ -4513,7 +4537,7 @@ function AdminTab({ teams, squads, myTeamId, playerDatabase, adminPin, logAdminR
       <BackupTools exportBackup={exportBackup} restoreBackup={restoreBackup} restoreFromNightlyBackup={restoreFromNightlyBackup} />
 
       <PlayerDatabaseTools playerDatabase={playerDatabase} importPlayerDatabase={importPlayerDatabase}
-        clearPlayerDatabase={clearPlayerDatabase} />
+        clearPlayerDatabase={clearPlayerDatabase} exportPlayerDatabaseCSV={exportPlayerDatabaseCSV} />
 
       <EndSeasonTools endSeason={endSeason} season={season} seasonHistory={seasonHistory} standings={standings} teams={teams} />
 
@@ -4867,7 +4891,7 @@ function SofifaImport({ importPlayerDatabase }) {
   );
 }
 
-function PlayerDatabaseTools({ playerDatabase, importPlayerDatabase, clearPlayerDatabase }) {
+function PlayerDatabaseTools({ playerDatabase, importPlayerDatabase, clearPlayerDatabase, exportPlayerDatabaseCSV }) {
   const [raw, setRaw] = useState("");
   const [hasHeaders, setHasHeaders] = useState(true);
   const [mapping, setMapping] = useState([]); // field per column index
@@ -5010,7 +5034,12 @@ function PlayerDatabaseTools({ playerDatabase, importPlayerDatabase, clearPlayer
       )}
 
       <div style={{ marginTop: 18, paddingTop: 14, borderTop: `1px solid ${C.border}` }}>
-        <Btn variant="danger" size="sm" icon={Trash2} onClick={doClear}>Clear player database</Btn>
+        <div className="flex items-center gap-2 flex-wrap">
+          <Btn variant="outline" size="sm" icon={Download} onClick={exportPlayerDatabaseCSV} disabled={playerDatabase.length === 0}>
+            Backup player database (.csv)
+          </Btn>
+          <Btn variant="danger" size="sm" icon={Trash2} onClick={doClear}>Clear player database</Btn>
+        </div>
       </div>
 
       {msg && (
