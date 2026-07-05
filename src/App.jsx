@@ -1204,6 +1204,12 @@ export default function EafcLeagueApp() {
     return null;
   };
 
+  const clearChat = (pinAttempt) => {
+    if (pinAttempt !== adminPin) return "Incorrect PIN.";
+    setChat([]);
+    return null;
+  };
+
   const addFundsToTeam = (pinAttempt, teamId, amount) => {
     if (pinAttempt !== adminPin) return "Incorrect PIN.";
     const amt = Number(amount);
@@ -1462,7 +1468,7 @@ export default function EafcLeagueApp() {
             exportBackup={exportBackup} restoreBackup={restoreBackup} restoreFromNightlyBackup={restoreFromNightlyBackup}
             endSeason={endSeason} season={season} seasonHistory={seasonHistory} standings={standings}
             importPlayerDatabase={importPlayerDatabase} clearPlayerDatabase={clearPlayerDatabase}
-            teamLockOverride={teamLockOverride} toggleTeamLockOverride={toggleTeamLockOverride} />
+            teamLockOverride={teamLockOverride} toggleTeamLockOverride={toggleTeamLockOverride} clearChat={clearChat} />
         )}
       </div>
 
@@ -3860,7 +3866,7 @@ function RulesTab({ teams, standings }) {
   );
 }
 
-function AdminTab({ teams, squads, myTeamId, playerDatabase, adminPin, logAdminReward, resetAll, changeAdminPin, addFundsToTeam, addEarned86Slot, exportBackup, restoreBackup, restoreFromNightlyBackup, endSeason, season, seasonHistory, standings, importPlayerDatabase, clearPlayerDatabase, teamLockOverride, toggleTeamLockOverride }) {
+function AdminTab({ teams, squads, myTeamId, playerDatabase, adminPin, logAdminReward, resetAll, changeAdminPin, addFundsToTeam, addEarned86Slot, exportBackup, restoreBackup, restoreFromNightlyBackup, endSeason, season, seasonHistory, standings, importPlayerDatabase, clearPlayerDatabase, teamLockOverride, toggleTeamLockOverride, clearChat }) {
   const [unlocked, setUnlocked] = useState(false);
   const [pinInput, setPinInput] = useState("");
   const [err, setErr] = useState("");
@@ -3901,7 +3907,7 @@ function AdminTab({ teams, squads, myTeamId, playerDatabase, adminPin, logAdminR
 
       <AdminTools teams={teams} resetAll={resetAll} changeAdminPin={changeAdminPin}
         addFundsToTeam={addFundsToTeam} addEarned86Slot={addEarned86Slot}
-        teamLockOverride={teamLockOverride} toggleTeamLockOverride={toggleTeamLockOverride} />
+        teamLockOverride={teamLockOverride} toggleTeamLockOverride={toggleTeamLockOverride} clearChat={clearChat} />
     </div>
   );
 }
@@ -4446,7 +4452,7 @@ function EndSeasonTools({ endSeason, season, seasonHistory, standings, teams }) 
   );
 }
 
-function AdminTools({ teams, resetAll, changeAdminPin, addFundsToTeam, addEarned86Slot, teamLockOverride, toggleTeamLockOverride }) {
+function AdminTools({ teams, resetAll, changeAdminPin, addFundsToTeam, addEarned86Slot, teamLockOverride, toggleTeamLockOverride, clearChat }) {
   const [pin, setPin] = useState("");
   const [msg, setMsg] = useState(null); // { text, tone }
   const [showChangePin, setShowChangePin] = useState(false);
@@ -4465,6 +4471,13 @@ function AdminTools({ teams, resetAll, changeAdminPin, addFundsToTeam, addEarned
     const err = await resetAll(pin);
     if (err) show(err, "red");
     else show("League data has been reset.", "green");
+  };
+
+  const doClearChat = () => {
+    setMsg(null);
+    const err = clearChat(pin);
+    if (err) show(err, "red");
+    else show("League Chat has been cleared.", "green");
   };
 
   const doChangePin = () => {
@@ -4554,6 +4567,7 @@ function AdminTools({ teams, resetAll, changeAdminPin, addFundsToTeam, addEarned
       <div style={{ paddingTop: 18, marginTop: 18, borderTop: `1px solid ${C.border}` }}>
         <div className="flex items-center gap-2 flex-wrap">
           <Btn variant="danger" icon={RotateCcw} onClick={doReset}>Reset all league data</Btn>
+          <Btn variant="outline" icon={Trash2} onClick={doClearChat}>Clear League Chat</Btn>
           <Btn variant="outline" icon={KeyRound} onClick={() => setShowChangePin((s) => !s)}>
             {showChangePin ? "Cancel" : "Change PIN"}
           </Btn>
