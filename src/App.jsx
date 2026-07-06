@@ -263,7 +263,7 @@ function PlayerAutocomplete({ value, onChange, onSelect, playerDatabase, placeho
           maxHeight: 220, overflowY: "auto", boxShadow: "0 8px 20px rgba(0,0,0,0.4)",
         }}>
           {matches.map((p) => (
-            <button key={p.id} onClick={() => { onSelect(p); setOpen(false); }}
+            <button key={`${p.name}::${p.club}`} onClick={() => { onSelect(p); setOpen(false); }}
               className="flex items-center justify-between"
               style={{ width: "100%", textAlign: "left", background: "transparent", border: "none", borderBottom: `1px solid ${C.border}33`, padding: "8px 10px", cursor: "pointer", color: C.text, fontSize: 12.5 }}>
               <span>{p.name}</span>
@@ -2670,12 +2670,10 @@ function SquadsTab({ teams, squads, squadStats, renameTeam, setTab, movePlayerTo
           </Field>
           <Field label="Home Club (for Captain eligibility)">
             {activeTeam === myTeamId ? (
-              <ClubAutocomplete
-                value={team.homeClub || ""}
-                onChange={(val) => renameTeam(team.id, { homeClub: val })}
-                options={clubOptions}
-                placeholder="e.g. Arsenal"
-              />
+              <Select value={team.homeClub || ""} onChange={(e) => renameTeam(team.id, { homeClub: e.target.value })}>
+                <option value="">Select your club…</option>
+                {clubOptions.map((c) => <option key={c} value={c}>{c}</option>)}
+              </Select>
             ) : (
               <div style={{ ...inputStyle, opacity: 0.7 }}>{team.homeClub || "Not set"}</div>
             )}
