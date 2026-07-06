@@ -1384,6 +1384,7 @@ export default function EafcLeagueApp() {
       if (a.status !== "open") { err = "This auction has already closed."; return a; }
       if (Date.now() >= a.deadline) { err = "Time's up on this auction — finalize it before bidding again."; return a; }
       if (!teamId) { err = "Choose which team is bidding."; return a; }
+      if (teamId === a.seller) { err = "You can't bid on your own player."; return a; }
       if (teamId === a.currentBidder) { err = "That team already holds the highest bid."; return a; }
       const required = a.currentBid > 0 ? a.currentBid + 0.25 : Math.max(a.minBid, 0.25);
       if (!amt || amt < required - 0.001) { err = `Bid must be at least ${money(required)} (£250k above the current bid).`; return a; }
@@ -2894,7 +2895,6 @@ function SquadsTab({ teams, squads, squadStats, renameTeam, setTab, movePlayerTo
         <div className="grid gap-4 stack-on-mobile" style={{ gridTemplateColumns: "1.7fr 1fr", alignItems: "start" }}>
           <SquadTable title={`Starting Squad (${STARTER_SLOTS} slots)`} players={sq.starters}
             labelForIdx={(i) => {
-              if (i === CAPTAIN_SLOT_INDEX) return "CAPT";
               const positions = formationPositions(team.formation || "4-4-2");
               return i < 11 ? positions[i] : i + 1;
             }}
@@ -3452,6 +3452,9 @@ function AuctionCard({ auction, teams, now, placeBid, finalizeAuction, deleteBid
 
       {!ended ? (
         myTeamId ? (
+          myTeamId === auction.seller ? (
+            <div style={{ color: C.muted, fontSize: 12.5 }}>You can't bid on your own player.</div>
+          ) : (
           <div className="flex items-end gap-2 flex-wrap">
             <Field label="Bidding as">
               <div style={{ ...inputStyle, opacity: 0.85 }}>{bidTeamObj?.name}</div>
@@ -3464,6 +3467,7 @@ function AuctionCard({ auction, teams, now, placeBid, finalizeAuction, deleteBid
               <Pill tone="red">Would breach {bidTeamObj.name}'s wage cap ({money(projectedWage)} / {money(bidTeamObj.wageCap)})</Pill>
             )}
           </div>
+          )
         ) : (
           <div style={{ color: C.muted, fontSize: 12.5 }}>Pick your team (top right) to place a bid.</div>
         )
@@ -4986,9 +4990,9 @@ function RulesTab({ teams, standings }) {
             or reserves, doesn't matter which. Shown as a pass/fail indicator on the Squad List.
           </RuleBlock>
           <RuleBlock title="Club Captain">
-            The 21st (last) starting slot is reserved for a free Club Captain — signed at no cost to your transfer
-            budget or wage bill. They must be rated 83 or below, and must come from your team's declared Home Club
-            (set once in Squad List). It's a loyalty pick, not another asset to trade for value.
+            A free Club Captain signing, at no cost to your transfer budget or wage bill — shown with a gold "C"
+            badge next to their name. They must be rated 83 or below, and must come from your team's declared Home
+            Club (set once in Squad List). It's a loyalty pick, not another asset to trade for value.
           </RuleBlock>
           <RuleBlock title="Formations">
             Pick a formation in Squad List and the first 11 starting slots double as your tactical XI, shown on a
