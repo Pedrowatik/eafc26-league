@@ -1696,13 +1696,13 @@ export default function EafcLeagueApp() {
     { id: "squads", label: "Squad List", icon: Users },
     { id: "budgets", label: "Budgets & Wages", icon: Wallet },
     { id: "transfers", label: "Transfers", icon: Repeat },
+    { id: "playerdb", label: "Player Database", icon: Search },
+    { id: "messages", label: "Messages", icon: Send },
+    { id: "chat", label: "League Chat", icon: MessageCircle },
     { id: "fixtures", label: "Fixtures", icon: Swords },
     { id: "standings", label: "Standings", icon: Trophy },
     { id: "prizes", label: "Prize Pool", icon: Coins },
-    { id: "chat", label: "League Chat", icon: MessageCircle },
-    { id: "messages", label: "Messages", icon: Send },
     { id: "rules", label: "Rules", icon: BookOpen },
-    { id: "playerdb", label: "Player Database", icon: Search },
     { id: "admin", label: "Admin", icon: Lock },
   ];
 
