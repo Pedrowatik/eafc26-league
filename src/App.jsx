@@ -152,6 +152,11 @@ const CHAT_STORAGE_KEY = "eafc26-league-chat-v1"; // same isolation as private m
 // XI, or signing a player should never be at risk of being clobbered by an unrelated save happening
 // on someone else's team at the same moment.
 const squadKeyFor = (teamId) => `eafc26-squad-${teamId}-v1`;
+// Same isolation, extended to the other high-traffic, multi-person-writing-at-once data.
+const AUCTIONS_STORAGE_KEY = "eafc26-auctions-v1";
+const TRANSFER_LISTINGS_STORAGE_KEY = "eafc26-transfer-listings-v1";
+const WANTED_LISTINGS_STORAGE_KEY = "eafc26-wanted-listings-v1";
+const teamKeyFor = (teamId) => `eafc26-team-${teamId}-v1`;
 
 // Chat and private messages are append-only — merging by id (rather than replacing the whole
 // array) means an incoming sync can only ever add messages, never accidentally erase one that's
@@ -421,18 +426,24 @@ export default function EafcLeagueApp() {
   const knownDmSavedAtRef = useRef(0); // same idea, but for the separate private-messages store
   const knownChatSavedAtRef = useRef(0); // same idea, but for the separate league chat store
   const knownSquadSavedAtRef = useRef(new Map()); // per-team: teamId -> savedAt
+  const knownAuctionsSavedAtRef = useRef(0);
+  const knownTransferListingsSavedAtRef = useRef(0);
+  const knownWantedListingsSavedAtRef = useRef(0);
+  const knownTeamSavedAtRef = useRef(new Map()); // per-team: teamId -> savedAt
   const savingRef = useRef(false);
   const dmSavingRef = useRef(false);
   const chatSavingRef = useRef(false);
   const squadSavingRef = useRef(false);
+  const auctionsSavingRef = useRef(false);
+  const transferListingsSavingRef = useRef(false);
+  const wantedListingsSavingRef = useRef(false);
+  const teamSavingRef = useRef(false);
 
   const applyRemoteData = useCallback((data) => {
-    if (data.teams) setTeams(data.teams);
     if (data.transfers) setTransfers(data.transfers);
     if (data.fixtures) setFixtures(data.fixtures);
     if (data.prizes) setPrizes(data.prizes);
     if (data.events) setEvents(data.events);
-    if (data.auctions) setAuctions(data.auctions);
     if (data.adminPin) setAdminPin(data.adminPin);
     if (data.season) setSeason(data.season);
     if (data.seasonHistory) setSeasonHistory(data.seasonHistory);
@@ -445,14 +456,16 @@ export default function EafcLeagueApp() {
     if (data.swapOffers) setSwapOffers(data.swapOffers);
     if (data.cardTally) setCardTally(data.cardTally);
     if (data.suspensions) setSuspensions(data.suspensions);
-    if (data.transferListings) setTransferListings(data.transferListings);
-    if (data.wantedListings) setWantedListings(data.wantedListings);
   }, []);
 
   // load once
   useEffect(() => {
     (async () => {
       let legacySquadsForMigration = null;
+      let legacyTeamsForMigration = null;
+      let legacyAuctionsForMigration = null;
+      let legacyTransferListingsForMigration = null;
+      let legacyWantedListingsForMigration = null;
       let teamIdsForSquadLoad = defaultTeams().map((t) => t.id);
       try {
         const res = await storage.get(STORAGE_KEY, true);
@@ -460,6 +473,10 @@ export default function EafcLeagueApp() {
           const data = JSON.parse(res.value);
           applyRemoteData(data);
           legacySquadsForMigration = data.squads || null;
+          legacyTeamsForMigration = data.teams || null;
+          legacyAuctionsForMigration = data.auctions || null;
+          legacyTransferListingsForMigration = data.transferListings || null;
+          legacyWantedListingsForMigration = data.wantedListings || null;
           if (data.teams && data.teams.length) teamIdsForSquadLoad = data.teams.map((t) => t.id);
           knownSavedAtRef.current = data.savedAt || Date.now();
           setLastSyncedAt(knownSavedAtRef.current);
@@ -490,6 +507,69 @@ export default function EafcLeagueApp() {
         setSquads(loadedSquads);
       } catch (e) {
         // best effort — whatever the initial default state was will remain
+      }
+      // Each team's own record (name, manager, formation, password, etc.) now lives under its own
+      // key too — same reasoning as squads, since everyone tends to be editing their own team's
+      // fields around the same time (especially early in a season).
+      try {
+        const loadedTeams = [];
+        const fallbackTeams = defaultTeams();
+        await Promise.all(teamIdsForSquadLoad.map(async (teamId, i) => {
+          const fallback = (legacyTeamsForMigration && legacyTeamsForMigration.find((t) => t.id === teamId))
+            || fallbackTeams.find((t) => t.id === teamId) || fallbackTeams[i] || { id: teamId };
+          try {
+            const tres = await storage.get(teamKeyFor(teamId), true);
+            if (tres && tres.value) {
+              const tdata = JSON.parse(tres.value);
+              loadedTeams[i] = { ...fallback, ...tdata.team };
+              knownTeamSavedAtRef.current.set(teamId, tdata.savedAt || Date.now());
+              return;
+            }
+          } catch (e) {
+            // no dedicated team key yet — fall through to migration/default below
+          }
+          loadedTeams[i] = fallback;
+          knownTeamSavedAtRef.current.set(teamId, 0);
+        }));
+        setTeams(loadedTeams.filter(Boolean));
+      } catch (e) {
+        // best effort
+      }
+      try {
+        const ares = await storage.get(AUCTIONS_STORAGE_KEY, true);
+        if (ares && ares.value) {
+          const adata = JSON.parse(ares.value);
+          setAuctions(adata.auctions || []);
+          knownAuctionsSavedAtRef.current = adata.savedAt || Date.now();
+        } else if (legacyAuctionsForMigration) {
+          setAuctions(legacyAuctionsForMigration);
+        }
+      } catch (e) {
+        if (legacyAuctionsForMigration) setAuctions(legacyAuctionsForMigration);
+      }
+      try {
+        const tlres = await storage.get(TRANSFER_LISTINGS_STORAGE_KEY, true);
+        if (tlres && tlres.value) {
+          const tldata = JSON.parse(tlres.value);
+          setTransferListings(tldata.listings || []);
+          knownTransferListingsSavedAtRef.current = tldata.savedAt || Date.now();
+        } else if (legacyTransferListingsForMigration) {
+          setTransferListings(legacyTransferListingsForMigration);
+        }
+      } catch (e) {
+        if (legacyTransferListingsForMigration) setTransferListings(legacyTransferListingsForMigration);
+      }
+      try {
+        const wlres = await storage.get(WANTED_LISTINGS_STORAGE_KEY, true);
+        if (wlres && wlres.value) {
+          const wldata = JSON.parse(wlres.value);
+          setWantedListings(wldata.listings || []);
+          knownWantedListingsSavedAtRef.current = wldata.savedAt || Date.now();
+        } else if (legacyWantedListingsForMigration) {
+          setWantedListings(legacyWantedListingsForMigration);
+        }
+      } catch (e) {
+        if (legacyWantedListingsForMigration) setWantedListings(legacyWantedListingsForMigration);
       }
       try {
         const mine = await storage.get(MY_TEAM_KEY, false);
@@ -557,7 +637,7 @@ export default function EafcLeagueApp() {
         const savedAt = Date.now();
         await storage.set(
           STORAGE_KEY,
-          JSON.stringify({ teams, transfers, fixtures, prizes, events, auctions, adminPin, season, seasonHistory, activity, playerDatabase, injuries, teamLockOverride, cardTally, suspensions, transferListings, wantedListings, transferWindow, swapsUsed, swapOffers, savedAt }),
+          JSON.stringify({ transfers, fixtures, prizes, events, adminPin, season, seasonHistory, activity, playerDatabase, injuries, teamLockOverride, cardTally, suspensions, transferWindow, swapsUsed, swapOffers, savedAt }),
           true
         );
         knownSavedAtRef.current = savedAt;
@@ -570,7 +650,7 @@ export default function EafcLeagueApp() {
       }
     }, 300);
     return () => clearTimeout(t);
-  }, [teams, transfers, fixtures, prizes, events, auctions, adminPin, season, seasonHistory, activity, playerDatabase, injuries, teamLockOverride, cardTally, suspensions, transferListings, wantedListings, transferWindow, swapsUsed, swapOffers, loaded]);
+  }, [transfers, fixtures, prizes, events, adminPin, season, seasonHistory, activity, playerDatabase, injuries, teamLockOverride, cardTally, suspensions, transferWindow, swapsUsed, swapOffers, loaded]);
 
   // Private messages save to their own separate key, on their own quick timer — this is what
   // actually stops a message from getting silently erased if someone else's browser (with a
@@ -679,6 +759,250 @@ export default function EafcLeagueApp() {
     );
     return () => unsubscribers.forEach((unsub) => unsub && unsub());
   }, [loaded, teams]);
+
+  // Teams get the same per-team treatment as squads — editing your own team's name, formation,
+  // Home Club, or password shouldn't be at risk from someone else editing theirs at the same time.
+  useEffect(() => {
+    if (!loaded) return;
+    teamSavingRef.current = true;
+    const t = setTimeout(async () => {
+      try {
+        const savedAt = Date.now();
+        await Promise.all(teams.map((team) =>
+          storage.set(teamKeyFor(team.id), JSON.stringify({ team, savedAt }), true)
+            .then(() => knownTeamSavedAtRef.current.set(team.id, savedAt))
+            .catch(() => { /* best effort per team — next cycle reconciles */ })
+        ));
+      } finally {
+        teamSavingRef.current = false;
+      }
+    }, 300);
+    return () => clearTimeout(t);
+  }, [teams, loaded]);
+
+  const pullLatestTeams = useCallback(async () => {
+    if (teamSavingRef.current) return;
+    await Promise.all(teams.map(async (team) => {
+      try {
+        const res = await storage.get(teamKeyFor(team.id), true);
+        if (res && res.value) {
+          const data = JSON.parse(res.value);
+          const remoteSavedAt = data.savedAt || 0;
+          const known = knownTeamSavedAtRef.current.get(team.id) || 0;
+          if (remoteSavedAt > known && data.team) {
+            setTeams((all) => all.map((t) => (t.id === team.id ? { ...t, ...data.team } : t)));
+            knownTeamSavedAtRef.current.set(team.id, remoteSavedAt);
+          }
+        }
+      } catch (e) {
+        // best effort
+      }
+    }));
+  }, [teams]);
+
+  useEffect(() => {
+    if (!loaded) return;
+    const t = setInterval(() => pullLatestTeams(), SYNC_POLL_MS);
+    return () => clearInterval(t);
+  }, [loaded, pullLatestTeams]);
+
+  useEffect(() => {
+    if (!loaded) return;
+    const unsubscribers = teams.map((team) =>
+      subscribeToKey(teamKeyFor(team.id), (row) => {
+        if (!row || !row.value) return;
+        try {
+          const data = JSON.parse(row.value);
+          const remoteSavedAt = data.savedAt || 0;
+          const known = knownTeamSavedAtRef.current.get(team.id) || 0;
+          if (remoteSavedAt > known && !teamSavingRef.current && data.team) {
+            setTeams((all) => all.map((t) => (t.id === team.id ? { ...t, ...data.team } : t)));
+            knownTeamSavedAtRef.current.set(team.id, remoteSavedAt);
+          }
+        } catch (e) {
+          // ignore malformed payloads
+        }
+      })
+    );
+    return () => unsubscribers.forEach((unsub) => unsub && unsub());
+  }, [loaded, teams]);
+
+  // Auctions, Transfer List, and Wanted List each get their own isolated key too — several teams
+  // bidding, listing, or offering around the same time is exactly the pattern that caused trouble
+  // when all of this shared one blob with everything else.
+  useEffect(() => {
+    if (!loaded) return;
+    auctionsSavingRef.current = true;
+    const t = setTimeout(async () => {
+      try {
+        const savedAt = Date.now();
+        await storage.set(AUCTIONS_STORAGE_KEY, JSON.stringify({ auctions, savedAt }), true);
+        knownAuctionsSavedAtRef.current = savedAt;
+      } catch (e) {
+        // best effort
+      } finally {
+        auctionsSavingRef.current = false;
+      }
+    }, 300);
+    return () => clearTimeout(t);
+  }, [auctions, loaded]);
+
+  const pullLatestAuctions = useCallback(async () => {
+    if (auctionsSavingRef.current) return;
+    try {
+      const res = await storage.get(AUCTIONS_STORAGE_KEY, true);
+      if (res && res.value) {
+        const data = JSON.parse(res.value);
+        const remoteSavedAt = data.savedAt || 0;
+        if (remoteSavedAt > knownAuctionsSavedAtRef.current) {
+          setAuctions(data.auctions || []);
+          knownAuctionsSavedAtRef.current = remoteSavedAt;
+        }
+      }
+    } catch (e) {
+      // best effort
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!loaded) return;
+    const t = setInterval(() => pullLatestAuctions(), SYNC_POLL_MS);
+    return () => clearInterval(t);
+  }, [loaded, pullLatestAuctions]);
+
+  useEffect(() => {
+    if (!loaded) return;
+    const unsubscribe = subscribeToKey(AUCTIONS_STORAGE_KEY, (row) => {
+      if (!row || !row.value) return;
+      try {
+        const data = JSON.parse(row.value);
+        const remoteSavedAt = data.savedAt || 0;
+        if (remoteSavedAt > knownAuctionsSavedAtRef.current && !auctionsSavingRef.current) {
+          setAuctions(data.auctions || []);
+          knownAuctionsSavedAtRef.current = remoteSavedAt;
+        }
+      } catch (e) {
+        // ignore malformed payloads
+      }
+    });
+    return unsubscribe;
+  }, [loaded]);
+
+  useEffect(() => {
+    if (!loaded) return;
+    transferListingsSavingRef.current = true;
+    const t = setTimeout(async () => {
+      try {
+        const savedAt = Date.now();
+        await storage.set(TRANSFER_LISTINGS_STORAGE_KEY, JSON.stringify({ listings: transferListings, savedAt }), true);
+        knownTransferListingsSavedAtRef.current = savedAt;
+      } catch (e) {
+        // best effort
+      } finally {
+        transferListingsSavingRef.current = false;
+      }
+    }, 300);
+    return () => clearTimeout(t);
+  }, [transferListings, loaded]);
+
+  const pullLatestTransferListings = useCallback(async () => {
+    if (transferListingsSavingRef.current) return;
+    try {
+      const res = await storage.get(TRANSFER_LISTINGS_STORAGE_KEY, true);
+      if (res && res.value) {
+        const data = JSON.parse(res.value);
+        const remoteSavedAt = data.savedAt || 0;
+        if (remoteSavedAt > knownTransferListingsSavedAtRef.current) {
+          setTransferListings(data.listings || []);
+          knownTransferListingsSavedAtRef.current = remoteSavedAt;
+        }
+      }
+    } catch (e) {
+      // best effort
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!loaded) return;
+    const t = setInterval(() => pullLatestTransferListings(), SYNC_POLL_MS);
+    return () => clearInterval(t);
+  }, [loaded, pullLatestTransferListings]);
+
+  useEffect(() => {
+    if (!loaded) return;
+    const unsubscribe = subscribeToKey(TRANSFER_LISTINGS_STORAGE_KEY, (row) => {
+      if (!row || !row.value) return;
+      try {
+        const data = JSON.parse(row.value);
+        const remoteSavedAt = data.savedAt || 0;
+        if (remoteSavedAt > knownTransferListingsSavedAtRef.current && !transferListingsSavingRef.current) {
+          setTransferListings(data.listings || []);
+          knownTransferListingsSavedAtRef.current = remoteSavedAt;
+        }
+      } catch (e) {
+        // ignore malformed payloads
+      }
+    });
+    return unsubscribe;
+  }, [loaded]);
+
+  useEffect(() => {
+    if (!loaded) return;
+    wantedListingsSavingRef.current = true;
+    const t = setTimeout(async () => {
+      try {
+        const savedAt = Date.now();
+        await storage.set(WANTED_LISTINGS_STORAGE_KEY, JSON.stringify({ listings: wantedListings, savedAt }), true);
+        knownWantedListingsSavedAtRef.current = savedAt;
+      } catch (e) {
+        // best effort
+      } finally {
+        wantedListingsSavingRef.current = false;
+      }
+    }, 300);
+    return () => clearTimeout(t);
+  }, [wantedListings, loaded]);
+
+  const pullLatestWantedListings = useCallback(async () => {
+    if (wantedListingsSavingRef.current) return;
+    try {
+      const res = await storage.get(WANTED_LISTINGS_STORAGE_KEY, true);
+      if (res && res.value) {
+        const data = JSON.parse(res.value);
+        const remoteSavedAt = data.savedAt || 0;
+        if (remoteSavedAt > knownWantedListingsSavedAtRef.current) {
+          setWantedListings(data.listings || []);
+          knownWantedListingsSavedAtRef.current = remoteSavedAt;
+        }
+      }
+    } catch (e) {
+      // best effort
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!loaded) return;
+    const t = setInterval(() => pullLatestWantedListings(), SYNC_POLL_MS);
+    return () => clearInterval(t);
+  }, [loaded, pullLatestWantedListings]);
+
+  useEffect(() => {
+    if (!loaded) return;
+    const unsubscribe = subscribeToKey(WANTED_LISTINGS_STORAGE_KEY, (row) => {
+      if (!row || !row.value) return;
+      try {
+        const data = JSON.parse(row.value);
+        const remoteSavedAt = data.savedAt || 0;
+        if (remoteSavedAt > knownWantedListingsSavedAtRef.current && !wantedListingsSavingRef.current) {
+          setWantedListings(data.listings || []);
+          knownWantedListingsSavedAtRef.current = remoteSavedAt;
+        }
+      } catch (e) {
+        // ignore malformed payloads
+      }
+    });
+    return unsubscribe;
+  }, [loaded]);
 
   // live sync: poll for other people's changes and pull them in automatically. Skipped while we
   // have our own unsaved edit in flight, so we don't clobber it with a slightly stale copy.
