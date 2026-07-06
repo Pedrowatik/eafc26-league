@@ -148,6 +148,15 @@ const POSITIONS = ["GK", "CB", "LB", "RB", "LWB", "RWB", "CDM", "CM", "CAM", "LM
 const STORAGE_KEY = "eafc26-league-state-v1";
 const DM_STORAGE_KEY = "eafc26-private-messages-v1"; // saved separately so it can't be clobbered by unrelated saves
 const CHAT_STORAGE_KEY = "eafc26-league-chat-v1"; // same isolation as private messages, for the same reason
+
+// Chat and private messages are append-only — merging by id (rather than replacing the whole
+// array) means an incoming sync can only ever add messages, never accidentally erase one that's
+// already visible locally, regardless of exact timing between saves and syncs.
+function mergeMessagesById(local, incoming) {
+  const byId = new Map(local.map((m) => [m.id, m]));
+  (incoming || []).forEach((m) => byId.set(m.id, m));
+  return Array.from(byId.values()).sort((a, b) => a.time - b.time);
+}
 const MY_TEAM_KEY = "eafc26-my-team"; // personal, per-device — not shared
 const CHAT_SEEN_KEY = "eafc26-chat-last-seen"; // personal — for the unread-mentions badge
 const DM_SEEN_KEY = "eafc26-dm-last-seen"; // personal — per-conversation read timestamps
@@ -548,7 +557,7 @@ export default function EafcLeagueApp() {
         const data = JSON.parse(res.value);
         const remoteSavedAt = data.savedAt || 0;
         if (remoteSavedAt > knownDmSavedAtRef.current) {
-          setPrivateMessages(data.messages || []);
+          setPrivateMessages((local) => mergeMessagesById(local, data.messages));
           knownDmSavedAtRef.current = remoteSavedAt;
         }
       }
@@ -571,7 +580,7 @@ export default function EafcLeagueApp() {
         const data = JSON.parse(row.value);
         const remoteSavedAt = data.savedAt || 0;
         if (remoteSavedAt > knownDmSavedAtRef.current && !dmSavingRef.current) {
-          setPrivateMessages(data.messages || []);
+          setPrivateMessages((local) => mergeMessagesById(local, data.messages));
           knownDmSavedAtRef.current = remoteSavedAt;
         }
       } catch (e) {
@@ -589,7 +598,7 @@ export default function EafcLeagueApp() {
         const data = JSON.parse(res.value);
         const remoteSavedAt = data.savedAt || 0;
         if (remoteSavedAt > knownChatSavedAtRef.current) {
-          setChat(data.messages || []);
+          setChat((local) => mergeMessagesById(local, data.messages));
           knownChatSavedAtRef.current = remoteSavedAt;
         }
       }
@@ -612,7 +621,7 @@ export default function EafcLeagueApp() {
         const data = JSON.parse(row.value);
         const remoteSavedAt = data.savedAt || 0;
         if (remoteSavedAt > knownChatSavedAtRef.current && !chatSavingRef.current) {
-          setChat(data.messages || []);
+          setChat((local) => mergeMessagesById(local, data.messages));
           knownChatSavedAtRef.current = remoteSavedAt;
         }
       } catch (e) {
