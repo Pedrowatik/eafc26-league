@@ -2846,7 +2846,8 @@ export default function EafcLeagueApp() {
             teamLockOverride={teamLockOverride} toggleTeamLockOverride={toggleTeamLockOverride} clearChat={clearChat}
             resetTeamPassword={resetTeamPassword} squadStats={squadStats}
             transferWindow={transferWindow} setTransferWindowDates={setTransferWindowDates} clearTransferWindow={clearTransferWindow}
-            addPrize={addPrize} exportPlayerDatabaseCSV={exportPlayerDatabaseCSV} adminRemoveCaptain={adminRemoveCaptain} />
+            addPrize={addPrize} exportPlayerDatabaseCSV={exportPlayerDatabaseCSV} adminRemoveCaptain={adminRemoveCaptain}
+            draftPicks={draftPicks} draftSubmitted={draftSubmitted} />
         )}
       </div>
 
@@ -6052,6 +6053,70 @@ function RulesTab({ teams, standings }) {
   );
 }
 
+function DraftSubmissionsTools({ teams, draftPicks, draftSubmitted }) {
+  const submittedTeams = teams.filter((t) => draftSubmitted[t.id]);
+
+  const buildCsv = () => {
+    const escapeCsv = (val) => {
+      const s = String(val ?? "");
+      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+    const header = ["Team", "Slot", "Player", "Position", "Rating", "Club", "Age", "Value", "Wage"];
+    const lines = [header.join(",")];
+    submittedTeams.forEach((t) => {
+      (draftPicks[t.id] || []).forEach((p, i) => {
+        if (!p) return;
+        lines.push([t.name, i + 1, p.name, p.position, p.rating, p.club, p.age, p.value, p.wage].map(escapeCsv).join(","));
+      });
+    });
+    return lines.join("\n");
+  };
+
+  const downloadCsv = () => {
+    const blob = new Blob([buildCsv()], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, "-");
+    a.href = url;
+    a.download = `eafc26-draft-submissions-${stamp}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  return (
+    <Panel style={{ padding: 18 }}>
+      <SectionTitle icon={Users}>Draft Submissions (admin only)</SectionTitle>
+      <div style={{ color: C.muted, fontSize: 12.5, marginBottom: 14, lineHeight: 1.6 }}>
+        Everything every team has submitted in the current draft — nobody else can see this, teams only see their
+        own picks while the draft's still open. <b style={{ color: C.gold }}>{submittedTeams.length} of {teams.length}</b> teams
+        submitted so far.
+      </div>
+
+      {submittedTeams.length === 0 ? (
+        <div style={{ color: C.muted, fontSize: 12.5 }}>No teams have submitted a draft yet.</div>
+      ) : (
+        <>
+          <Btn variant="outline" size="sm" icon={Download} onClick={downloadCsv}>Download as CSV</Btn>
+          <div style={{ marginTop: 14, display: "grid", gap: 14 }}>
+            {submittedTeams.map((t) => {
+              const picks = (draftPicks[t.id] || []).filter(Boolean);
+              return (
+                <div key={t.id}>
+                  <div style={{ color: C.gold, fontWeight: 700, fontSize: 12.5, marginBottom: 6 }}>{t.name} ({picks.length} picks)</div>
+                  <Table dense head={["Player", "Pos", "Rating", "Club", "Age", "Value", "Wage"]}
+                    rows={picks.map((p) => [p.name, p.position, p.rating, p.club, p.age, money(roundUpTo250k(p.value)), moneyK(p.wage)])} />
+                </div>
+              );
+            })}
+          </div>
+        </>
+      )}
+    </Panel>
+  );
+}
+
 function AddPrizeTools({ teams, addPrize }) {
   const blank = { category: "", description: "", amount: 0, recipient: "", date: todayISO() };
   const [form, setForm] = useState(blank);
@@ -6092,7 +6157,7 @@ function AddPrizeTools({ teams, addPrize }) {
   );
 }
 
-function AdminTab({ teams, squads, myTeamId, playerDatabase, adminPin, logAdminReward, resetAll, changeAdminPin, addFundsToTeam, addEarned86Slot, exportBackup, restoreBackup, restoreFromNightlyBackup, endSeason, season, seasonHistory, standings, importPlayerDatabase, clearPlayerDatabase, teamLockOverride, toggleTeamLockOverride, clearChat, resetTeamPassword, squadStats, transferWindow, setTransferWindowDates, clearTransferWindow, addPrize, exportPlayerDatabaseCSV, adminRemoveCaptain }) {
+function AdminTab({ teams, squads, myTeamId, playerDatabase, adminPin, logAdminReward, resetAll, changeAdminPin, addFundsToTeam, addEarned86Slot, exportBackup, restoreBackup, restoreFromNightlyBackup, endSeason, season, seasonHistory, standings, importPlayerDatabase, clearPlayerDatabase, teamLockOverride, toggleTeamLockOverride, clearChat, resetTeamPassword, squadStats, transferWindow, setTransferWindowDates, clearTransferWindow, addPrize, exportPlayerDatabaseCSV, adminRemoveCaptain, draftPicks, draftSubmitted }) {
   const [unlocked, setUnlocked] = useState(false);
   const [pinInput, setPinInput] = useState("");
   const [err, setErr] = useState("");
@@ -6123,6 +6188,8 @@ function AdminTab({ teams, squads, myTeamId, playerDatabase, adminPin, logAdminR
   return (
     <div className="grid gap-4">
       <AdminPlayerRewards teams={teams} squads={squads} logAdminReward={logAdminReward} myTeamId={myTeamId} playerDatabase={playerDatabase} squadStats={squadStats} />
+
+      <DraftSubmissionsTools teams={teams} draftPicks={draftPicks} draftSubmitted={draftSubmitted} />
 
       <AddPrizeTools teams={teams} addPrize={addPrize} />
 
@@ -6517,6 +6584,7 @@ function PlayerDatabaseTools({ playerDatabase, importPlayerDatabase, clearPlayer
   const [hasHeaders, setHasHeaders] = useState(true);
   const [mapping, setMapping] = useState([]); // field per column index
   const [pin, setPin] = useState("");
+  const [clearPin, setClearPin] = useState(""); // separate from the import PIN above — that field only renders once there's pasted/uploaded data, so clearing needs its own always-visible one
   const [msg, setMsg] = useState(null);
 
   const parsed = useMemo(() => parsePastedTable(raw), [raw]);
@@ -6556,8 +6624,8 @@ function PlayerDatabaseTools({ playerDatabase, importPlayerDatabase, clearPlayer
 
   const doClear = () => {
     if (!window.confirm("Clear the entire imported player database? This doesn't affect any squads or transfers, just the autocomplete list.")) return;
-    const err = clearPlayerDatabase(pin);
-    setPin("");
+    const err = clearPlayerDatabase(clearPin);
+    setClearPin("");
     if (err) setMsg({ text: err, tone: "red" });
     else setMsg({ text: "Player database cleared.", tone: "green" });
   };
@@ -6655,10 +6723,13 @@ function PlayerDatabaseTools({ playerDatabase, importPlayerDatabase, clearPlayer
       )}
 
       <div style={{ marginTop: 18, paddingTop: 14, borderTop: `1px solid ${C.border}` }}>
-        <div className="flex items-center gap-2 flex-wrap">
+        <div className="flex items-end gap-2 flex-wrap">
           <Btn variant="outline" size="sm" icon={Download} onClick={exportPlayerDatabaseCSV} disabled={playerDatabase.length === 0}>
             Backup player database (.csv)
           </Btn>
+          <Field label="Admin PIN (for clearing)">
+            <TextInput type="password" value={clearPin} onChange={(e) => setClearPin(e.target.value)} style={{ width: 140 }} />
+          </Field>
           <Btn variant="danger" size="sm" icon={Trash2} onClick={doClear}>Clear player database</Btn>
         </div>
       </div>
