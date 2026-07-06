@@ -73,14 +73,15 @@ function transferStatus(tx, nowMs) {
 
 const N_TEAMS = 10;
 const STARTER_SLOTS = 21;
+const MIN_U21_PLAYERS = 5; // at least this many players aged 20 or under, somewhere in the squad
 const RESERVE_SLOTS = 5;
 const BASE_WAGE_CAP = 2;
-const NEXT_CAP_MAX = 3.75;
-const NEXT_CAP_STEP = 0.25;
-const NEXT_CAP_FLOOR = 1.5;
+const NEXT_CAP_MAX = 2.8; // £M for 1st place
+const NEXT_CAP_FLOOR = 1.8; // £M for last place — flattened range so winning doesn't compound the wage advantage
 
 function nextSeasonCap(position, nTeams) {
-  const cap = NEXT_CAP_MAX - (position - 1) * NEXT_CAP_STEP;
+  const step = nTeams > 1 ? (NEXT_CAP_MAX - NEXT_CAP_FLOOR) / (nTeams - 1) : 0;
+  const cap = NEXT_CAP_MAX - (position - 1) * step;
   return +Math.max(cap, NEXT_CAP_FLOOR).toFixed(2);
 }
 
@@ -806,7 +807,8 @@ export default function EafcLeagueApp() {
       const wageK = all.reduce((s, p) => s + (Number(p.wage) || 0), 0);
       const wageM = wageK / 1000;
       const rated86 = all.filter((p) => Number(p.rating) >= 86).length;
-      out[t.id] = { filled, value, wageM, rated86, allowed86: NEXT_CAP_MAX === NEXT_CAP_MAX ? 3 + (t.earned86 || 0) : 3 };
+      const u21Count = all.filter((p) => Number(p.age) > 0 && Number(p.age) <= 20).length;
+      out[t.id] = { filled, value, wageM, rated86, u21Count, allowed86: NEXT_CAP_MAX === NEXT_CAP_MAX ? 3 + (t.earned86 || 0) : 3 };
     }
     return out;
   }, [teams, squads]);
@@ -1486,12 +1488,20 @@ export default function EafcLeagueApp() {
     return null;
   };
 
+  const MAX_EARNED_86_SLOTS = 2; // lifetime cap — stops a team's 86+ ceiling growing forever, season after season
+
   const addEarned86Slot = (pinAttempt, teamId, amount) => {
     if (pinAttempt !== adminPin) return "Incorrect PIN.";
     const amt = Number(amount);
     if (!teamId) return "Choose a team.";
     if (!amt || isNaN(amt) || amt === 0) return "Enter a non-zero number of slots.";
-    setTeams((ts) => ts.map((t) => (t.id === teamId ? { ...t, earned86: Math.max(0, (t.earned86 || 0) + amt) } : t)));
+    const team = teams.find((t) => t.id === teamId);
+    const current = team?.earned86 || 0;
+    if (amt > 0 && current >= MAX_EARNED_86_SLOTS) {
+      return `${team?.name} is already at the lifetime cap of ${MAX_EARNED_86_SLOTS} earned 86+ slots.`;
+    }
+    const next = Math.max(0, Math.min(MAX_EARNED_86_SLOTS, current + amt));
+    setTeams((ts) => ts.map((t) => (t.id === teamId ? { ...t, earned86: next } : t)));
     return null;
   };
 
@@ -2544,6 +2554,9 @@ function SquadsTab({ teams, squads, squadStats, renameTeam, setTab, movePlayerTo
           <Pill tone="muted">{stat.filled}/26 registered</Pill>
           <Pill tone={stat.rated86 > (3 + (team.earned86 || 0)) ? "red" : "gold"}>
             {stat.rated86} × 86+ used (max {3 + (team.earned86 || 0)})
+          </Pill>
+          <Pill tone={stat.u21Count < MIN_U21_PLAYERS ? "red" : "green"}>
+            {stat.u21Count} U21{stat.u21Count === 1 ? "" : "s"} (min {MIN_U21_PLAYERS})
           </Pill>
           <Pill tone="muted">Squad value {money(stat.value)}</Pill>
           <Pill tone="muted">Wages {money(stat.wageM)}/season</Pill>
@@ -4608,29 +4621,97 @@ function RulesTab({ teams, standings }) {
   return (
     <div className="grid gap-4">
       <Panel style={{ padding: 18 }}>
-        <SectionTitle icon={BookOpen}>League Rules</SectionTitle>
+        <SectionTitle icon={BookOpen}>Squad & Team Building</SectionTitle>
         <div className="grid gap-3" style={{ color: C.text, fontSize: 13.5, lineHeight: 1.7 }}>
           <RuleBlock title="Currency & Budget">
             All values in £. Every team starts Season 1 with £500,000,000. From Season 2 onward, leftover budget
             carries over and each team gets a position-based top-up when the season ends (see the Admin tab).
             Bids must be placed in £250,000 increments.
           </RuleBlock>
-          <RuleBlock title="Transfer Tax">
-            10% tax on the winning bid, minimum £250,000 per bidder. All tax collected feeds the Prize Pool automatically.
-          </RuleBlock>
           <RuleBlock title="Squad Rules">
             21 starting slots + 5 reserve slots (26 max). Max 3 players rated 86+ initially. Extra 86+ slots are earned
-            via wins and awarded every new season — tradable with a minimum value of £50,000,000.
+            via wins and awarded every new season — tradable with a minimum value of £50,000,000, capped at 2 earned
+            slots for the lifetime of a team (5 total max), so one team's ceiling can't keep growing forever.
+          </RuleBlock>
+          <RuleBlock title="Youth Requirement">
+            Every squad must carry at least {MIN_U21_PLAYERS} players aged 21 or under somewhere in the 26 — starters
+            or reserves, doesn't matter which. Shown as a pass/fail indicator on the Squad List.
+          </RuleBlock>
+          <RuleBlock title="Club Captain">
+            The 21st (last) starting slot is reserved for a free Club Captain — signed at no cost to your transfer
+            budget or wage bill. They must be rated 83 or below, and must come from your team's declared Home Club
+            (set once in Squad List). It's a loyalty pick, not another asset to trade for value.
+          </RuleBlock>
+          <RuleBlock title="Formations">
+            Pick a formation in Squad List and the first 11 starting slots double as your tactical XI, shown on a
+            visual pitch alongside the list — reorder players within the Starting Squad to arrange who plays where.
           </RuleBlock>
           <RuleBlock title="Salary / Wage System">
             Wages based on Sofifa data, deducted once per season. Base wage cap £2,000,000. From
-            Season 2, the cap scales by final position in £250,000 steps — champion gets £3,750,000, decreasing by
-            £250,000 per position down the table, down to £1,500,000 for last place.
+            Season 2, the cap scales by final position — champion gets £2,800,000, evenly spread down to
+            £1,800,000 for last place, so winning doesn't stack a big wage advantage on top of everything else.
           </RuleBlock>
+        </div>
+      </Panel>
+
+      <Panel style={{ padding: 18 }}>
+        <SectionTitle icon={Repeat}>Transfers, Auctions & Market</SectionTitle>
+        <div className="grid gap-3" style={{ color: C.text, fontSize: 13.5, lineHeight: 1.7 }}>
+          <RuleBlock title="One Player, One Team">
+            A player can only belong to one fantasy squad at a time. Trying to auction or sign a player who's already
+            owned automatically routes the deal through their actual current team — there's no way to route around
+            the real owner by claiming a player is a free agent when they aren't.
+          </RuleBlock>
+          <RuleBlock title="Transfer Tax">
+            10% tax on the winning bid, minimum £250,000. In an auction, every *losing* bidder also pays 10% tax on
+            their own highest bid — bidding costs something even if you don't win. All tax collected feeds the
+            Prize Pool automatically.
+          </RuleBlock>
+          <RuleBlock title="Auctions">
+            Only your own logged-in team can place bids — there's no bidding on another team's behalf. If the player
+            belongs to another real team, that team must accept the opening bid before the auction goes live. Once
+            live, every new highest bid resets the clock to a fresh 24 hours. Admins can remove a mistaken bid (PIN
+            required) or cancel an auction outright if it needs pulling entirely.
+          </RuleBlock>
+          <RuleBlock title="Transfer Ratification">
+            Deals settle in two stages: the seller is credited and the player leaves their old squad after 12 hours;
+            the buyer's signing (squad placement, budget hit, tax) is ratified after the full 24 hours. Admin Player
+            Rewards are the one exception — those apply instantly, since they're not competitive bids.
+          </RuleBlock>
+          <RuleBlock title="Transfer Window">
+            Admins can set an opening and closing date/time for the market (Admin tab). Outside an active window,
+            auctions and Transfer List/Wanted List activity all lock automatically. No window set means the market
+            stays open all the time.
+          </RuleBlock>
+          <RuleBlock title="Player Swaps">
+            From Season 2 onward, a Transfer List listing can ask for a player in a specific position instead of
+            cash. Each team gets one swap per transfer window — once used, that team can't swap again until the next
+            window opens.
+          </RuleBlock>
+          <RuleBlock title="Team Selection & Login">
+            Picking "Which team am I?" for the first time sets that team's password — use the same password to log
+            into that team from any device afterwards. Once picked, a team is locked in for the rest of the season
+            (admins can override this if a genuine mistake needs fixing).
+          </RuleBlock>
+        </div>
+      </Panel>
+
+      <Panel style={{ padding: 18 }}>
+        <SectionTitle icon={Swords}>Matches & Discipline</SectionTitle>
+        <div className="grid gap-3" style={{ color: C.text, fontSize: 13.5, lineHeight: 1.7 }}>
           <RuleBlock title="Fixtures & Proof">
             Matches are played as Online Friendlies. Every result needs proof (screenshot/video) within 24 hours.
           </RuleBlock>
           <RuleBlock title="Scoring">Win = 3 pts, Draw = 1 pt each, Loss = 0 pts. Tiebreak: Points → GD → GF → Head-to-head.</RuleBlock>
+          <RuleBlock title="Injuries">
+            Before a result can be entered, either team can generate that fixture's injuries — a random 0-3 players
+            per side get sidelined for 1-4 matchdays (mostly 1-3; 4 is rare). Injured players can't be selected in
+            that fixture's stats.
+          </RuleBlock>
+          <RuleBlock title="Card Suspensions">
+            3 accumulated yellow cards or a straight red bans a player for their team's next completed fixture —
+            whichever one that actually is, regardless of matchday order. The ban clears once that match is played.
+          </RuleBlock>
         </div>
       </Panel>
 
@@ -5435,7 +5516,7 @@ function AdminTools({ teams, resetAll, changeAdminPin, addFundsToTeam, addEarned
         <div style={{ color: C.text, fontWeight: 700, fontSize: 13, marginBottom: 8 }}>Add 86+ Slot to a Team</div>
         <div style={{ color: C.muted, fontSize: 11.5, marginBottom: 10 }}>
           Awards an extra 86+ rated slot on top of the base 3 (e.g. earned via a win, or the new-season bonus). Use a
-          negative number to remove one.
+          negative number to remove one. Capped at 2 earned slots per team for the life of the league (5 total max).
         </div>
         <div className="grid gap-3" style={{ gridTemplateColumns: "1fr 1fr auto", alignItems: "end" }}>
           <Field label="Team">
