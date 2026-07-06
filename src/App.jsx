@@ -2995,6 +2995,16 @@ function AuctionsPanel({ teams, squads, auctions, createAuction, placeBid, final
   const open = auctions.filter((a) => a.status === "open");
   const closed = auctions.filter((a) => a.status === "closed" || a.status === "declined" || a.status === "cancelled");
 
+  // Anything the logged-in team has a stake in — selling, currently leading, or has bid on at some
+  // point even if since outbid — surfaced together above the general lists for a quick check.
+  const myAuctions = myTeamId
+    ? [...pending, ...open].filter((a) =>
+        a.seller === myTeamId || a.currentBidder === myTeamId || (a.bidsByTeam && a.bidsByTeam[myTeamId] !== undefined)
+      )
+    : [];
+  const myPending = myAuctions.filter((a) => a.status === "pending");
+  const myOpen = myAuctions.filter((a) => a.status === "open");
+
   return (
     <Panel style={{ padding: 18 }}>
       <SectionTitle icon={Swords}>Player Auctions</SectionTitle>
@@ -3070,6 +3080,20 @@ function AuctionsPanel({ teams, squads, auctions, createAuction, placeBid, final
         </div>
         {warning && <div className="flex items-center gap-2" style={{ marginTop: 10, color: C.red, fontSize: 12.5 }}><AlertTriangle size={14} /> {warning}</div>}
       </div>
+
+      {myAuctions.length > 0 && (
+        <div style={{ marginBottom: 20, background: `${C.gold}0d`, border: `1px solid ${C.gold}44`, borderRadius: 10, padding: 14 }}>
+          <div style={{ color: C.gold, fontWeight: 700, fontSize: 13, marginBottom: 10 }}>My Auctions ({myAuctions.length})</div>
+          <div className="grid gap-3">
+            {myPending.map((a) => (
+              <PendingAuctionCard key={a.id} auction={a} teams={teams} respondToAuction={respondToAuction} editAuctionPlayerName={editAuctionPlayerName} />
+            ))}
+            {myOpen.map((a) => (
+              <AuctionCard key={a.id} auction={a} teams={teams} now={now} placeBid={placeBid} finalizeAuction={finalizeAuction} deleteBid={deleteBid} cancelAuction={cancelAuction} editAuctionPlayerName={editAuctionPlayerName} myTeamId={myTeamId} squadStats={squadStats} />
+            ))}
+          </div>
+        </div>
+      )}
 
       {pending.length > 0 && (
         <div style={{ marginBottom: 20 }}>
