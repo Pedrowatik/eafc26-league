@@ -402,6 +402,9 @@ export default function EafcLeagueApp() {
   const [playerDatabase, setPlayerDatabase] = useState([]); // imported from Sofifa for autocomplete
   const [injuries, setInjuries] = useState({}); // { [teamId]: { [playerName]: lastInjuredMatchday } }
   const [teamLockOverride, setTeamLockOverride] = useState(false); // admin toggle to allow re-picks mid-season
+  const [draftState, setDraftState] = useState({ status: "closed", opensAt: null, deadline: null });
+  const [draftPicks, setDraftPicks] = useState({}); // { [teamId]: [21 player-or-null entries] }
+  const [draftSubmitted, setDraftSubmitted] = useState({}); // { [teamId]: true }
   const [transferWindow, setTransferWindow] = useState({ opensAt: null, closesAt: null }); // null = always open
   const [swapsUsed, setSwapsUsed] = useState({}); // { [teamId]: windowOpensAt } — which window a team last used their swap in
   const [swapOffers, setSwapOffers] = useState([]); // pending/accepted/declined player-for-player swap proposals
@@ -451,6 +454,9 @@ export default function EafcLeagueApp() {
     if (data.playerDatabase) setPlayerDatabase(data.playerDatabase);
     if (data.injuries) setInjuries(data.injuries);
     if (data.teamLockOverride !== undefined) setTeamLockOverride(data.teamLockOverride);
+    if (data.draftState) setDraftState(data.draftState);
+    if (data.draftPicks) setDraftPicks(data.draftPicks);
+    if (data.draftSubmitted) setDraftSubmitted(data.draftSubmitted);
     if (data.transferWindow) setTransferWindow(data.transferWindow);
     if (data.swapsUsed) setSwapsUsed(data.swapsUsed);
     if (data.swapOffers) setSwapOffers(data.swapOffers);
@@ -637,7 +643,7 @@ export default function EafcLeagueApp() {
         const savedAt = Date.now();
         await storage.set(
           STORAGE_KEY,
-          JSON.stringify({ transfers, fixtures, prizes, events, adminPin, season, seasonHistory, activity, playerDatabase, injuries, teamLockOverride, cardTally, suspensions, transferWindow, swapsUsed, swapOffers, savedAt }),
+          JSON.stringify({ transfers, fixtures, prizes, events, adminPin, season, seasonHistory, activity, playerDatabase, injuries, teamLockOverride, draftState, draftPicks, draftSubmitted, cardTally, suspensions, transferWindow, swapsUsed, swapOffers, savedAt }),
           true
         );
         knownSavedAtRef.current = savedAt;
@@ -650,7 +656,7 @@ export default function EafcLeagueApp() {
       }
     }, 300);
     return () => clearTimeout(t);
-  }, [transfers, fixtures, prizes, events, adminPin, season, seasonHistory, activity, playerDatabase, injuries, teamLockOverride, cardTally, suspensions, transferWindow, swapsUsed, swapOffers, loaded]);
+  }, [transfers, fixtures, prizes, events, adminPin, season, seasonHistory, activity, playerDatabase, injuries, teamLockOverride, draftState, draftPicks, draftSubmitted, cardTally, suspensions, transferWindow, swapsUsed, swapOffers, loaded]);
 
   // Private messages save to their own separate key, on their own quick timer — this is what
   // actually stops a message from getting silently erased if someone else's browser (with a
@@ -1714,6 +1720,7 @@ export default function EafcLeagueApp() {
       if (Date.now() >= a.deadline) { err = "Time's up on this auction — finalize it before bidding again."; return a; }
       if (!teamId) { err = "Choose which team is bidding."; return a; }
       if (teamId === a.seller) { err = "You can't bid on your own player."; return a; }
+      if (a.eligibleBidders && !a.eligibleBidders.includes(teamId)) { err = "Only the teams that also drafted this player can bid on it."; return a; }
       if (teamId === a.currentBidder) { err = "That team already holds the highest bid."; return a; }
       const required = a.currentBid > 0 ? a.currentBid + 0.25 : Math.max(a.minBid, 0.25);
       if (!amt || amt < required - 0.001) { err = `Bid must be at least ${money(required)} (£250k above the current bid).`; return a; }
@@ -2135,6 +2142,139 @@ export default function EafcLeagueApp() {
     return null;
   };
 
+  const DRAFT_SLOTS = 21;
+  const DRAFT_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+
+  // Opens a fresh draft window — everyone gets up to 7 days to submit a provisional 21, or the
+  // admin can resolve it as soon as every team's submitted, whichever comes first.
+  const openDraft = (pinAttempt) => {
+    if (pinAttempt !== adminPin) return "Incorrect PIN.";
+    const now = Date.now();
+    setDraftState({ status: "open", opensAt: now, deadline: now + DRAFT_WINDOW_MS });
+    setDraftPicks({});
+    setDraftSubmitted({});
+    logActivity("The squad draft is open — every team has up to 7 days to submit their provisional 21.", "transfer");
+    return null;
+  };
+
+  const updateDraftPick = (teamId, slotIndex, player) => {
+    if (draftState.status !== "open") return "The draft isn't currently open.";
+    if (draftSubmitted[teamId]) return "You've already submitted your draft.";
+    setDraftPicks((all) => {
+      const current = all[teamId] || Array(DRAFT_SLOTS).fill(null);
+      const next = [...current];
+      next[slotIndex] = player;
+      return { ...all, [teamId]: next };
+    });
+    return null;
+  };
+
+  // Same rules that apply to normal squad building apply here too — no duplicates, the 86+ cap,
+  // the U21 minimum, and staying within budget and wage cap.
+  const validateDraft = (teamId) => {
+    const team = teams.find((t) => t.id === teamId);
+    const picks = (draftPicks[teamId] || []).filter(Boolean);
+    if (picks.length === 0) return "Pick at least one player before submitting.";
+    const names = picks.map((p) => p.name.toLowerCase());
+    if (new Set(names).size !== names.length) return "You've picked the same player more than once.";
+    const rated86 = picks.filter((p) => Number(p.rating) >= 86).length;
+    const allowed86 = 3 + (team.earned86 || 0);
+    if (rated86 > allowed86) return `Too many 86+ rated players (${rated86}, max ${allowed86}).`;
+    const u21Count = picks.filter((p) => Number(p.age) > 0 && Number(p.age) <= 20).length;
+    if (u21Count < MIN_U21_PLAYERS) return `Not enough U21 players (${u21Count} — need at least ${MIN_U21_PLAYERS}).`;
+    const totalValue = picks.reduce((s, p) => s + roundUpTo250k(Number(p.value) || 0), 0);
+    if (totalValue > team.budget) return `Total squad value (${money(totalValue)}) is more than your budget (${money(team.budget)}).`;
+    const totalWageM = picks.reduce((s, p) => s + (Number(p.wage) || 0), 0) / 1000;
+    if (totalWageM > team.wageCap) return `Total wages (${money(totalWageM)}) would be over your wage cap (${money(team.wageCap)}).`;
+    return null;
+  };
+
+  const submitDraft = (teamId) => {
+    if (draftState.status !== "open") return "The draft isn't currently open.";
+    const err = validateDraft(teamId);
+    if (err) return err;
+    setDraftSubmitted((all) => ({ ...all, [teamId]: true }));
+    logActivity(`${teams.find((t) => t.id === teamId)?.name} submitted their draft squad.`, "transfer");
+    return null;
+  };
+
+  // The big one: for every player picked by exactly one team, sign them instantly (budget/wage
+  // deducted as normal). For anyone picked by 2+ teams, kick off a real auction restricted to just
+  // those teams, opening bid = the player's value rounded to £250k — everything from there on
+  // (bidding, ratification) runs through the normal auction system unchanged.
+  const resolveDraft = (pinAttempt) => {
+    if (pinAttempt !== adminPin) return "Incorrect PIN.";
+    if (draftState.status !== "open") return "The draft isn't currently open.";
+
+    const pickersByPlayer = {}; // playerName -> [{ teamId, player }]
+    teams.forEach((t) => {
+      if (!draftSubmitted[t.id]) return; // teams that never submitted just start with an empty squad
+      (draftPicks[t.id] || []).forEach((p) => {
+        if (!p) return;
+        if (!pickersByPlayer[p.name]) pickersByPlayer[p.name] = [];
+        pickersByPlayer[p.name].push({ teamId: t.id, player: p });
+      });
+    });
+
+    const instantAssignments = [];
+    const newAuctions = [];
+    Object.values(pickersByPlayer).forEach((pickers) => {
+      if (pickers.length === 1) {
+        instantAssignments.push(pickers[0]);
+      } else {
+        const openingBid = Math.max(roundUpTo250k(Number(pickers[0].player.value) || 0), 0.25);
+        const startingBidder = pickers[0].teamId;
+        newAuctions.push({
+          id: uid(),
+          player: {
+            name: pickers[0].player.name, position: pickers[0].player.position, rating: Number(pickers[0].player.rating) || 0,
+            club: pickers[0].player.club, age: Number(pickers[0].player.age) || 0, wage: Number(pickers[0].player.wage) || 0,
+          },
+          seller: "FA",
+          minBid: openingBid,
+          currentBid: openingBid,
+          currentBidder: startingBidder,
+          bidsByTeam: { [startingBidder]: openingBid },
+          history: [{ id: uid(), team: startingBidder, amount: openingBid, time: Date.now() }],
+          deadline: Date.now() + AUCTION_DURATION_MS,
+          status: "open",
+          winner: null,
+          winningBid: null,
+          // Only the teams that also drafted this player can bid — this isn't the open market.
+          eligibleBidders: pickers.map((p) => p.teamId),
+          sellerCredited: false,
+          sellerCreditAmount: 0,
+        });
+      }
+    });
+
+    setSquads((all) => {
+      let next = { ...all };
+      instantAssignments.forEach(({ teamId, player }) => {
+        const slot = firstFreeSlot(next[teamId]);
+        if (!slot) return; // shouldn't happen with 21 draft picks vs 21 starter slots, but don't crash if it does
+        const playerObj = {
+          name: player.name, position: player.position, rating: Number(player.rating) || 0,
+          club: player.club, age: Number(player.age) || 0, value: roundUpTo250k(Number(player.value) || 0), wage: Number(player.wage) || 0,
+        };
+        next = { ...next, [teamId]: { ...next[teamId], [slot.group]: [...next[teamId][slot.group]] } };
+        next[teamId][slot.group][slot.idx] = playerObj;
+      });
+      return next;
+    });
+    setTeams((ts) => ts.map((t) => {
+      const mine = instantAssignments.filter((a) => a.teamId === t.id);
+      if (!mine.length) return t;
+      const totalCost = mine.reduce((s, a) => s + roundUpTo250k(Number(a.player.value) || 0), 0);
+      return { ...t, budget: (t.budget || 0) - totalCost };
+    }));
+    if (newAuctions.length) setAuctions((all) => [...newAuctions, ...all]);
+
+    setDraftState((d) => ({ ...d, status: "closed" }));
+    logActivity(`Draft resolved — ${instantAssignments.length} uncontested signing${instantAssignments.length === 1 ? "" : "s"}, ${newAuctions.length} conflict auction${newAuctions.length === 1 ? "" : "s"} started.`, "transfer");
+    return null;
+  };
+
   // Clears a team's password so it becomes "unclaimed" again — useful if someone forgets their
   // password or a team needs to be handed to a different person.
   const resetTeamPassword = (pinAttempt, teamId) => {
@@ -2318,6 +2458,7 @@ export default function EafcLeagueApp() {
     { id: "squads", label: "Squad List", icon: Users },
     { id: "budgets", label: "Budgets & Wages", icon: Wallet },
     { id: "transfers", label: "Transfers", icon: Repeat },
+    { id: "draft", label: "Draft", icon: Users },
     { id: "playerdb", label: "Player Database", icon: Search },
     { id: "messages", label: "Messages", icon: Send },
     { id: "chat", label: "League Chat", icon: MessageCircle },
@@ -2451,6 +2592,12 @@ export default function EafcLeagueApp() {
             sendMarketMessage={sendMarketMessage} transferWindow={transferWindow} transferWindowOpen={transferWindowOpen}
             season={season} swapOffers={swapOffers} offerSwap={offerSwap} respondToSwapOffer={respondToSwapOffer}
             hasUsedSwapThisWindow={hasUsedSwapThisWindow} />
+        )}
+        {tab === "draft" && (
+          <DraftTab teams={teams} squads={squads} squadStats={squadStats} myTeamId={myTeamId}
+            playerDatabase={playerDatabase} draftState={draftState} draftPicks={draftPicks}
+            draftSubmitted={draftSubmitted} updateDraftPick={updateDraftPick} submitDraft={submitDraft}
+            validateDraft={validateDraft} openDraft={openDraft} resolveDraft={resolveDraft} />
         )}
         {tab === "fixtures" && (
           <FixturesTab teams={teams} fixtures={fixtures} setFixtures={setFixtures} logActivity={logActivity}
@@ -3812,6 +3959,11 @@ function AuctionCard({ auction, teams, now, placeBid, finalizeAuction, deleteBid
           <div style={{ color: C.muted, fontSize: 11.5 }}>
             {auction.player.club}{auction.player.club ? " · " : ""}Selling: {auction.seller === "FA" ? "Non OCM" : teams.find((t) => t.id === auction.seller)?.name}
           </div>
+          {auction.eligibleBidders && (
+            <div style={{ color: C.gold, fontSize: 11, fontWeight: 700, marginTop: 2 }}>
+              ⚔ Draft conflict — restricted to {auction.eligibleBidders.map((id) => teams.find((t) => t.id === id)?.name).join(", ")}
+            </div>
+          )}
           {auction.sellerCredited && (
             <div style={{ color: C.green, fontSize: 11, fontWeight: 700, marginTop: 2 }}>
               ✓ Seller already paid {money(auction.sellerCreditAmount)} — player is in limbo until this ends
@@ -3836,6 +3988,8 @@ function AuctionCard({ auction, teams, now, placeBid, finalizeAuction, deleteBid
         myTeamId ? (
           myTeamId === auction.seller ? (
             <div style={{ color: C.muted, fontSize: 12.5 }}>You can't bid on your own player.</div>
+          ) : auction.eligibleBidders && !auction.eligibleBidders.includes(myTeamId) ? (
+            <div style={{ color: C.muted, fontSize: 12.5 }}>This auction is restricted to teams that also drafted this player — you weren't one of them.</div>
           ) : (
           <div className="flex items-end gap-2 flex-wrap">
             <Field label="Bidding as">
@@ -4309,6 +4463,145 @@ function TransferWindowBanner({ transferWindow, transferWindowOpen, nowTick }) {
         </Pill>
       </div>
     </Panel>
+  );
+}
+
+const DRAFT_SLOTS_UI = 21;
+
+function DraftTab({ teams, squads, squadStats, myTeamId, playerDatabase, draftState, draftPicks, draftSubmitted, updateDraftPick, submitDraft, validateDraft, openDraft, resolveDraft }) {
+  const [pin, setPin] = useState("");
+  const [msg, setMsg] = useState(null);
+  const [now, setNow] = useState(Date.now());
+
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, []);
+
+  const myTeam = teams.find((t) => t.id === myTeamId);
+  const myPicks = draftPicks[myTeamId] || Array(DRAFT_SLOTS_UI).fill(null);
+  const submitted = !!draftSubmitted[myTeamId];
+  const submittedCount = teams.filter((t) => draftSubmitted[t.id]).length;
+  const allSubmitted = submittedCount === teams.length;
+
+  // Local per-row text so typing works normally even before a suggestion's actually picked —
+  // reinitialized whenever a fresh draft opens or the team changes.
+  const [queryTexts, setQueryTexts] = useState(() => myPicks.map((p) => (p ? p.name : "")));
+  useEffect(() => {
+    setQueryTexts((draftPicks[myTeamId] || Array(DRAFT_SLOTS_UI).fill(null)).map((p) => (p ? p.name : "")));
+  }, [draftState.opensAt, myTeamId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const setSlotText = (i, text) => setQueryTexts((all) => { const next = [...all]; next[i] = text; return next; });
+  const pickSlot = (i, player) => {
+    setQueryTexts((all) => { const next = [...all]; next[i] = player.name; return next; });
+    updateDraftPick(myTeamId, i, {
+      name: player.name, position: player.position, rating: Number(player.rating) || 0,
+      club: player.club, age: Number(player.age) || 0, value: player.value, wage: player.wage,
+    });
+  };
+  const clearSlot = (i) => {
+    setSlotText(i, "");
+    updateDraftPick(myTeamId, i, null);
+  };
+
+  const liveError = myTeamId && !submitted ? validateDraft(myTeamId) : null;
+
+  const doSubmit = () => {
+    const err = submitDraft(myTeamId);
+    setMsg(err ? { text: err, tone: "red" } : { text: "Draft submitted — sit tight for the others (or the deadline).", tone: "green" });
+  };
+  const doOpen = () => {
+    const err = openDraft(pin);
+    setPin("");
+    setMsg(err ? { text: err, tone: "red" } : { text: "Draft opened — 7 days on the clock.", tone: "green" });
+  };
+  const doResolve = () => {
+    if (!window.confirm("Resolve the draft now? Uncontested picks sign instantly and conflict auctions start immediately. This can't be undone.")) return;
+    const err = resolveDraft(pin);
+    setPin("");
+    setMsg(err ? { text: err, tone: "red" } : { text: "Draft resolved — check Transfers for any conflict auctions.", tone: "green" });
+  };
+
+  return (
+    <div className="grid gap-4">
+      <Panel style={{ padding: 18 }}>
+        <SectionTitle icon={Users}>Squad Draft</SectionTitle>
+        <div style={{ color: C.muted, fontSize: 12.5, marginBottom: 14, lineHeight: 1.6 }}>
+          A one-time way to build a provisional squad before a season starts. Pick up to {DRAFT_SLOTS_UI} players from
+          the database — normal squad rules apply (86+ cap, U21 minimum, budget, wage cap). Reserve slots stay open
+          for regular signings afterward. If nobody else picked the same player, they're yours the moment the draft
+          resolves. If 2 or more teams picked the same one, a restricted auction runs between just those teams,
+          opening at that player's value — everything from there works exactly like a normal auction.
+        </div>
+
+        {draftState.status === "open" && (
+          <div className="flex items-center gap-3 flex-wrap" style={{ marginBottom: 14 }}>
+            <Pill tone="gold">{formatCountdown(Math.max(draftState.deadline - now, 0))} left</Pill>
+            <Pill tone={allSubmitted ? "green" : "muted"}>{submittedCount} / {teams.length} teams submitted</Pill>
+          </div>
+        )}
+
+        <div style={{ background: C.panelAlt, borderRadius: 8, padding: 12 }}>
+          <div style={{ color: C.gold, fontWeight: 700, fontSize: 12.5, marginBottom: 8 }}>Admin</div>
+          <div className="flex items-end gap-2 flex-wrap">
+            <Field label="Admin PIN"><TextInput type="password" value={pin} onChange={(e) => setPin(e.target.value)} style={{ width: 130 }} /></Field>
+            {draftState.status !== "open" ? (
+              <Btn onClick={doOpen}>Open New Draft (7 days)</Btn>
+            ) : (
+              <Btn variant="danger" onClick={doResolve}>Resolve Draft Now</Btn>
+            )}
+          </div>
+          {msg && <div style={{ color: msg.tone === "green" ? C.green : C.red, fontSize: 12, marginTop: 8 }}>{msg.text}</div>}
+        </div>
+      </Panel>
+
+      {draftState.status === "open" && (
+        !myTeamId ? (
+          <Panel style={{ padding: 18 }}><div style={{ color: C.muted, fontSize: 13 }}>Pick your team (top right) to build your draft squad.</div></Panel>
+        ) : (
+          <Panel style={{ padding: 18 }}>
+            <SectionTitle icon={Users}>{myTeam?.name}'s Provisional Squad</SectionTitle>
+            {submitted ? (
+              <div style={{ color: C.green, fontSize: 13, marginBottom: 12 }}>✓ Submitted — waiting on other teams (or the 7-day deadline).</div>
+            ) : (
+              <div style={{ color: C.muted, fontSize: 12, marginBottom: 12 }}>Not submitted yet — keep changing picks freely until you submit.</div>
+            )}
+            <div className="grid gap-2">
+              {myPicks.map((p, i) => (
+                <div key={i} className="flex items-center gap-2" style={{ background: C.panelAlt, borderRadius: 6, padding: 8 }}>
+                  <div style={{ width: 22, textAlign: "center", color: C.muted, fontSize: 11 }}>{i + 1}</div>
+                  <div style={{ flex: 1 }}>
+                    {submitted ? (
+                      <div style={{ color: C.text, fontSize: 13 }}>
+                        {p ? `${p.name} — ${p.position}, ${p.rating} OVR, ${p.club}` : <span style={{ color: C.muted, fontStyle: "italic" }}>Empty</span>}
+                      </div>
+                    ) : (
+                      <PlayerAutocomplete
+                        value={queryTexts[i] || ""}
+                        onChange={(text) => setSlotText(i, text)}
+                        playerDatabase={playerDatabase}
+                        onSelect={(picked) => pickSlot(i, picked)}
+                      />
+                    )}
+                  </div>
+                  {!submitted && p && (
+                    <button onClick={() => clearSlot(i)} title="Clear" style={{ background: "transparent", border: "none", cursor: "pointer", color: C.red }}>
+                      <Trash2 size={14} />
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+            {!submitted && (
+              <div style={{ marginTop: 14 }}>
+                {liveError && <div className="flex items-center gap-2" style={{ color: C.red, fontSize: 12, marginBottom: 8 }}><AlertTriangle size={13} /> {liveError}</div>}
+                <Btn icon={Check} onClick={doSubmit}>Submit Draft</Btn>
+              </div>
+            )}
+          </Panel>
+        )
+      )}
+    </div>
   );
 }
 
