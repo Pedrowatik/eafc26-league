@@ -148,6 +148,10 @@ const POSITIONS = ["GK", "CB", "LB", "RB", "LWB", "RWB", "CDM", "CM", "CAM", "LM
 const STORAGE_KEY = "eafc26-league-state-v1";
 const DM_STORAGE_KEY = "eafc26-private-messages-v1"; // saved separately so it can't be clobbered by unrelated saves
 const CHAT_STORAGE_KEY = "eafc26-league-chat-v1"; // same isolation as private messages, for the same reason
+// Squads get isolated per-team rather than one shared key — editing your own squad, reordering your
+// XI, or signing a player should never be at risk of being clobbered by an unrelated save happening
+// on someone else's team at the same moment.
+const squadKeyFor = (teamId) => `eafc26-squad-${teamId}-v1`;
 
 // Chat and private messages are append-only — merging by id (rather than replacing the whole
 // array) means an incoming sync can only ever add messages, never accidentally erase one that's
@@ -403,13 +407,14 @@ export default function EafcLeagueApp() {
   const knownSavedAtRef = useRef(0);
   const knownDmSavedAtRef = useRef(0); // same idea, but for the separate private-messages store
   const knownChatSavedAtRef = useRef(0); // same idea, but for the separate league chat store
+  const knownSquadSavedAtRef = useRef(new Map()); // per-team: teamId -> savedAt
   const savingRef = useRef(false);
   const dmSavingRef = useRef(false);
   const chatSavingRef = useRef(false);
+  const squadSavingRef = useRef(false);
 
   const applyRemoteData = useCallback((data) => {
     if (data.teams) setTeams(data.teams);
-    if (data.squads) setSquads(data.squads);
     if (data.transfers) setTransfers(data.transfers);
     if (data.fixtures) setFixtures(data.fixtures);
     if (data.prizes) setPrizes(data.prizes);
@@ -434,16 +439,44 @@ export default function EafcLeagueApp() {
   // load once
   useEffect(() => {
     (async () => {
+      let legacySquadsForMigration = null;
+      let teamIdsForSquadLoad = defaultTeams().map((t) => t.id);
       try {
         const res = await storage.get(STORAGE_KEY, true);
         if (res && res.value) {
           const data = JSON.parse(res.value);
           applyRemoteData(data);
+          legacySquadsForMigration = data.squads || null;
+          if (data.teams && data.teams.length) teamIdsForSquadLoad = data.teams.map((t) => t.id);
           knownSavedAtRef.current = data.savedAt || Date.now();
           setLastSyncedAt(knownSavedAtRef.current);
         }
       } catch (e) {
         // no saved data yet — fine, start fresh
+      }
+      // Each team's squad now lives under its own key. Falls back to whatever was in the old
+      // combined blob (for leagues that existed before this split) or a fresh empty squad.
+      try {
+        const loadedSquads = {};
+        const fallback = defaultSquads();
+        await Promise.all(teamIdsForSquadLoad.map(async (teamId) => {
+          try {
+            const sres = await storage.get(squadKeyFor(teamId), true);
+            if (sres && sres.value) {
+              const sdata = JSON.parse(sres.value);
+              loadedSquads[teamId] = { starters: sdata.starters || fallback[teamId]?.starters || [], reserves: sdata.reserves || fallback[teamId]?.reserves || [] };
+              knownSquadSavedAtRef.current.set(teamId, sdata.savedAt || Date.now());
+              return;
+            }
+          } catch (e) {
+            // no dedicated squad key yet for this team — fall through to migration/default below
+          }
+          loadedSquads[teamId] = (legacySquadsForMigration && legacySquadsForMigration[teamId]) || fallback[teamId] || { starters: Array(STARTER_SLOTS).fill(null), reserves: Array(RESERVE_SLOTS).fill(null) };
+          knownSquadSavedAtRef.current.set(teamId, 0); // hasn't been saved under the new per-team key yet
+        }));
+        setSquads(loadedSquads);
+      } catch (e) {
+        // best effort — whatever the initial default state was will remain
       }
       try {
         const mine = await storage.get(MY_TEAM_KEY, false);
@@ -511,7 +544,7 @@ export default function EafcLeagueApp() {
         const savedAt = Date.now();
         await storage.set(
           STORAGE_KEY,
-          JSON.stringify({ teams, squads, transfers, fixtures, prizes, events, auctions, adminPin, season, seasonHistory, activity, playerDatabase, injuries, teamLockOverride, cardTally, suspensions, transferListings, wantedListings, transferWindow, swapsUsed, swapOffers, savedAt }),
+          JSON.stringify({ teams, transfers, fixtures, prizes, events, auctions, adminPin, season, seasonHistory, activity, playerDatabase, injuries, teamLockOverride, cardTally, suspensions, transferListings, wantedListings, transferWindow, swapsUsed, swapOffers, savedAt }),
           true
         );
         knownSavedAtRef.current = savedAt;
@@ -524,7 +557,7 @@ export default function EafcLeagueApp() {
       }
     }, 300);
     return () => clearTimeout(t);
-  }, [teams, squads, transfers, fixtures, prizes, events, auctions, adminPin, season, seasonHistory, activity, playerDatabase, injuries, teamLockOverride, cardTally, suspensions, transferListings, wantedListings, transferWindow, swapsUsed, swapOffers, loaded]);
+  }, [teams, transfers, fixtures, prizes, events, auctions, adminPin, season, seasonHistory, activity, playerDatabase, injuries, teamLockOverride, cardTally, suspensions, transferListings, wantedListings, transferWindow, swapsUsed, swapOffers, loaded]);
 
   // Private messages save to their own separate key, on their own quick timer — this is what
   // actually stops a message from getting silently erased if someone else's browser (with a
@@ -563,6 +596,76 @@ export default function EafcLeagueApp() {
     }, 300);
     return () => clearTimeout(t);
   }, [chat, loaded]);
+
+  // Squads save per-team to their own keys. Any change writes every team's current slice (simple,
+  // safe), but crucially, incoming updates only ever overwrite the ONE team they belong to — so
+  // someone else signing/reordering their squad can never touch yours, whatever they were doing.
+  useEffect(() => {
+    if (!loaded) return;
+    squadSavingRef.current = true;
+    const t = setTimeout(async () => {
+      try {
+        const savedAt = Date.now();
+        await Promise.all(teams.map((team) =>
+          storage.set(squadKeyFor(team.id), JSON.stringify({
+            starters: squads[team.id]?.starters || [], reserves: squads[team.id]?.reserves || [], savedAt,
+          }), true)
+            .then(() => knownSquadSavedAtRef.current.set(team.id, savedAt))
+            .catch(() => { /* best effort per team — next cycle reconciles */ })
+        ));
+      } finally {
+        squadSavingRef.current = false;
+      }
+    }, 300);
+    return () => clearTimeout(t);
+  }, [squads, teams, loaded]);
+
+  const pullLatestSquads = useCallback(async () => {
+    if (squadSavingRef.current) return;
+    await Promise.all(teams.map(async (team) => {
+      try {
+        const res = await storage.get(squadKeyFor(team.id), true);
+        if (res && res.value) {
+          const data = JSON.parse(res.value);
+          const remoteSavedAt = data.savedAt || 0;
+          const known = knownSquadSavedAtRef.current.get(team.id) || 0;
+          if (remoteSavedAt > known) {
+            setSquads((all) => ({ ...all, [team.id]: { starters: data.starters || [], reserves: data.reserves || [] } }));
+            knownSquadSavedAtRef.current.set(team.id, remoteSavedAt);
+          }
+        }
+      } catch (e) {
+        // best effort — one team failing to load shouldn't block the others
+      }
+    }));
+  }, [teams]);
+
+  useEffect(() => {
+    if (!loaded) return;
+    const t = setInterval(() => pullLatestSquads(), SYNC_POLL_MS);
+    return () => clearInterval(t);
+  }, [loaded, pullLatestSquads]);
+
+  useEffect(() => {
+    if (!loaded) return;
+    const unsubscribers = teams.map((team) =>
+      subscribeToKey(squadKeyFor(team.id), (row) => {
+        if (!row || !row.value) return;
+        try {
+          const data = JSON.parse(row.value);
+          const remoteSavedAt = data.savedAt || 0;
+          const known = knownSquadSavedAtRef.current.get(team.id) || 0;
+          if (remoteSavedAt > known && !squadSavingRef.current) {
+            setSquads((all) => ({ ...all, [team.id]: { starters: data.starters || [], reserves: data.reserves || [] } }));
+            knownSquadSavedAtRef.current.set(team.id, remoteSavedAt);
+          }
+        } catch (e) {
+          // ignore malformed payloads
+        }
+      })
+    );
+    return () => unsubscribers.forEach((unsub) => unsub && unsub());
+  }, [loaded, teams]);
 
   // live sync: poll for other people's changes and pull them in automatically. Skipped while we
   // have our own unsaved edit in flight, so we don't clobber it with a slightly stale copy.
