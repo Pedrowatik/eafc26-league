@@ -547,6 +547,7 @@ export default function EafcLeagueApp() {
   const [draftState, setDraftState] = useState({ status: "closed", opensAt: null, deadline: null });
   const [draftPicks, setDraftPicks] = useState({}); // { [teamId]: [21 player-or-null entries] }
   const [draftSubmitted, setDraftSubmitted] = useState({}); // { [teamId]: true }
+  const [blindBids, setBlindBids] = useState([]); // sealed one-off bids for draft conflicts
   const [transferWindow, setTransferWindow] = useState({ opensAt: null, closesAt: null }); // null = always open
   const [swapsUsed, setSwapsUsed] = useState({}); // { [teamId]: windowOpensAt } — which window a team last used their swap in
   const [swapOffers, setSwapOffers] = useState([]); // pending/accepted/declined player-for-player swap proposals
@@ -610,6 +611,7 @@ export default function EafcLeagueApp() {
     if (data.draftState) setDraftState(data.draftState);
     if (data.draftPicks) setDraftPicks(data.draftPicks);
     if (data.draftSubmitted) setDraftSubmitted(data.draftSubmitted);
+    if (data.blindBids) setBlindBids(data.blindBids);
     if (data.transferWindow) setTransferWindow(data.transferWindow);
     if (data.swapsUsed) setSwapsUsed(data.swapsUsed);
     if (data.swapOffers) setSwapOffers(data.swapOffers);
@@ -796,7 +798,7 @@ export default function EafcLeagueApp() {
         const savedAt = Date.now();
         await storage.set(
           STORAGE_KEY,
-          JSON.stringify({ transfers, fixtures, prizes, events, adminPin, season, seasonHistory, activity, playerDatabase, injuries, teamLockOverride, draftState, draftPicks, draftSubmitted, cardTally, suspensions, transferWindow, swapsUsed, swapOffers, savedAt }),
+          JSON.stringify({ transfers, fixtures, prizes, events, adminPin, season, seasonHistory, activity, playerDatabase, injuries, teamLockOverride, draftState, draftPicks, draftSubmitted, blindBids, cardTally, suspensions, transferWindow, swapsUsed, swapOffers, savedAt }),
           true
         );
         knownSavedAtRef.current = savedAt;
@@ -809,7 +811,7 @@ export default function EafcLeagueApp() {
       }
     }, 300);
     return () => clearTimeout(t);
-  }, [transfers, fixtures, prizes, events, adminPin, season, seasonHistory, activity, playerDatabase, injuries, teamLockOverride, draftState, draftPicks, draftSubmitted, cardTally, suspensions, transferWindow, swapsUsed, swapOffers, loaded]);
+  }, [transfers, fixtures, prizes, events, adminPin, season, seasonHistory, activity, playerDatabase, injuries, teamLockOverride, draftState, draftPicks, draftSubmitted, blindBids, cardTally, suspensions, transferWindow, swapsUsed, swapOffers, loaded]);
 
   // Private messages save to their own separate key, on their own quick timer — this is what
   // actually stops a message from getting silently erased if someone else's browser (with a
@@ -2370,33 +2372,27 @@ export default function EafcLeagueApp() {
     });
 
     const instantAssignments = [];
-    const newAuctions = [];
+    const newBlindBids = [];
     Object.values(pickersByPlayer).forEach((pickers) => {
       if (pickers.length === 1) {
         instantAssignments.push(pickers[0]);
       } else {
-        const openingBid = Math.max(roundUpTo250k(Number(pickers[0].player.value) || 0), 0.25);
-        const startingBidder = pickers[0].teamId;
-        newAuctions.push({
+        // Conflict — instead of a live auction, this is a one-off sealed bid: everyone involved
+        // submits a single blind amount, nobody sees anyone else's, highest wins outright the
+        // moment everyone's in (or the 24h deadline passes, whichever's first).
+        newBlindBids.push({
           id: uid(),
           player: {
             name: pickers[0].player.name, position: pickers[0].player.position, rating: Number(pickers[0].player.rating) || 0,
             club: pickers[0].player.club, age: Number(pickers[0].player.age) || 0, wage: Number(pickers[0].player.wage) || 0,
           },
-          seller: "FA",
-          minBid: openingBid,
-          currentBid: openingBid,
-          currentBidder: startingBidder,
-          bidsByTeam: { [startingBidder]: openingBid },
-          history: [{ id: uid(), team: startingBidder, amount: openingBid, time: Date.now() }],
+          minBid: Math.max(roundUpTo250k(Number(pickers[0].player.value) || 0), 0.25),
+          eligibleTeams: pickers.map((p) => p.teamId),
+          bids: {}, // teamId -> amount, kept sealed until resolved
           deadline: Date.now() + AUCTION_DURATION_MS,
-          status: "open",
+          resolved: false,
           winner: null,
           winningBid: null,
-          // Only the teams that also drafted this player can bid — this isn't the open market.
-          eligibleBidders: pickers.map((p) => p.teamId),
-          sellerCredited: false,
-          sellerCreditAmount: 0,
         });
       }
     });
@@ -2421,10 +2417,70 @@ export default function EafcLeagueApp() {
       const totalCost = mine.reduce((s, a) => s + roundUpTo250k(Number(a.player.value) || 0), 0);
       return { ...t, budget: (t.budget || 0) - totalCost };
     }));
-    if (newAuctions.length) setAuctions((all) => [...newAuctions, ...all]);
+    if (newBlindBids.length) setBlindBids((all) => [...newBlindBids, ...all]);
 
     setDraftState((d) => ({ ...d, status: "closed" }));
-    logActivity(`Draft resolved — ${instantAssignments.length} uncontested signing${instantAssignments.length === 1 ? "" : "s"}, ${newAuctions.length} conflict auction${newAuctions.length === 1 ? "" : "s"} started.`, "transfer");
+    logActivity(`Draft resolved — ${instantAssignments.length} uncontested signing${instantAssignments.length === 1 ? "" : "s"}, ${newBlindBids.length} player${newBlindBids.length === 1 ? "" : "s"} going to a blind bid.`, "transfer");
+    return null;
+  };
+
+  // Submits a sealed bid — amounts stay hidden from other teams until everyone eligible has gone
+  // in, at which point it resolves immediately and the highest bidder wins outright (no live
+  // bidding war, no waiting on a countdown once everyone's actually submitted).
+  const submitBlindBid = (teamId, blindBidId, amount) => {
+    const bb = blindBids.find((b) => b.id === blindBidId);
+    if (!bb) return "Blind bid not found.";
+    if (bb.resolved) return "This has already been resolved.";
+    if (!bb.eligibleTeams.includes(teamId)) return "You're not one of the teams involved in this one.";
+    const amt = Number(amount);
+    if (!amt || amt < bb.minBid) return `Bid must be at least ${money(bb.minBid)}.`;
+
+    const updatedBids = { ...bb.bids, [teamId]: amt };
+    const allIn = bb.eligibleTeams.every((tid) => updatedBids[tid] !== undefined);
+
+    setBlindBids((all) => all.map((b) => (b.id === blindBidId ? { ...b, bids: updatedBids } : b)));
+
+    if (allIn) {
+      resolveBlindBidInternal(blindBidId, updatedBids);
+    }
+    return null;
+  };
+
+  // Shared resolution logic — called automatically the instant the last eligible team submits,
+  // or manually by admin (for stragglers once the deadline's passed).
+  const resolveBlindBidInternal = (blindBidId, bidsOverride) => {
+    const bb = blindBids.find((b) => b.id === blindBidId);
+    if (!bb || bb.resolved) return;
+    const bids = bidsOverride || bb.bids;
+    const entries = Object.entries(bids);
+    if (entries.length === 0) return; // nobody bid at all — leave it open for the admin to sort out manually
+    const [winnerTeamId, winningBid] = entries.reduce((best, cur) => (cur[1] > best[1] ? cur : best), entries[0]);
+
+    setSquads((all) => {
+      const slot = firstFreeSlot(all[winnerTeamId]);
+      if (!slot) return all;
+      const playerObj = {
+        name: bb.player.name, position: bb.player.position, rating: bb.player.rating,
+        club: bb.player.club, age: bb.player.age, value: roundUpTo250k(winningBid), wage: bb.player.wage,
+      };
+      const next = { ...all, [winnerTeamId]: { ...all[winnerTeamId], [slot.group]: [...all[winnerTeamId][slot.group]] } };
+      next[winnerTeamId][slot.group][slot.idx] = playerObj;
+      return next;
+    });
+    setTeams((ts) => ts.map((t) => (t.id === winnerTeamId ? { ...t, budget: (t.budget || 0) - roundUpTo250k(winningBid) } : t)));
+    setBlindBids((all) => all.map((b) => (b.id === blindBidId ? { ...b, bids, resolved: true, winner: winnerTeamId, winningBid } : b)));
+    logActivity(`Blind bid resolved: ${teams.find((t) => t.id === winnerTeamId)?.name} won ${bb.player.name} for ${money(winningBid)}.`, "transfer");
+  };
+
+  // Admin override for stragglers — resolves using whichever bids are actually in, once the
+  // deadline's passed and not everyone submitted.
+  const resolveBlindBidNow = (pinAttempt, blindBidId) => {
+    if (pinAttempt !== adminPin) return "Incorrect PIN.";
+    const bb = blindBids.find((b) => b.id === blindBidId);
+    if (!bb) return "Blind bid not found.";
+    if (bb.resolved) return "This has already been resolved.";
+    if (Object.keys(bb.bids).length === 0) return "Nobody's submitted a bid yet.";
+    resolveBlindBidInternal(blindBidId);
     return null;
   };
 
@@ -2750,7 +2806,8 @@ export default function EafcLeagueApp() {
           <DraftTab teams={teams} squads={squads} squadStats={squadStats} myTeamId={myTeamId}
             playerDatabase={playerDatabase} draftState={draftState} draftPicks={draftPicks}
             draftSubmitted={draftSubmitted} updateDraftPick={updateDraftPick} submitDraft={submitDraft}
-            validateDraft={validateDraft} openDraft={openDraft} resolveDraft={resolveDraft} />
+            validateDraft={validateDraft} openDraft={openDraft} resolveDraft={resolveDraft}
+            blindBids={blindBids} submitBlindBid={submitBlindBid} resolveBlindBidNow={resolveBlindBidNow} />
         )}
         {tab === "fixtures" && (
           <FixturesTab teams={teams} fixtures={fixtures} setFixtures={setFixtures} logActivity={logActivity}
@@ -4628,7 +4685,7 @@ function TransferWindowBanner({ transferWindow, transferWindowOpen, nowTick }) {
 
 const DRAFT_SLOTS_UI = 21;
 
-function DraftTab({ teams, squads, squadStats, myTeamId, playerDatabase, draftState, draftPicks, draftSubmitted, updateDraftPick, submitDraft, validateDraft, openDraft, resolveDraft }) {
+function DraftTab({ teams, squads, squadStats, myTeamId, playerDatabase, draftState, draftPicks, draftSubmitted, updateDraftPick, submitDraft, validateDraft, openDraft, resolveDraft, blindBids, submitBlindBid, resolveBlindBidNow }) {
   const [pin, setPin] = useState("");
   const [msg, setMsg] = useState(null);
   const [now, setNow] = useState(Date.now());
@@ -4665,6 +4722,8 @@ function DraftTab({ teams, squads, squadStats, myTeamId, playerDatabase, draftSt
   };
 
   const liveError = myTeamId && !submitted ? validateDraft(myTeamId) : null;
+  const [bidAmounts, setBidAmounts] = useState({}); // blindBidId -> typed amount, kept local until submitted
+  const [bbPin, setBbPin] = useState({}); // blindBidId -> admin pin, for the force-resolve override
 
   const doSubmit = () => {
     const err = submitDraft(myTeamId);
@@ -4676,10 +4735,20 @@ function DraftTab({ teams, squads, squadStats, myTeamId, playerDatabase, draftSt
     setMsg(err ? { text: err, tone: "red" } : { text: "Draft opened — 7 days on the clock.", tone: "green" });
   };
   const doResolve = () => {
-    if (!window.confirm("Resolve the draft now? Uncontested picks sign instantly and conflict auctions start immediately. This can't be undone.")) return;
+    if (!window.confirm("Resolve the draft now? Uncontested picks sign instantly, and anyone with a conflict goes to a blind bid. This can't be undone.")) return;
     const err = resolveDraft(pin);
     setPin("");
-    setMsg(err ? { text: err, tone: "red" } : { text: "Draft resolved — check Transfers for any conflict auctions.", tone: "green" });
+    setMsg(err ? { text: err, tone: "red" } : { text: "Draft resolved — check below for any blind bids that need a bid from you.", tone: "green" });
+  };
+  const doSubmitBid = (bbId) => {
+    const err = submitBlindBid(myTeamId, bbId, bidAmounts[bbId]);
+    setMsg(err ? { text: err, tone: "red" } : { text: "Bid submitted — sealed until everyone's in.", tone: "green" });
+  };
+  const doForceResolve = (bbId) => {
+    if (!window.confirm("Resolve this blind bid now using whichever bids have come in? Anyone who hasn't bid yet is simply left out.")) return;
+    const err = resolveBlindBidNow(bbPin[bbId], bbId);
+    setBbPin((all) => ({ ...all, [bbId]: "" }));
+    setMsg(err ? { text: err, tone: "red" } : { text: "Blind bid resolved.", tone: "green" });
   };
 
   return (
@@ -4760,6 +4829,62 @@ function DraftTab({ teams, squads, squadStats, myTeamId, playerDatabase, draftSt
             )}
           </Panel>
         )
+      )}
+
+      {blindBids.length > 0 && (
+        <Panel style={{ padding: 18 }}>
+          <SectionTitle icon={Swords}>Blind Bids</SectionTitle>
+          <div style={{ color: C.muted, fontSize: 12.5, marginBottom: 14 }}>
+            These players were picked by more than one team in the draft. Everyone involved submits one sealed bid —
+            nobody sees anyone else's amount. The moment everyone's in, the highest bid wins outright.
+          </div>
+          <div className="grid gap-3">
+            {blindBids.map((bb) => {
+              const involved = bb.eligibleTeams.includes(myTeamId);
+              const myBidSubmitted = myTeamId && bb.bids[myTeamId] !== undefined;
+              const bidCount = Object.keys(bb.bids).length;
+              return (
+                <div key={bb.id} style={{ background: C.panelAlt, borderRadius: 8, padding: 12 }}>
+                  <div className="flex items-center justify-between flex-wrap gap-2">
+                    <div>
+                      <b style={{ color: C.text }}>{bb.player.name}</b>{" "}
+                      <span style={{ color: C.muted, fontSize: 12 }}>{bb.player.position} · {bb.player.rating} OVR · {bb.player.club}</span>
+                    </div>
+                    <Pill tone={bb.resolved ? "green" : "gold"}>
+                      {bb.resolved ? `Won by ${teams.find((t) => t.id === bb.winner)?.name} for ${money(bb.winningBid)}` : `${bidCount} / ${bb.eligibleTeams.length} bids in`}
+                    </Pill>
+                  </div>
+                  <div style={{ color: C.muted, fontSize: 11.5, marginTop: 4 }}>
+                    Between: {bb.eligibleTeams.map((id) => teams.find((t) => t.id === id)?.name).join(", ")} — min bid {money(bb.minBid)}
+                  </div>
+                  {!bb.resolved && involved && (
+                    myBidSubmitted ? (
+                      <div style={{ color: C.green, fontSize: 12, marginTop: 8 }}>✓ Your bid's in — sealed until everyone's submitted.</div>
+                    ) : (
+                      <div className="flex items-end gap-2 flex-wrap" style={{ marginTop: 8 }}>
+                        <Field label={`Your bid (£M) — min ${money(bb.minBid)}`}>
+                          <TextInput type="number" step="0.25" value={bidAmounts[bb.id] || ""} onChange={(e) => setBidAmounts((all) => ({ ...all, [bb.id]: e.target.value }))} style={{ width: 130 }} />
+                        </Field>
+                        <Btn size="sm" onClick={() => doSubmitBid(bb.id)}>Submit Sealed Bid</Btn>
+                      </div>
+                    )
+                  )}
+                  {!bb.resolved && !involved && (
+                    <div style={{ color: C.muted, fontSize: 11.5, marginTop: 8, fontStyle: "italic" }}>You're not one of the teams involved in this one.</div>
+                  )}
+                  {!bb.resolved && (
+                    <div className="flex items-end gap-2 flex-wrap" style={{ marginTop: 10, paddingTop: 10, borderTop: `1px solid ${C.border}` }}>
+                      <Field label="Admin PIN (force resolve)">
+                        <TextInput type="password" value={bbPin[bb.id] || ""} onChange={(e) => setBbPin((all) => ({ ...all, [bb.id]: e.target.value }))} style={{ width: 130 }} />
+                      </Field>
+                      <Btn size="sm" variant="outline" onClick={() => doForceResolve(bb.id)}>Force Resolve Now</Btn>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </Panel>
       )}
     </div>
   );
@@ -6311,7 +6436,7 @@ function SofifaImport({ importPlayerDatabase }) {
         } catch (e) {
           // one club failing shouldn't kill the whole league import — just skip it and keep going
         }
-        await sleep(250); // stay comfortably under Sofifa's 60 requests/minute limit
+        await sleep(1100); // ~54 requests/minute, safely under Sofifa's stated 60/minute limit
       }
       const err = importPlayerDatabase(pin, allPlayers, "merge");
       setPin("");
