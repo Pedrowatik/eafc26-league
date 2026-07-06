@@ -2384,7 +2384,20 @@ function labelsForBand(count, type) {
     if (count === 4) return ["LW", "ST", "ST", "RW"];
     return Array(count).fill("ST");
   }
-  // MID — used for any middle band, whether it's the only midfield line or a DM/AM split
+  if (type === "CDM") {
+    if (count === 1) return ["CDM"];
+    if (count === 2) return ["CDM", "CDM"];
+    if (count === 3) return ["LDM", "CDM", "RDM"];
+    return Array(count).fill("CDM");
+  }
+  if (type === "CAM") {
+    if (count === 1) return ["CAM"];
+    if (count === 2) return ["CAM", "CAM"];
+    if (count === 3) return ["LAM", "CAM", "RAM"];
+    if (count === 4) return ["LAM", "CAM", "CAM", "RAM"];
+    return Array(count).fill("CAM");
+  }
+  // Plain CM — only used when there's a single midfield band (nothing to split into DM/AM)
   if (count === 1) return ["CDM"];
   if (count === 2) return ["CM", "CM"];
   if (count === 3) return ["CM", "CM", "CM"];
@@ -2397,10 +2410,20 @@ function labelsForBand(count, type) {
 // as the row labels in the Starting Squad table (replacing plain slot numbers).
 function formationPositions(name) {
   const shape = parseFormationShape(name);
+  // Middle bands (everything that isn't the first/DEF or last/FWD line) need to be told apart —
+  // a formation like 4-2-3-1 has two separate midfield lines, not one big undifferentiated block,
+  // so the deeper one should read as CDM and the advanced one as CAM, not both just "CM".
+  const midBandIndices = shape.map((_, i) => i).filter((i) => i !== 0 && i !== shape.length - 1);
   const labels = ["GK"];
   shape.forEach((count, i) => {
-    const type = i === 0 ? "DEF" : i === shape.length - 1 ? "FWD" : "MID";
-    labels.push(...labelsForBand(count, type));
+    if (i === 0) { labels.push(...labelsForBand(count, "DEF")); return; }
+    if (i === shape.length - 1) { labels.push(...labelsForBand(count, "FWD")); return; }
+    const midPos = midBandIndices.indexOf(i);
+    const totalMidBands = midBandIndices.length;
+    let subtype = "CM";
+    if (totalMidBands === 2) subtype = midPos === 0 ? "CDM" : "CAM";
+    else if (totalMidBands >= 3) subtype = midPos === 0 ? "CDM" : midPos === totalMidBands - 1 ? "CAM" : "CM";
+    labels.push(...labelsForBand(count, subtype));
   });
   return labels;
 }
