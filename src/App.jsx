@@ -6047,6 +6047,7 @@ function SofifaImport({ importPlayerDatabase }) {
   const [msg, setMsg] = useState(null);
 
   const [progress, setProgress] = useState(null); // { current, total, label }
+  const [rawSample, setRawSample] = useState(null); // temporary debug: raw first player from Sofifa, before our mapping
   const busy = progress !== null;
 
   const loadData = async () => {
@@ -6086,6 +6087,7 @@ function SofifaImport({ importPlayerDatabase }) {
     setMsg(null);
     try {
       const team = await sofifaFetch(`/team/${selected.id}/${roster}`);
+      if (team.players && team.players[0]) setRawSample(team.players[0]);
       const players = (team.players || []).map((p) => mapSofifaPlayer(p, team.name));
       const err = importPlayerDatabase(pin, players, "merge");
       setPin("");
@@ -6182,6 +6184,16 @@ function SofifaImport({ importPlayerDatabase }) {
       {msg && (
         <div className="flex items-center gap-2" style={{ marginTop: 10, color: msg.tone === "green" ? C.green : C.red, fontSize: 12.5 }}>
           {msg.tone === "green" ? <CheckCircle2 size={14} /> : <AlertTriangle size={14} />} {msg.text}
+        </div>
+      )}
+      {rawSample && (
+        <div style={{ marginTop: 14, background: C.panelAlt, borderRadius: 8, padding: 12 }}>
+          <div style={{ color: C.gold, fontWeight: 700, fontSize: 12, marginBottom: 6 }}>
+            Debug: raw data for the first player Sofifa actually returned (temporary — copy this to Claude if the import isn't working)
+          </div>
+          <pre style={{ color: C.text, fontSize: 11, whiteSpace: "pre-wrap", wordBreak: "break-word", margin: 0 }}>
+            {JSON.stringify(rawSample, null, 2)}
+          </pre>
         </div>
       )}
     </div>
