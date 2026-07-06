@@ -157,6 +157,13 @@ const AUCTIONS_STORAGE_KEY = "eafc26-auctions-v1";
 const TRANSFER_LISTINGS_STORAGE_KEY = "eafc26-transfer-listings-v1";
 const WANTED_LISTINGS_STORAGE_KEY = "eafc26-wanted-listings-v1";
 const teamKeyFor = (teamId) => `eafc26-team-${teamId}-v1`;
+// The draft is specifically designed for every team to edit their own picks at the same time —
+// exactly the pattern that's caused every previous "shared blob" bug, so it gets the same per-team
+// isolation as squads/teams. Player database gets its own single key too, merge-based (like chat),
+// since concurrent re-imports should only ever add/update players, never risk silently dropping ones
+// that aren't in whichever snapshot happens to save last.
+const draftKeyFor = (teamId) => `eafc26-draft-${teamId}-v1`;
+const PLAYERDB_STORAGE_KEY = "eafc26-player-database-v1";
 
 // Chat and private messages are append-only — merging by id (rather than replacing the whole
 // array) means an incoming sync can only ever add messages, never accidentally erase one that's
@@ -587,6 +594,8 @@ export default function EafcLeagueApp() {
   const knownTransferListingsSavedAtRef = useRef(0);
   const knownWantedListingsSavedAtRef = useRef(0);
   const knownTeamSavedAtRef = useRef(new Map()); // per-team: teamId -> savedAt
+  const knownPlayerDbSavedAtRef = useRef(0);
+  const knownDraftSavedAtRef = useRef(new Map()); // per-team: teamId -> savedAt
   const savingRef = useRef(false);
   const dmSavingRef = useRef(false);
   const chatSavingRef = useRef(false);
@@ -595,6 +604,8 @@ export default function EafcLeagueApp() {
   const transferListingsSavingRef = useRef(false);
   const wantedListingsSavingRef = useRef(false);
   const teamSavingRef = useRef(false);
+  const playerDbSavingRef = useRef(false);
+  const draftSavingRef = useRef(false);
 
   const applyRemoteData = useCallback((data) => {
     if (data.transfers) setTransfers(data.transfers);
@@ -605,12 +616,9 @@ export default function EafcLeagueApp() {
     if (data.season) setSeason(data.season);
     if (data.seasonHistory) setSeasonHistory(data.seasonHistory);
     if (data.activity) setActivity(data.activity);
-    if (data.playerDatabase) setPlayerDatabase(data.playerDatabase);
     if (data.injuries) setInjuries(data.injuries);
     if (data.teamLockOverride !== undefined) setTeamLockOverride(data.teamLockOverride);
     if (data.draftState) setDraftState(data.draftState);
-    if (data.draftPicks) setDraftPicks(data.draftPicks);
-    if (data.draftSubmitted) setDraftSubmitted(data.draftSubmitted);
     if (data.blindBids) setBlindBids(data.blindBids);
     if (data.transferWindow) setTransferWindow(data.transferWindow);
     if (data.swapsUsed) setSwapsUsed(data.swapsUsed);
@@ -627,6 +635,9 @@ export default function EafcLeagueApp() {
       let legacyAuctionsForMigration = null;
       let legacyTransferListingsForMigration = null;
       let legacyWantedListingsForMigration = null;
+      let legacyPlayerDbForMigration = null;
+      let legacyDraftPicksForMigration = null;
+      let legacyDraftSubmittedForMigration = null;
       let teamIdsForSquadLoad = defaultTeams().map((t) => t.id);
       try {
         const res = await storage.get(STORAGE_KEY, true);
@@ -638,6 +649,9 @@ export default function EafcLeagueApp() {
           legacyAuctionsForMigration = data.auctions || null;
           legacyTransferListingsForMigration = data.transferListings || null;
           legacyWantedListingsForMigration = data.wantedListings || null;
+          legacyPlayerDbForMigration = data.playerDatabase || null;
+          legacyDraftPicksForMigration = data.draftPicks || null;
+          legacyDraftSubmittedForMigration = data.draftSubmitted || null;
           if (data.teams && data.teams.length) teamIdsForSquadLoad = data.teams.map((t) => t.id);
           knownSavedAtRef.current = data.savedAt || Date.now();
           setLastSyncedAt(knownSavedAtRef.current);
@@ -668,6 +682,47 @@ export default function EafcLeagueApp() {
         setSquads(loadedSquads);
       } catch (e) {
         // best effort — whatever the initial default state was will remain
+      }
+      // Player database loads from its own key, merged with anything from the old shared blob
+      // (so nobody's imports are lost on the first load under this new version).
+      try {
+        const pdbRes = await storage.get(PLAYERDB_STORAGE_KEY, true);
+        if (pdbRes && pdbRes.value) {
+          const pdbData = JSON.parse(pdbRes.value);
+          setPlayerDatabase(pdbData.players || []);
+          knownPlayerDbSavedAtRef.current = pdbData.savedAt || Date.now();
+        } else if (legacyPlayerDbForMigration) {
+          setPlayerDatabase(legacyPlayerDbForMigration);
+        }
+      } catch (e) {
+        if (legacyPlayerDbForMigration) setPlayerDatabase(legacyPlayerDbForMigration);
+      }
+      // Each team's own draft picks + submitted flag live under their own key too — the draft is
+      // specifically designed for everyone to edit their own picks at the same time.
+      try {
+        const loadedPicks = {};
+        const loadedSubmitted = {};
+        await Promise.all(teamIdsForSquadLoad.map(async (teamId) => {
+          try {
+            const dres = await storage.get(draftKeyFor(teamId), true);
+            if (dres && dres.value) {
+              const ddata = JSON.parse(dres.value);
+              loadedPicks[teamId] = ddata.picks || (legacyDraftPicksForMigration && legacyDraftPicksForMigration[teamId]) || [];
+              loadedSubmitted[teamId] = !!ddata.submitted;
+              knownDraftSavedAtRef.current.set(teamId, ddata.savedAt || Date.now());
+              return;
+            }
+          } catch (e) {
+            // no dedicated draft key yet for this team — fall through to migration below
+          }
+          loadedPicks[teamId] = (legacyDraftPicksForMigration && legacyDraftPicksForMigration[teamId]) || [];
+          loadedSubmitted[teamId] = !!(legacyDraftSubmittedForMigration && legacyDraftSubmittedForMigration[teamId]);
+          knownDraftSavedAtRef.current.set(teamId, 0);
+        }));
+        setDraftPicks(loadedPicks);
+        setDraftSubmitted(loadedSubmitted);
+      } catch (e) {
+        // best effort
       }
       // Each team's own record (name, manager, formation, password, etc.) now lives under its own
       // key too — same reasoning as squads, since everyone tends to be editing their own team's
@@ -798,7 +853,7 @@ export default function EafcLeagueApp() {
         const savedAt = Date.now();
         await storage.set(
           STORAGE_KEY,
-          JSON.stringify({ transfers, fixtures, prizes, events, adminPin, season, seasonHistory, activity, playerDatabase, injuries, teamLockOverride, draftState, draftPicks, draftSubmitted, blindBids, cardTally, suspensions, transferWindow, swapsUsed, swapOffers, savedAt }),
+          JSON.stringify({ transfers, fixtures, prizes, events, adminPin, season, seasonHistory, activity, injuries, teamLockOverride, draftState, blindBids, cardTally, suspensions, transferWindow, swapsUsed, swapOffers, savedAt }),
           true
         );
         knownSavedAtRef.current = savedAt;
@@ -811,7 +866,7 @@ export default function EafcLeagueApp() {
       }
     }, 300);
     return () => clearTimeout(t);
-  }, [transfers, fixtures, prizes, events, adminPin, season, seasonHistory, activity, playerDatabase, injuries, teamLockOverride, draftState, draftPicks, draftSubmitted, blindBids, cardTally, suspensions, transferWindow, swapsUsed, swapOffers, loaded]);
+  }, [transfers, fixtures, prizes, events, adminPin, season, seasonHistory, activity, injuries, teamLockOverride, draftState, blindBids, cardTally, suspensions, transferWindow, swapsUsed, swapOffers, loaded]);
 
   // Private messages save to their own separate key, on their own quick timer — this is what
   // actually stops a message from getting silently erased if someone else's browser (with a
@@ -979,6 +1034,146 @@ export default function EafcLeagueApp() {
           if (remoteSavedAt > known && !teamSavingRef.current && data.team) {
             setTeams((all) => all.map((t) => (t.id === team.id ? { ...t, ...data.team } : t)));
             knownTeamSavedAtRef.current.set(team.id, remoteSavedAt);
+          }
+        } catch (e) {
+          // ignore malformed payloads
+        }
+      })
+    );
+    return () => unsubscribers.forEach((unsub) => unsub && unsub());
+  }, [loaded, teams]);
+
+  // Player database saves to its own key, merging incoming updates by name+club rather than
+  // replacing wholesale — a concurrent re-import from another admin session (or a slightly-behind
+  // sync) should only ever add/update players, never silently drop ones that aren't in whichever
+  // snapshot happens to save last. This is what was actually causing whole clubs to vanish.
+  const mergePlayersByKey = (local, incoming) => {
+    const keyOf = (p) => `${(p.name || "").toLowerCase()}::${(p.club || "").toLowerCase()}`;
+    const byKey = new Map(local.map((p) => [keyOf(p), p]));
+    (incoming || []).forEach((p) => byKey.set(keyOf(p), p));
+    return Array.from(byKey.values());
+  };
+
+  useEffect(() => {
+    if (!loaded) return;
+    playerDbSavingRef.current = true;
+    const t = setTimeout(async () => {
+      try {
+        const savedAt = Date.now();
+        await storage.set(PLAYERDB_STORAGE_KEY, JSON.stringify({ players: playerDatabase, savedAt }), true);
+        knownPlayerDbSavedAtRef.current = savedAt;
+      } catch (e) {
+        // best effort
+      } finally {
+        playerDbSavingRef.current = false;
+      }
+    }, 300);
+    return () => clearTimeout(t);
+  }, [playerDatabase, loaded]);
+
+  const pullLatestPlayerDb = useCallback(async () => {
+    if (playerDbSavingRef.current) return;
+    try {
+      const res = await storage.get(PLAYERDB_STORAGE_KEY, true);
+      if (res && res.value) {
+        const data = JSON.parse(res.value);
+        const remoteSavedAt = data.savedAt || 0;
+        if (remoteSavedAt > knownPlayerDbSavedAtRef.current) {
+          setPlayerDatabase((local) => mergePlayersByKey(local, data.players));
+          knownPlayerDbSavedAtRef.current = remoteSavedAt;
+        }
+      }
+    } catch (e) {
+      // best effort
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!loaded) return;
+    const t = setInterval(() => pullLatestPlayerDb(), SYNC_POLL_MS);
+    return () => clearInterval(t);
+  }, [loaded, pullLatestPlayerDb]);
+
+  useEffect(() => {
+    if (!loaded) return;
+    const unsubscribe = subscribeToKey(PLAYERDB_STORAGE_KEY, (row) => {
+      if (!row || !row.value) return;
+      try {
+        const data = JSON.parse(row.value);
+        const remoteSavedAt = data.savedAt || 0;
+        if (remoteSavedAt > knownPlayerDbSavedAtRef.current && !playerDbSavingRef.current) {
+          setPlayerDatabase((local) => mergePlayersByKey(local, data.players));
+          knownPlayerDbSavedAtRef.current = remoteSavedAt;
+        }
+      } catch (e) {
+        // ignore malformed payloads
+      }
+    });
+    return unsubscribe;
+  }, [loaded]);
+
+  // Draft picks + submitted flag, per team — same reasoning as squads: every team edits their own
+  // picks at the same time, so this needs the same per-team isolation, not one shared object.
+  useEffect(() => {
+    if (!loaded) return;
+    draftSavingRef.current = true;
+    const t = setTimeout(async () => {
+      try {
+        const savedAt = Date.now();
+        await Promise.all(teams.map((team) =>
+          storage.set(draftKeyFor(team.id), JSON.stringify({
+            picks: draftPicks[team.id] || [], submitted: !!draftSubmitted[team.id], savedAt,
+          }), true)
+            .then(() => knownDraftSavedAtRef.current.set(team.id, savedAt))
+            .catch(() => { /* best effort per team */ })
+        ));
+      } finally {
+        draftSavingRef.current = false;
+      }
+    }, 300);
+    return () => clearTimeout(t);
+  }, [draftPicks, draftSubmitted, teams, loaded]);
+
+  const pullLatestDraft = useCallback(async () => {
+    if (draftSavingRef.current) return;
+    await Promise.all(teams.map(async (team) => {
+      try {
+        const res = await storage.get(draftKeyFor(team.id), true);
+        if (res && res.value) {
+          const data = JSON.parse(res.value);
+          const remoteSavedAt = data.savedAt || 0;
+          const known = knownDraftSavedAtRef.current.get(team.id) || 0;
+          if (remoteSavedAt > known) {
+            setDraftPicks((all) => ({ ...all, [team.id]: data.picks || [] }));
+            setDraftSubmitted((all) => ({ ...all, [team.id]: !!data.submitted }));
+            knownDraftSavedAtRef.current.set(team.id, remoteSavedAt);
+          }
+        }
+      } catch (e) {
+        // best effort
+      }
+    }));
+  }, [teams]);
+
+  useEffect(() => {
+    if (!loaded) return;
+    const t = setInterval(() => pullLatestDraft(), SYNC_POLL_MS);
+    return () => clearInterval(t);
+  }, [loaded, pullLatestDraft]);
+
+  useEffect(() => {
+    if (!loaded) return;
+    const unsubscribers = teams.map((team) =>
+      subscribeToKey(draftKeyFor(team.id), (row) => {
+        if (!row || !row.value) return;
+        try {
+          const data = JSON.parse(row.value);
+          const remoteSavedAt = data.savedAt || 0;
+          const known = knownDraftSavedAtRef.current.get(team.id) || 0;
+          if (remoteSavedAt > known && !draftSavingRef.current) {
+            setDraftPicks((all) => ({ ...all, [team.id]: data.picks || [] }));
+            setDraftSubmitted((all) => ({ ...all, [team.id]: !!data.submitted }));
+            knownDraftSavedAtRef.current.set(team.id, remoteSavedAt);
           }
         } catch (e) {
           // ignore malformed payloads
@@ -1316,12 +1511,13 @@ export default function EafcLeagueApp() {
       // Re-check against the freshest possible data right before actually claiming — closes most of
       // the window where two people could both see "unclaimed" at the same moment and both try to
       // claim it, since our local copy of teams could be a few seconds (or longer) out of date.
+      // This checks the team's own dedicated key (teams are isolated per-team, not in the old
+      // combined blob — checking the wrong place here meant this safety check was a no-op).
       try {
-        const fresh = await storage.get(STORAGE_KEY, true);
+        const fresh = await storage.get(teamKeyFor(teamId), true);
         if (fresh && fresh.value) {
           const freshData = JSON.parse(fresh.value);
-          const freshTeam = (freshData.teams || []).find((t) => t.id === teamId);
-          if (freshTeam && freshTeam.password) {
+          if (freshData.team && freshData.team.password) {
             return "Someone just claimed this team a moment ago — pick a different one, or check with them if it's meant to be you.";
           }
         }
