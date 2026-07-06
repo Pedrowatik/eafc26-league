@@ -158,6 +158,7 @@ function mergeMessagesById(local, incoming) {
   return Array.from(byId.values()).sort((a, b) => a.time - b.time);
 }
 const MY_TEAM_KEY = "eafc26-my-team"; // personal, per-device — not shared
+const TAB_KEY = "eafc26-active-tab"; // personal, per-device — remembers which tab you were on
 const CHAT_SEEN_KEY = "eafc26-chat-last-seen"; // personal — for the unread-mentions badge
 const DM_SEEN_KEY = "eafc26-dm-last-seen"; // personal — per-conversation read timestamps
 const NIGHTLY_BACKUP_PREFIX = "eafc26-nightly-backup-"; // written by the scheduled Edge Function
@@ -357,7 +358,6 @@ export default function EafcLeagueApp() {
   const savingRef = useRef(false);
   const dmSavingRef = useRef(false);
   const chatSavingRef = useRef(false);
-  useEffect(() => { savingRef.current = saveState === "saving"; }, [saveState]);
 
   const applyRemoteData = useCallback((data) => {
     if (data.teams) setTeams(data.teams);
@@ -404,6 +404,12 @@ export default function EafcLeagueApp() {
         // no personal team picked yet
       }
       try {
+        const savedTab = await storage.get(TAB_KEY, false);
+        if (savedTab && savedTab.value) setTab(savedTab.value);
+      } catch (e) {
+        // no tab remembered yet — default to dashboard
+      }
+      try {
         const seen = await storage.get(CHAT_SEEN_KEY, false);
         if (seen && seen.value) setChatLastSeen(Number(seen.value) || 0);
       } catch (e) {
@@ -439,9 +445,18 @@ export default function EafcLeagueApp() {
     })();
   }, [applyRemoteData]);
 
+  // Remember the active tab per device, so a refresh lands you back where you were instead of
+  // bouncing to Dashboard. Purely personal — no collision risk with anyone else.
+  useEffect(() => {
+    if (!loaded) return;
+    storage.set(TAB_KEY, tab, false).catch(() => { /* best effort */ });
+  }, [tab, loaded]);
+
   // autosave (debounced)
   useEffect(() => {
     if (!loaded) return;
+    savingRef.current = true; // set immediately, synchronously — no extra render-cycle gap where an
+    // incoming sync could slip through and overwrite a just-made change before this protection kicks in
     setSaveState("saving");
     const t = setTimeout(async () => {
       try {
@@ -456,8 +471,10 @@ export default function EafcLeagueApp() {
         setSaveState("saved");
       } catch (e) {
         setSaveState("idle");
+      } finally {
+        savingRef.current = false;
       }
-    }, 500);
+    }, 300);
     return () => clearTimeout(t);
   }, [teams, squads, transfers, fixtures, prizes, events, auctions, adminPin, season, seasonHistory, activity, playerDatabase, injuries, teamLockOverride, cardTally, suspensions, transferListings, wantedListings, transferWindow, swapsUsed, swapOffers, loaded]);
 
@@ -647,6 +664,21 @@ export default function EafcLeagueApp() {
     if (!team) return "Team not found.";
     if (!team.password) {
       if (!passwordAttempt || passwordAttempt.length < 3) return "Choose a password (at least 3 characters) to claim this team.";
+      // Re-check against the freshest possible data right before actually claiming — closes most of
+      // the window where two people could both see "unclaimed" at the same moment and both try to
+      // claim it, since our local copy of teams could be a few seconds (or longer) out of date.
+      try {
+        const fresh = await storage.get(STORAGE_KEY, true);
+        if (fresh && fresh.value) {
+          const freshData = JSON.parse(fresh.value);
+          const freshTeam = (freshData.teams || []).find((t) => t.id === teamId);
+          if (freshTeam && freshTeam.password) {
+            return "Someone just claimed this team a moment ago — pick a different one, or check with them if it's meant to be you.";
+          }
+        }
+      } catch (e) {
+        // if the recheck itself fails, fall through rather than unfairly blocking a genuine claim
+      }
       setTeams((ts) => ts.map((t) => (t.id === teamId ? { ...t, password: passwordAttempt } : t)));
     } else if (passwordAttempt !== team.password) {
       return "Incorrect password for that team.";
@@ -725,6 +757,28 @@ export default function EafcLeagueApp() {
       setMentionToasts((all) => [...all, ...fresh.map((m) => ({ id: uid(), text: m.text, author: teamById[m.fromTeamId]?.name || "Someone", isDm: true, fromTeamId: m.fromTeamId }))]);
     }
   }, [privateMessages, loaded, myTeamId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Flash a toast the moment your team gets outbid on an open auction — same pattern as above.
+  const prevAuctionLeaderRef = useRef(null);
+  useEffect(() => {
+    if (!loaded) return;
+    if (prevAuctionLeaderRef.current === null) {
+      prevAuctionLeaderRef.current = new Map(auctions.map((a) => [a.id, a.currentBidder]));
+      return;
+    }
+    if (myTeamId) {
+      auctions.forEach((a) => {
+        const prevLeader = prevAuctionLeaderRef.current.get(a.id);
+        if (a.status === "open" && prevLeader === myTeamId && a.currentBidder && a.currentBidder !== myTeamId) {
+          setMentionToasts((all) => [...all, {
+            id: uid(), isOutbid: true, auctionId: a.id,
+            text: `${teamById[a.currentBidder]?.name || "Someone"} bid ${money(a.currentBid)} on ${a.player.name}`,
+          }]);
+        }
+      });
+    }
+    prevAuctionLeaderRef.current = new Map(auctions.map((a) => [a.id, a.currentBidder]));
+  }, [auctions, loaded, myTeamId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (mentionToasts.length === 0) return;
@@ -1892,16 +1946,19 @@ export default function EafcLeagueApp() {
         <div style={{ position: "fixed", bottom: 20, right: 20, zIndex: 100, display: "grid", gap: 10, maxWidth: 320 }}>
           {mentionToasts.map((t) => (
             <div key={t.id} className="flex items-start gap-2" style={{
-              background: "#0d1a2e", border: `1px solid ${C.gold}`, borderRadius: 8, padding: "12px 14px",
+              background: "#0d1a2e", border: `1px solid ${t.isOutbid ? C.red : C.gold}`, borderRadius: 8, padding: "12px 14px",
               boxShadow: "0 12px 32px rgba(0,0,0,0.5)", cursor: "pointer",
             }} onClick={() => {
               if (t.isDm) { setTab("messages"); markConversationSeen(conversationIdFor(myTeamId, t.fromTeamId)); }
+              else if (t.isOutbid) { setTab("transfers"); }
               else { setTab("chat"); markChatSeen(); }
               dismissToast(t.id);
             }}>
-              <MessageCircle size={16} color={C.gold} style={{ marginTop: 2, flexShrink: 0 }} />
+              {t.isOutbid ? <AlertTriangle size={16} color={C.red} style={{ marginTop: 2, flexShrink: 0 }} /> : <MessageCircle size={16} color={C.gold} style={{ marginTop: 2, flexShrink: 0 }} />}
               <div style={{ flex: 1 }}>
-                <div style={{ color: C.gold, fontWeight: 700, fontSize: 12.5 }}>{t.author} {t.isDm ? "sent you a message" : "mentioned your team"}</div>
+                <div style={{ color: t.isOutbid ? C.red : C.gold, fontWeight: 700, fontSize: 12.5 }}>
+                  {t.isOutbid ? "You've been outbid!" : `${t.author} ${t.isDm ? "sent you a message" : "mentioned your team"}`}
+                </div>
                 <div style={{ color: C.text, fontSize: 12.5 }}>{t.text}</div>
               </div>
               <button onClick={(e) => { e.stopPropagation(); dismissToast(t.id); }} style={{ background: "transparent", border: "none", cursor: "pointer", color: C.muted, flexShrink: 0 }}>
