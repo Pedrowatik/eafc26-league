@@ -1376,7 +1376,7 @@ export default function EafcLeagueApp() {
       const spent = boughtFromOthers.reduce((s, tx) => s + Number(tx.price || 0), 0);
       const tax = boughtFromOthers.reduce((s, tx) => s + Number(tx.tax || 0), 0);
       const received = soldToOthersOrFA
-        .filter((tx) => teamById[tx.to]) // only real teams pay the seller
+        .filter((tx) => teamById[tx.to] && !tx.sellerAlreadyPaidDirectly) // only real teams pay the seller; skip ones already settled directly
         .reduce((s, tx) => s + Number(tx.price || 0), 0);
 
       // Live auctions this team is currently winning aren't final yet, but the money and wage cost
@@ -1599,6 +1599,9 @@ export default function EafcLeagueApp() {
       sellerProcessed: instant,
       buyerProcessed: instant,
       instant,
+      // Set when the seller was already paid directly (competitive auction instant-credit) — stops
+      // budgetStats from also crediting them again through the normal transfer-log aggregation.
+      sellerAlreadyPaidDirectly: !!options.sellerAlreadyPaidDirectly,
     };
     setTransfers((tx) => [record, ...tx]);
 
@@ -1702,6 +1705,8 @@ export default function EafcLeagueApp() {
   const placeBid = (auctionId, teamId, amount) => {
     const amt = Number(amount);
     let err = null;
+    let earlyCreditTrigger = null; // set below if this bid is the one that triggers instant seller relief
+
     setAuctions((all) => all.map((a) => {
       if (a.id !== auctionId) return a;
       if (a.status === "pending") { err = `Waiting on ${teamById[a.seller]?.name || "the seller"} to accept the opening bid before anyone else can bid.`; return a; }
@@ -1713,6 +1718,15 @@ export default function EafcLeagueApp() {
       const required = a.currentBid > 0 ? a.currentBid + 0.25 : Math.max(a.minBid, 0.25);
       if (!amt || amt < required - 0.001) { err = `Bid must be at least ${money(required)} (£250k above the current bid).`; return a; }
       const bidsByTeam = { ...a.bidsByTeam, [teamId]: Math.max(a.bidsByTeam[teamId] || 0, amt) };
+
+      // Once a SECOND distinct team bids on a real team's player, the sale is clearly happening —
+      // credit the seller and relieve their wage bill right away rather than making them wait,
+      // and pull the player out of their squad into limbo until the auction actually concludes.
+      const shouldTriggerEarlyCredit = teamById[a.seller] && Object.keys(bidsByTeam).length >= 2 && !a.sellerCredited;
+      if (shouldTriggerEarlyCredit) {
+        earlyCreditTrigger = { sellerId: a.seller, playerName: a.player.name, amount: amt };
+      }
+
       return {
         ...a,
         currentBid: amt,
@@ -1720,8 +1734,28 @@ export default function EafcLeagueApp() {
         bidsByTeam,
         history: [{ id: uid(), team: teamId, amount: amt, time: Date.now() }, ...a.history],
         deadline: Date.now() + AUCTION_DURATION_MS, // every new highest bid resets the 24h clock
+        sellerCredited: a.sellerCredited || shouldTriggerEarlyCredit,
+        sellerCreditAmount: shouldTriggerEarlyCredit ? amt : a.sellerCreditAmount,
       };
     }));
+
+    if (earlyCreditTrigger) {
+      const { sellerId, playerName, amount: creditAmount } = earlyCreditTrigger;
+      setTeams((ts) => ts.map((t) => (t.id === sellerId ? { ...t, budget: (t.budget || 0) + creditAmount } : t)));
+      setSquads((all) => {
+        const sq = all[sellerId];
+        if (!sq) return all;
+        return {
+          ...all,
+          [sellerId]: {
+            starters: sq.starters.map((p) => (p && p.name === playerName ? null : p)),
+            reserves: sq.reserves.map((p) => (p && p.name === playerName ? null : p)),
+          },
+        };
+      });
+      logActivity(`${teamById[sellerId]?.name || sellerId} credited ${money(creditAmount)} early — competing bids on ${playerName}, holding until the auction ends`, "transfer");
+    }
+
     return err;
   };
 
@@ -1807,14 +1841,33 @@ export default function EafcLeagueApp() {
     const winner = auction.currentBidder;
     const winningBid = auction.currentBid;
 
-    // Winning bid: normal transfer (moves the player, charges bid + tax) — this already logs
-    // a "Transfer logged" activity entry, so no need for a separate auction-specific one.
-    logTransfer({
-      date: todayISO(), from: auction.seller, to: winner, name: auction.player.name,
-      position: auction.player.position, rating: auction.player.rating, club: auction.player.club,
-      age: auction.player.age, wage: auction.player.wage, price: winningBid,
-      notes: `Won auction for ${auction.player.name}`,
-    });
+    if (auction.sellerCredited) {
+      // Seller was already paid the amount at the moment the 2nd bidder joined — if the price rose
+      // further after that, top up just the difference now. Wages were already relieved back then
+      // and don't change regardless of the final price. Both sides settle instantly here, since the
+      // player's already been sitting in limbo since that 2nd bid — no reason to make the buyer wait
+      // a further 24h on top of the auction's own clock.
+      const alreadyCredited = auction.sellerCreditAmount || 0;
+      const topUp = winningBid - alreadyCredited;
+      if (topUp > 0.0001) {
+        setTeams((ts) => ts.map((t) => (t.id === auction.seller ? { ...t, budget: (t.budget || 0) + topUp } : t)));
+      }
+      logTransfer({
+        date: todayISO(), from: auction.seller, to: winner, name: auction.player.name,
+        position: auction.player.position, rating: auction.player.rating, club: auction.player.club,
+        age: auction.player.age, wage: auction.player.wage, price: winningBid,
+        notes: `Won auction for ${auction.player.name}`,
+      }, { instant: true, sellerAlreadyPaidDirectly: true });
+    } else {
+      // Single-bidder auction — unchanged, normal staggered ratification (seller credited in 12h,
+      // buyer's signing ratified in 24h).
+      logTransfer({
+        date: todayISO(), from: auction.seller, to: winner, name: auction.player.name,
+        position: auction.player.position, rating: auction.player.rating, club: auction.player.club,
+        age: auction.player.age, wage: auction.player.wage, price: winningBid,
+        notes: `Won auction for ${auction.player.name}`,
+      });
+    }
 
     // Every other bidder pays 10% tax (min £0.25M) on their own highest bid, no player received.
     // This tax-only charge feeds straight into the prize pool once ratified, same as any other transfer tax.
@@ -3759,6 +3812,11 @@ function AuctionCard({ auction, teams, now, placeBid, finalizeAuction, deleteBid
           <div style={{ color: C.muted, fontSize: 11.5 }}>
             {auction.player.club}{auction.player.club ? " · " : ""}Selling: {auction.seller === "FA" ? "Non OCM" : teams.find((t) => t.id === auction.seller)?.name}
           </div>
+          {auction.sellerCredited && (
+            <div style={{ color: C.green, fontSize: 11, fontWeight: 700, marginTop: 2 }}>
+              ✓ Seller already paid {money(auction.sellerCreditAmount)} — player is in limbo until this ends
+            </div>
+          )}
         </div>
         <Pill tone={ended ? "red" : "gold"}>{formatCountdown(remaining)}</Pill>
       </div>
