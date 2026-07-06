@@ -276,6 +276,54 @@ function PlayerAutocomplete({ value, onChange, onSelect, playerDatabase, placeho
   );
 }
 
+// A simple, reliable click-to-select dropdown for club names — same pattern as PlayerAutocomplete
+// above. Deliberately not using a native <input list>/<datalist>, since that combination has known
+// cross-browser quirks with fully React-controlled inputs where a selection doesn't stick.
+function ClubAutocomplete({ value, onChange, options, placeholder }) {
+  const [open, setOpen] = useState(false);
+  const boxRef = useRef(null);
+
+  const matches = useMemo(() => {
+    const q = (value || "").trim().toLowerCase();
+    if (!options || options.length === 0) return [];
+    const filtered = q ? options.filter((c) => c.toLowerCase().includes(q)) : options;
+    return filtered.slice(0, 8);
+  }, [value, options]);
+
+  useEffect(() => {
+    const onClickOutside = (e) => {
+      if (boxRef.current && !boxRef.current.contains(e.target)) setOpen(false);
+    };
+    document.addEventListener("mousedown", onClickOutside);
+    return () => document.removeEventListener("mousedown", onClickOutside);
+  }, []);
+
+  return (
+    <div ref={boxRef} style={{ position: "relative" }}>
+      <TextInput
+        placeholder={placeholder}
+        value={value}
+        onChange={(e) => { onChange(e.target.value); setOpen(true); }}
+        onFocus={() => setOpen(true)}
+      />
+      {open && matches.length > 0 && (
+        <div style={{
+          position: "absolute", top: "calc(100% + 4px)", left: 0, right: 0, zIndex: 20,
+          background: C.panel, border: `1px solid ${C.border}`, borderRadius: 8,
+          maxHeight: 220, overflowY: "auto", boxShadow: "0 8px 20px rgba(0,0,0,0.4)",
+        }}>
+          {matches.map((c) => (
+            <button key={c} onClick={() => { onChange(c); setOpen(false); }}
+              style={{ width: "100%", textAlign: "left", background: "transparent", border: "none", borderBottom: `1px solid ${C.border}33`, padding: "8px 10px", cursor: "pointer", color: C.text, fontSize: 12.5 }}>
+              {c}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function Btn({ children, onClick, variant = "primary", size = "md", icon: Icon, disabled, style, title }) {
   const base = {
     display: "inline-flex", alignItems: "center", gap: 6, justifyContent: "center",
@@ -2622,12 +2670,12 @@ function SquadsTab({ teams, squads, squadStats, renameTeam, setTab, movePlayerTo
           </Field>
           <Field label="Home Club (for Captain eligibility)">
             {activeTeam === myTeamId ? (
-              <>
-                <TextInput list="home-club-options" value={team.homeClub || ""} onChange={(e) => renameTeam(team.id, { homeClub: e.target.value })} placeholder="e.g. Arsenal" />
-                <datalist id="home-club-options">
-                  {clubOptions.map((c) => <option key={c} value={c} />)}
-                </datalist>
-              </>
+              <ClubAutocomplete
+                value={team.homeClub || ""}
+                onChange={(val) => renameTeam(team.id, { homeClub: val })}
+                options={clubOptions}
+                placeholder="e.g. Arsenal"
+              />
             ) : (
               <div style={{ ...inputStyle, opacity: 0.7 }}>{team.homeClub || "Not set"}</div>
             )}
