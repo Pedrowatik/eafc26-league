@@ -356,6 +356,148 @@ function Btn({ children, onClick, variant = "primary", size = "md", icon: Icon, 
 }
 
 // Small "this player is the Club Captain" marker — shown beside their name wherever they appear.
+// Colour-codes a stat 0-99 the way FIFA/EAFC cards do — green for elite, down to red for weak.
+function statColor(v) {
+  const n = Number(v) || 0;
+  if (n >= 85) return "#3ddc84";
+  if (n >= 70) return "#e7c568";
+  if (n >= 55) return "#e0a050";
+  return "#e05a5a";
+}
+
+function StatBar({ label, value }) {
+  if (value == null) return null;
+  const n = Number(value) || 0;
+  return (
+    <div style={{ marginBottom: 8 }}>
+      <div className="flex items-center justify-between" style={{ fontSize: 11, marginBottom: 3 }}>
+        <span style={{ color: C.muted, textTransform: "uppercase", letterSpacing: "0.03em" }}>{label}</span>
+        <span style={{ color: statColor(n), fontWeight: 800 }}>{n}</span>
+      </div>
+      <div style={{ background: `${C.border}55`, borderRadius: 4, height: 6, overflow: "hidden" }}>
+        <div style={{ width: `${Math.min(n, 99)}%`, height: "100%", background: statColor(n), borderRadius: 4 }} />
+      </div>
+    </div>
+  );
+}
+
+const DETAILED_STAT_GROUPS = [
+  { title: "Attacking", keys: [["crossing", "Crossing"], ["finishing", "Finishing"], ["heading", "Heading Acc."], ["shortPassing", "Short Pass"], ["volleys", "Volleys"]] },
+  { title: "Skill", keys: [["dribbling", "Dribbling"], ["curve", "Curve"], ["freeKick", "FK Accuracy"], ["longPassing", "Long Pass"], ["ballControl", "Ball Control"]] },
+  { title: "Movement", keys: [["acceleration", "Acceleration"], ["sprintSpeed", "Sprint Speed"], ["agility", "Agility"], ["reactions", "Reactions"], ["balance", "Balance"]] },
+  { title: "Power", keys: [["shotPower", "Shot Power"], ["jumping", "Jumping"], ["stamina", "Stamina"], ["strength", "Strength"], ["longShots", "Long Shots"]] },
+  { title: "Mentality", keys: [["aggression", "Aggression"], ["interceptions", "Interceptions"], ["positioning", "Positioning"], ["vision", "Vision"], ["penalties", "Penalties"], ["composure", "Composure"]] },
+  { title: "Defending", keys: [["marking", "Marking"], ["standingTackle", "Standing Tackle"], ["slidingTackle", "Sliding Tackle"]] },
+  { title: "Goalkeeping", keys: [["gkDiving", "GK Diving"], ["gkHandling", "GK Handling"], ["gkKicking", "GK Kicking"], ["gkPositioning", "GK Positioning"], ["gkReflexes", "GK Reflexes"]] },
+];
+
+function PlayerStatsModal({ player, onClose }) {
+  if (!player) return null;
+  const mainStats = [
+    ["PAC", player.pac], ["SHO", player.sho], ["PAS", player.pas],
+    ["DRI", player.dri], ["DEF", player.def], ["PHY", player.phy],
+  ].filter(([, v]) => v != null);
+  const hasDetailed = player.detailedStats && Object.values(player.detailedStats).some((v) => v != null);
+  const positions = player.positions && player.positions.length ? player.positions : [player.position];
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.75)", zIndex: 300, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}
+      onClick={onClose}>
+      <div onClick={(e) => e.stopPropagation()} style={{
+        background: "linear-gradient(180deg, rgba(14,26,45,0.98) 0%, rgba(7,15,27,0.98) 100%)",
+        border: `1px solid ${C.gold}55`, borderRadius: 12, padding: 22, maxWidth: 480, width: "100%",
+        maxHeight: "88vh", overflowY: "auto", boxShadow: "0 20px 60px rgba(0,0,0,0.6)",
+      }}>
+        <div className="flex items-start justify-between" style={{ marginBottom: 14 }}>
+          <div>
+            <div className="flex items-center gap-2">
+              {player.isCaptain && <CaptainBadge />}
+              <div style={{ color: "#fff", fontSize: 19, fontWeight: 700 }}>{player.name}</div>
+            </div>
+            <div style={{ color: C.muted, fontSize: 12.5, marginTop: 2 }}>
+              {player.club}{player.age ? ` · ${player.age}y` : ""}
+            </div>
+          </div>
+          <button onClick={onClose} style={{ background: "transparent", border: "none", cursor: "pointer", color: C.muted }}>
+            <X size={18} />
+          </button>
+        </div>
+
+        <div className="flex items-center gap-3 flex-wrap" style={{ marginBottom: 16 }}>
+          <div style={{ background: `${C.gold}22`, border: `1px solid ${C.gold}55`, borderRadius: 8, padding: "6px 12px", textAlign: "center" }}>
+            <div style={{ color: C.gold, fontSize: 22, fontWeight: 800, lineHeight: 1 }}>{player.rating}</div>
+            <div style={{ color: C.muted, fontSize: 9.5, textTransform: "uppercase" }}>Rating</div>
+          </div>
+          {player.potential != null && (
+            <div style={{ background: `${C.border}33`, borderRadius: 8, padding: "6px 12px", textAlign: "center" }}>
+              <div style={{ color: C.text, fontSize: 22, fontWeight: 800, lineHeight: 1 }}>{player.potential}</div>
+              <div style={{ color: C.muted, fontSize: 9.5, textTransform: "uppercase" }}>Potential</div>
+            </div>
+          )}
+          <div className="flex flex-wrap gap-1">
+            {positions.map((pos, i) => (
+              <Pill key={i} tone={i === 0 ? "gold" : "muted"}>{pos}</Pill>
+            ))}
+          </div>
+        </div>
+
+        {mainStats.length > 0 && (
+          <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(120px, 1fr))", marginBottom: 16 }}>
+            {mainStats.map(([label, val]) => <StatBar key={label} label={label} value={val} />)}
+          </div>
+        )}
+
+        {(player.weakFoot || player.skillMoves || player.accelerationType) && (
+          <div className="flex items-center gap-4 flex-wrap" style={{ marginBottom: 16, fontSize: 12 }}>
+            {player.weakFoot && <div><span style={{ color: C.muted }}>Weak Foot </span><span style={{ color: C.gold }}>{"★".repeat(player.weakFoot)}{"☆".repeat(5 - player.weakFoot)}</span></div>}
+            {player.skillMoves && <div><span style={{ color: C.muted }}>Skill Moves </span><span style={{ color: C.gold }}>{"★".repeat(player.skillMoves)}{"☆".repeat(5 - player.skillMoves)}</span></div>}
+            {player.accelerationType && <div><span style={{ color: C.muted }}>Accel. Type </span><span style={{ color: C.text }}>{player.accelerationType}</span></div>}
+          </div>
+        )}
+
+        {player.playStyles && player.playStyles.length > 0 && (
+          <div style={{ marginBottom: 16 }}>
+            <SectionTitle>Playstyles</SectionTitle>
+            <div className="flex flex-wrap gap-1">
+              {player.playStyles.map((ps, i) => <Pill key={i} tone="gold">{ps}</Pill>)}
+            </div>
+          </div>
+        )}
+
+        {player.roles && player.roles.length > 0 && (
+          <div style={{ marginBottom: 16 }}>
+            <SectionTitle>Roles</SectionTitle>
+            <div className="flex flex-wrap gap-1">
+              {player.roles.map((r, i) => <Pill key={i} tone="muted">{r}</Pill>)}
+            </div>
+          </div>
+        )}
+
+        {hasDetailed && (
+          <div className="grid gap-4" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))" }}>
+            {DETAILED_STAT_GROUPS.map((group) => {
+              const entries = group.keys.filter(([k]) => player.detailedStats[k] != null);
+              if (entries.length === 0) return null;
+              return (
+                <div key={group.title}>
+                  <div style={{ color: C.gold, fontSize: 11, fontWeight: 700, textTransform: "uppercase", marginBottom: 8, letterSpacing: "0.04em" }}>{group.title}</div>
+                  {entries.map(([k, label]) => <StatBar key={k} label={label} value={player.detailedStats[k]} />)}
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {!hasDetailed && mainStats.length === 0 && (
+          <div style={{ color: C.muted, fontSize: 12, fontStyle: "italic" }}>
+            No detailed stats available for this player — they were likely added manually or via a pasted table rather than the Sofifa import.
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function CaptainBadge() {
   return (
     <span title="Club Captain" style={{
@@ -416,6 +558,17 @@ export default function EafcLeagueApp() {
   const [dmLastSeen, setDmLastSeen] = useState({}); // personal — { [conversationId]: timestamp }
   const [chatLastSeen, setChatLastSeen] = useState(0); // personal — timestamp of last time this device checked chat
   const [mentionToasts, setMentionToasts] = useState([]); // ephemeral "flash" alerts for @team mentions
+  const [statsModalPlayer, setStatsModalPlayer] = useState(null); // player currently shown in the detail popup
+
+  // Squad entries only carry the basics — enrich with the matching Player Database record (if any)
+  // for the full stats/playstyles/positions breakdown, without losing squad-specific bits like isCaptain.
+  const openPlayerStats = useCallback((basicPlayer) => {
+    if (!basicPlayer) return;
+    const rich = playerDatabase.find((p) => p.name === basicPlayer.name && p.club === basicPlayer.club)
+      || playerDatabase.find((p) => p.name === basicPlayer.name);
+    setStatsModalPlayer({ ...rich, ...basicPlayer });
+  }, [playerDatabase]);
+
   const [myTeamId, setMyTeamId] = useState(null); // personal — which team is "me" on this device
   const [tab, setTab] = useState("dashboard");
   const [loaded, setLoaded] = useState(false);
@@ -2575,7 +2728,7 @@ export default function EafcLeagueApp() {
           <SquadsTab teams={teams} squads={squads} squadStats={squadStats} renameTeam={renameTeam}
             setTab={setTab} movePlayerToGroup={movePlayerToGroup}
             movePlayerToIndex={movePlayerToIndex} myTeamId={myTeamId}
-            signCaptain={signCaptain} playerDatabase={playerDatabase} />
+            signCaptain={signCaptain} playerDatabase={playerDatabase} openPlayerStats={openPlayerStats} />
         )}
         {tab === "budgets" && (
           <BudgetsTab teams={teams} budgetStats={budgetStats} renameTeam={renameTeam} />
@@ -2623,7 +2776,7 @@ export default function EafcLeagueApp() {
           <RulesTab teams={teams} standings={standings} />
         )}
         {tab === "playerdb" && (
-          <PlayerDatabaseTab teams={teams} squads={squads} playerDatabase={playerDatabase} />
+          <PlayerDatabaseTab teams={teams} squads={squads} playerDatabase={playerDatabase} openPlayerStats={openPlayerStats} />
         )}
         {tab === "admin" && (
           <AdminTab teams={teams} squads={squads} myTeamId={myTeamId} playerDatabase={playerDatabase}
@@ -2675,6 +2828,7 @@ export default function EafcLeagueApp() {
           ))}
         </div>
       )}
+      <PlayerStatsModal player={statsModalPlayer} onClose={() => setStatsModalPlayer(null)} />
     </div>
   );
 }
@@ -3201,7 +3355,7 @@ function formationPositions(name) {
   return labels;
 }
 
-function FormationPitch({ formation, starters }) {
+function FormationPitch({ formation, starters, openPlayerStats }) {
   const shape = parseFormationShape(formation);
   const rows = [1, ...shape]; // prepend GK as its own band
   const xi = starters.slice(0, 11);
@@ -3228,7 +3382,8 @@ function FormationPitch({ formation, starters }) {
       {displayRows.map((row, i) => (
         <div key={i} className="flex justify-center gap-3 flex-wrap" style={{ position: "relative", zIndex: 1 }}>
           {row.map((p, j) => (
-            <div key={j} style={{ textAlign: "center", width: 46 }}>
+            <button key={j} onClick={() => p && openPlayerStats && openPlayerStats(p)}
+              style={{ textAlign: "center", width: 46, background: "transparent", border: "none", padding: 0, cursor: p && openPlayerStats ? "pointer" : "default" }}>
               <div style={{
                 width: 32, height: 32, borderRadius: "50%", margin: "0 auto",
                 background: p ? C.gold : "rgba(255,255,255,0.15)", color: p ? C.dark : "rgba(255,255,255,0.5)",
@@ -3240,7 +3395,7 @@ function FormationPitch({ formation, starters }) {
               <div style={{ color: "#fff", fontSize: 9.5, marginTop: 3, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                 {p ? shortName(p.name) : "Empty"}
               </div>
-            </div>
+            </button>
           ))}
         </div>
       ))}
@@ -3248,7 +3403,7 @@ function FormationPitch({ formation, starters }) {
   );
 }
 
-function SquadsTab({ teams, squads, squadStats, renameTeam, setTab, movePlayerToGroup, movePlayerToIndex, myTeamId, signCaptain, playerDatabase }) {
+function SquadsTab({ teams, squads, squadStats, renameTeam, setTab, movePlayerToGroup, movePlayerToIndex, myTeamId, signCaptain, playerDatabase, openPlayerStats }) {
   const [activeTeam, setActiveTeam] = useState(myTeamId || teams[0].id);
   const [moveError, setMoveError] = useState("");
   const [captainForm, setCaptainForm] = useState({ name: "", position: "CM", rating: 75, club: "", age: 25 });
@@ -3423,13 +3578,15 @@ function SquadsTab({ teams, squads, squadStats, renameTeam, setTab, movePlayerTo
               return i < 11 ? positions[i] : i + 1;
             }}
             group="starters" onMove={(index) => move("starters", index, "reserves")} moveLabel="Bench" moveIcon={ChevronDown}
-            movePlayerToIndex={(from, to) => movePlayerToIndex(activeTeam, "starters", from, to)} minWidth={600} />
-          <FormationPitch formation={team.formation || "4-4-2"} starters={sq.starters} />
+            movePlayerToIndex={(from, to) => movePlayerToIndex(activeTeam, "starters", from, to)} minWidth={600}
+            openPlayerStats={openPlayerStats} />
+          <FormationPitch formation={team.formation || "4-4-2"} starters={sq.starters} openPlayerStats={openPlayerStats} />
         </div>
         <div style={{ height: 18 }} />
         <SquadTable title={`Reserves (${RESERVE_SLOTS} slots)`} players={sq.reserves} labelForIdx={(i) => `R${i + 1}`}
           group="reserves" onMove={(index) => move("reserves", index, "starters")} moveLabel="Start" moveIcon={ChevronUp}
-          movePlayerToIndex={(from, to) => movePlayerToIndex(activeTeam, "reserves", from, to)} />
+          movePlayerToIndex={(from, to) => movePlayerToIndex(activeTeam, "reserves", from, to)}
+          openPlayerStats={openPlayerStats} />
       </Panel>
     </div>
   );
@@ -3456,7 +3613,7 @@ function DragHandleIcon() {
   );
 }
 
-function SquadTable({ title, players, labelForIdx, group, onMove, moveLabel, moveIcon: MoveIcon, movePlayerToIndex, minWidth = 780 }) {
+function SquadTable({ title, players, labelForIdx, group, onMove, moveLabel, moveIcon: MoveIcon, movePlayerToIndex, minWidth = 780, openPlayerStats }) {
   const [sortKey, setSortKey] = useState(null);
   const [sortDir, setSortDir] = useState(1); // 1 = asc, -1 = desc
   const [dragIndex, setDragIndex] = useState(null);
@@ -3554,7 +3711,7 @@ function SquadTable({ title, players, labelForIdx, group, onMove, moveLabel, mov
                 rowIndex={index} canDrag={canDrag}
                 isDragging={dragIndex === index}
                 isDragOver={overIndex === index && dragIndex !== null && dragIndex !== index}
-                onDragHandlePointerDown={() => startDrag(index)} />
+                onDragHandlePointerDown={() => startDrag(index)} openPlayerStats={openPlayerStats} />
             ))}
           </tbody>
         </table>
@@ -3568,7 +3725,7 @@ function SquadTable({ title, players, labelForIdx, group, onMove, moveLabel, mov
   );
 }
 
-function SquadRow({ label, player, onMove, moveLabel, moveIcon: MoveIcon, rowIndex, canDrag, isDragging, isDragOver, onDragHandlePointerDown }) {
+function SquadRow({ label, player, onMove, moveLabel, moveIcon: MoveIcon, rowIndex, canDrag, isDragging, isDragOver, onDragHandlePointerDown, openPlayerStats }) {
   const filled = !!player;
   const cellPad = { padding: "5px 6px", borderBottom: `1px solid ${C.border}33` };
   const highlight = filled && Number(player.rating) >= 86 ? { background: `${C.gold}1a` } : {};
@@ -3598,7 +3755,10 @@ function SquadRow({ label, player, onMove, moveLabel, moveIcon: MoveIcon, rowInd
       <td style={{ ...cellPad, color: C.text, fontWeight: 600 }}>
         <div className="flex items-center gap-1.5">
           {player.isCaptain && <CaptainBadge />}
-          {player.name}
+          <button onClick={() => openPlayerStats && openPlayerStats(player)}
+            style={{ background: "transparent", border: "none", padding: 0, cursor: openPlayerStats ? "pointer" : "default", color: C.text, fontWeight: 600, fontSize: "inherit", textDecoration: openPlayerStats ? "underline" : "none", textDecorationColor: `${C.gold}66` }}>
+            {player.name}
+          </button>
         </div>
       </td>
       <td style={{ ...cellPad, textAlign: "center", color: C.text }}>{player.position}</td>
@@ -5525,7 +5685,7 @@ function ChatTab({ chat, setChat, teams, myTeamId, markChatSeen }) {
 }
 
 /* --------------------------------- Rules ---------------------------------- */
-function PlayerDatabaseTab({ teams, squads, playerDatabase }) {
+function PlayerDatabaseTab({ teams, squads, playerDatabase, openPlayerStats }) {
   const [query, setQuery] = useState("");
   const [sortKey, setSortKey] = useState("rating");
   const [sortDir, setSortDir] = useState(-1);
@@ -5559,9 +5719,15 @@ function PlayerDatabaseTab({ teams, squads, playerDatabase }) {
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
-    let list = !q ? allPlayers : allPlayers.filter((p) =>
-      p.name.toLowerCase().includes(q) || (p.displayClub || "").toLowerCase().includes(q) || (p.position || "").toLowerCase().includes(q)
-    );
+    let list = !q ? allPlayers : allPlayers.filter((p) => {
+      if (p.name.toLowerCase().includes(q)) return true;
+      if ((p.displayClub || "").toLowerCase().includes(q)) return true;
+      if ((p.position || "").toLowerCase().includes(q)) return true;
+      if (p.positions && p.positions.some((pos) => pos.toLowerCase().includes(q))) return true;
+      if (p.playStyles && p.playStyles.some((ps) => ps.toLowerCase().includes(q))) return true;
+      if (p.roles && p.roles.some((r) => r.toLowerCase().includes(q))) return true;
+      return false;
+    });
     list = [...list].sort((a, b) => {
       const av = a[sortKey], bv = b[sortKey];
       if (typeof av === "string") return (av || "").localeCompare(bv || "") * sortDir;
@@ -5594,8 +5760,8 @@ function PlayerDatabaseTab({ teams, squads, playerDatabase }) {
         this list shows that team's name instead of their original real-world club.
       </div>
 
-      <Field label="Search by name, club/team, or position">
-        <TextInput value={query} onChange={(e) => setQuery(e.target.value)} placeholder="e.g. Haaland, Arsenal, ST…" />
+      <Field label="Search by name, club/team, position (incl. secondary), or playstyle">
+        <TextInput value={query} onChange={(e) => setQuery(e.target.value)} placeholder="e.g. Haaland, Arsenal, ST, Finesse Shot…" />
       </Field>
 
       <div style={{ overflowX: "auto", marginTop: 14 }}>
@@ -5620,7 +5786,12 @@ function PlayerDatabaseTab({ teams, squads, playerDatabase }) {
             )}
             {filtered.slice(0, 300).map((p, i) => (
               <tr key={p.name + i} style={{ background: i % 2 ? C.panelAlt : "transparent" }}>
-                <td style={{ padding: "6px 8px", borderBottom: `1px solid ${C.border}33`, color: C.text, fontWeight: 600 }}>{p.name}</td>
+                <td style={{ padding: "6px 8px", borderBottom: `1px solid ${C.border}33`, color: C.text, fontWeight: 600 }}>
+                  <button onClick={() => openPlayerStats && openPlayerStats(p)}
+                    style={{ background: "transparent", border: "none", padding: 0, cursor: openPlayerStats ? "pointer" : "default", color: C.text, fontWeight: 600, fontSize: "inherit", textDecoration: openPlayerStats ? "underline" : "none", textDecorationColor: `${C.gold}66` }}>
+                    {p.name}
+                  </button>
+                </td>
                 <td style={{ padding: "6px 8px", borderBottom: `1px solid ${C.border}33`, textAlign: "center", color: C.text }}>{p.position}</td>
                 <td style={{ padding: "6px 8px", borderBottom: `1px solid ${C.border}33`, textAlign: "center", color: C.text }}>{p.rating}</td>
                 <td style={{ padding: "6px 8px", borderBottom: `1px solid ${C.border}33`, color: p.ownedBy ? C.gold : C.text }}>
@@ -5991,14 +6162,42 @@ async function sofifaFetch(path) {
 }
 
 function mapSofifaPlayer(p, clubName) {
+  const positions = [p.position1, p.position2, p.position3, p.position4, p.position5, p.position6, p.position7]
+    .filter((code) => code != null && code !== -1)
+    .map((code) => sofifaPosition(code));
+  const uniquePositions = [...new Set(positions)];
+
   return {
     name: p.commonName || `${p.firstName} ${p.lastName}`,
-    position: sofifaPosition(p.position1),
+    position: uniquePositions[0] || "ST",
+    positions: uniquePositions, // every listed position, primary first — used for position search
     rating: p.overallRating,
+    potential: p.potential,
     club: clubName,
     age: p.age,
     value: (p.price || 0) / 1000000, // Sofifa returns raw £, we track £M
     wage: (p.wage || 0) / 1000,      // Sofifa returns raw £/week, we track £k/week
+    weakFoot: p.weakFoot,
+    skillMoves: p.skillMoves,
+    accelerationType: p.accelerationType,
+    // The 6 headline categories shown on every FIFA/EAFC card
+    pac: p.pac, sho: p.sho, pas: p.pas, dri: p.dri, def: p.def, phy: p.phy,
+    // Full sub-stat breakdown, shown in the detail popup
+    detailedStats: {
+      crossing: p.crossing, finishing: p.finishing, heading: p.heading, shortPassing: p.shortPassing,
+      volleys: p.volleys, dribbling: p.dribbling, curve: p.curve, freeKick: p.freeKick,
+      longPassing: p.longPassing, ballControl: p.ballControl, acceleration: p.acceleration,
+      sprintSpeed: p.sprintSpeed, agility: p.agility, reactions: p.reactions, balance: p.balance,
+      shotPower: p.shotPower, jumping: p.jumping, stamina: p.stamina, strength: p.strength,
+      longShots: p.longShots, aggression: p.aggression, interceptions: p.interceptions,
+      positioning: p.positioning, vision: p.vision, penalties: p.penalties, marking: p.marking,
+      standingTackle: p.standingTackle, slidingTackle: p.slidingTackle,
+      gkDiving: p.gkDiving, gkHandling: p.gkHandling, gkKicking: p.gkKicking,
+      gkPositioning: p.gkPositioning, gkReflexes: p.gkReflexes, composure: p.composure,
+    },
+    // Playstyles and named roles, both used for search and shown in the detail popup
+    playStyles: [...(p.playStyle || []), ...(p.playStylePlus || []).map((s) => `${s}+`)],
+    roles: (p.role || []).map((r) => r.name),
   };
 }
 
