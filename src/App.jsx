@@ -2548,8 +2548,13 @@ export default function EafcLeagueApp() {
     if (rated86 > allowed86) return `Too many 86+ rated players (${rated86}, max ${allowed86}).`;
     const u21Count = picks.filter((p) => Number(p.age) > 0 && Number(p.age) <= 20).length;
     if (u21Count < MIN_U21_PLAYERS) return `Not enough U21 players (${u21Count} — need at least ${MIN_U21_PLAYERS}).`;
-    const totalValue = picks.reduce((s, p) => s + roundUpTo250k(Number(p.value) || 0), 0);
-    if (totalValue > team.budget) return `Total squad value (${money(totalValue)}) is more than your budget (${money(team.budget)}).`;
+    // Same 10% (min £250k) tax as any other signing applies here too — factored into the budget check.
+    const totalCost = picks.reduce((s, p) => {
+      const value = roundUpTo250k(Number(p.value) || 0);
+      const tax = value > 0 ? Math.max(value * 0.1, 0.25) : 0;
+      return s + value + tax;
+    }, 0);
+    if (totalCost > team.budget) return `Total cost including tax (${money(totalCost)}) is more than your budget (${money(team.budget)}).`;
     const totalWageM = picks.reduce((s, p) => s + (Number(p.wage) || 0), 0) / 1000;
     if (totalWageM > team.wageCap) return `Total wages (${money(totalWageM)}) would be over your wage cap (${money(team.wageCap)}).`;
     return null;
@@ -2625,7 +2630,11 @@ export default function EafcLeagueApp() {
     setTeams((ts) => ts.map((t) => {
       const mine = instantAssignments.filter((a) => a.teamId === t.id);
       if (!mine.length) return t;
-      const totalCost = mine.reduce((s, a) => s + roundUpTo250k(Number(a.player.value) || 0), 0);
+      const totalCost = mine.reduce((s, a) => {
+        const value = roundUpTo250k(Number(a.player.value) || 0);
+        const tax = value > 0 ? Math.max(value * 0.1, 0.25) : 0;
+        return s + value + tax;
+      }, 0);
       return { ...t, budget: (t.budget || 0) - totalCost };
     }));
     if (newBlindBids.length) setBlindBids((all) => [...newBlindBids, ...all]);
@@ -2678,7 +2687,12 @@ export default function EafcLeagueApp() {
       next[winnerTeamId][slot.group][slot.idx] = playerObj;
       return next;
     });
-    setTeams((ts) => ts.map((t) => (t.id === winnerTeamId ? { ...t, budget: (t.budget || 0) - roundUpTo250k(winningBid) } : t)));
+    setTeams((ts) => ts.map((t) => {
+      if (t.id !== winnerTeamId) return t;
+      const value = roundUpTo250k(winningBid);
+      const tax = value > 0 ? Math.max(value * 0.1, 0.25) : 0;
+      return { ...t, budget: (t.budget || 0) - value - tax };
+    }));
     setBlindBids((all) => all.map((b) => (b.id === blindBidId ? { ...b, bids, resolved: true, winner: winnerTeamId, winningBid } : b)));
     logActivity(`Blind bid resolved: ${teams.find((t) => t.id === winnerTeamId)?.name} won ${bb.player.name} for ${money(winningBid)}.`, "transfer");
   };
@@ -5005,10 +5019,28 @@ function DraftTab({ teams, squads, squadStats, myTeamId, playerDatabase, draftSt
             {submitted ? (
               <div style={{ color: C.green, fontSize: 13, marginBottom: 12 }}>✓ Submitted — waiting on other teams (or the 7-day deadline).</div>
             ) : (
-              <div style={{ color: C.muted, fontSize: 12, marginBottom: 12 }}>Not submitted yet — keep changing picks freely until you submit.</div>
+              <div style={{ color: C.muted, fontSize: 12, marginBottom: 8 }}>Not submitted yet — keep changing picks freely until you submit.</div>
+            )}
+            {!submitted && myPicks.some(Boolean) && (
+              <div className="flex items-center gap-3 flex-wrap" style={{ marginBottom: 12, fontSize: 12 }}>
+                <Pill tone="gold">
+                  Total cost {money(myPicks.reduce((s, p) => {
+                    if (!p) return s;
+                    const v = roundUpTo250k(Number(p.value) || 0);
+                    return s + v + (v > 0 ? Math.max(v * 0.1, 0.25) : 0);
+                  }, 0))} / {money(myTeam?.budget || 0)} budget
+                </Pill>
+                <Pill tone="muted">
+                  Total wages {money(myPicks.reduce((s, p) => s + (p ? Number(p.wage) || 0 : 0), 0) / 1000)} / {money(myTeam?.wageCap || 0)} cap
+                </Pill>
+              </div>
             )}
             <div className="grid gap-2">
-              {myPicks.map((p, i) => (
+              {myPicks.map((p, i) => {
+                const value = p ? roundUpTo250k(Number(p.value) || 0) : 0;
+                const tax = value > 0 ? Math.max(value * 0.1, 0.25) : 0;
+                const isU21 = p && Number(p.age) > 0 && Number(p.age) <= 20;
+                return (
                 <div key={i} className="flex items-center gap-2" style={{ background: C.panelAlt, borderRadius: 6, padding: 8 }}>
                   <div style={{ width: 22, textAlign: "center", color: C.muted, fontSize: 11 }}>{i + 1}</div>
                   <div style={{ flex: 1 }}>
@@ -5024,6 +5056,14 @@ function DraftTab({ teams, squads, squadStats, myTeamId, playerDatabase, draftSt
                         onSelect={(picked) => pickSlot(i, picked)}
                       />
                     )}
+                    {p && (
+                      <div className="flex items-center gap-1.5" style={{ marginTop: 3 }}>
+                        <span style={{ color: C.muted, fontSize: 11 }}>
+                          Cost {money(value + tax)} (incl. {money(tax)} tax) · Wage {moneyK(p.wage)}
+                        </span>
+                        {isU21 && <Pill tone="gold">U21</Pill>}
+                      </div>
+                    )}
                   </div>
                   {!submitted && p && (
                     <button onClick={() => clearSlot(i)} title="Clear" style={{ background: "transparent", border: "none", cursor: "pointer", color: C.red }}>
@@ -5031,7 +5071,8 @@ function DraftTab({ teams, squads, squadStats, myTeamId, playerDatabase, draftSt
                     </button>
                   )}
                 </div>
-              ))}
+                );
+              })}
             </div>
             {!submitted && (
               <div style={{ marginTop: 14 }}>
