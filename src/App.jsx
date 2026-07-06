@@ -350,6 +350,19 @@ function Btn({ children, onClick, variant = "primary", size = "md", icon: Icon, 
   );
 }
 
+// Small "this player is the Club Captain" marker — shown beside their name wherever they appear.
+function CaptainBadge() {
+  return (
+    <span title="Club Captain" style={{
+      display: "inline-flex", alignItems: "center", justifyContent: "center",
+      width: 16, height: 16, borderRadius: "50%", background: C.gold, color: "#0B1220",
+      fontSize: 10, fontWeight: 800, flexShrink: 0, lineHeight: 1,
+    }}>
+      C
+    </span>
+  );
+}
+
 function Pill({ children, tone = "muted" }) {
   const tones = {
     muted: { bg: `${C.border}55`, fg: C.muted },
@@ -1145,12 +1158,18 @@ export default function EafcLeagueApp() {
       return `Your Captain has to be a ${team.homeClub} player.`;
     }
     const sq = squads[teamId];
-    if (sq.starters[CAPTAIN_SLOT_INDEX]) return "This team already has a Captain — release them first to sign a new one.";
+    // Captaincy sticks to the player, not the slot — even if they get moved to reserves or
+    // benched, they're still the Captain, so this checks the whole squad, not just slot 21.
+    if ([...sq.starters, ...sq.reserves].some((p) => p && p.isCaptain)) {
+      return "This team already has a Captain — an admin override is needed to appoint a new one.";
+    }
+    if (sq.starters[CAPTAIN_SLOT_INDEX]) return "The Captain slot is occupied — bench or move that player first.";
     setSquads((all) => {
       const next = { ...all, [teamId]: { starters: [...all[teamId].starters], reserves: [...all[teamId].reserves] } };
       next[teamId].starters[CAPTAIN_SLOT_INDEX] = {
         name: player.name, position: player.position || "CM", rating: Number(player.rating) || 0,
         club: player.club, age: Number(player.age) || 0, value: 0, wage: 0, // free — no budget/wage impact
+        isCaptain: true,
       };
       return next;
     });
@@ -1158,23 +1177,34 @@ export default function EafcLeagueApp() {
     return null;
   };
 
-  const releaseCaptain = (teamId) => {
+  // Admin-only: clears whichever player currently holds the Captain flag for a team, freeing that
+  // team up to appoint a new one. Also happens naturally (no admin needed) if the Captain is ever
+  // sold or released through the normal transfer/auction flows, since they'd simply leave the squad.
+  const adminRemoveCaptain = (pinAttempt, teamId) => {
+    if (pinAttempt !== adminPin) return "Incorrect PIN.";
+    if (!teamId) return "Choose a team.";
+    const sq = squads[teamId];
+    if (!sq || ![...sq.starters, ...sq.reserves].some((p) => p && p.isCaptain)) {
+      return "That team doesn't currently have a Captain.";
+    }
     setSquads((all) => {
-      const next = { ...all, [teamId]: { starters: [...all[teamId].starters], reserves: [...all[teamId].reserves] } };
-      next[teamId].starters[CAPTAIN_SLOT_INDEX] = null;
+      const next = { ...all, [teamId]: {
+        starters: all[teamId].starters.map((p) => (p && p.isCaptain ? null : p)),
+        reserves: all[teamId].reserves.map((p) => (p && p.isCaptain ? null : p)),
+      } };
       return next;
     });
     return null;
   };
 
-  // Swaps a player with the one above/below them in the same list — for arranging a starting XI.
-  const reorderPlayer = (teamId, group, index, direction) => {
-    const target = index + direction;
-    const sq = squads[teamId];
-    if (target < 0 || target >= sq[group].length) return;
+  // Drag-and-drop reorder — moves a player to any position in the list, shifting everyone else to
+  // make room (replaces the old up/down-arrow, adjacent-swap-only reordering).
+  const movePlayerToIndex = (teamId, group, fromIndex, toIndex) => {
+    if (fromIndex === toIndex) return;
     setSquads((all) => {
       const list = [...all[teamId][group]];
-      [list[index], list[target]] = [list[target], list[index]];
+      const [moved] = list.splice(fromIndex, 1);
+      list.splice(toIndex, 0, moved);
       return { ...all, [teamId]: { ...all[teamId], [group]: list } };
     });
   };
@@ -2024,8 +2054,9 @@ export default function EafcLeagueApp() {
         )}
         {tab === "squads" && (
           <SquadsTab teams={teams} squads={squads} squadStats={squadStats} renameTeam={renameTeam}
-            setTab={setTab} movePlayerToGroup={movePlayerToGroup} reorderPlayer={reorderPlayer} myTeamId={myTeamId}
-            signCaptain={signCaptain} releaseCaptain={releaseCaptain} playerDatabase={playerDatabase} />
+            setTab={setTab} movePlayerToGroup={movePlayerToGroup}
+            movePlayerToIndex={movePlayerToIndex} myTeamId={myTeamId}
+            signCaptain={signCaptain} playerDatabase={playerDatabase} />
         )}
         {tab === "budgets" && (
           <BudgetsTab teams={teams} budgetStats={budgetStats} renameTeam={renameTeam} />
@@ -2080,7 +2111,7 @@ export default function EafcLeagueApp() {
             teamLockOverride={teamLockOverride} toggleTeamLockOverride={toggleTeamLockOverride} clearChat={clearChat}
             resetTeamPassword={resetTeamPassword} squadStats={squadStats}
             transferWindow={transferWindow} setTransferWindowDates={setTransferWindowDates} clearTransferWindow={clearTransferWindow}
-            addPrize={addPrize} exportPlayerDatabaseCSV={exportPlayerDatabaseCSV} />
+            addPrize={addPrize} exportPlayerDatabaseCSV={exportPlayerDatabaseCSV} adminRemoveCaptain={adminRemoveCaptain} />
         )}
       </div>
 
@@ -2692,7 +2723,7 @@ function FormationPitch({ formation, starters }) {
   );
 }
 
-function SquadsTab({ teams, squads, squadStats, renameTeam, setTab, movePlayerToGroup, reorderPlayer, myTeamId, signCaptain, releaseCaptain, playerDatabase }) {
+function SquadsTab({ teams, squads, squadStats, renameTeam, setTab, movePlayerToGroup, movePlayerToIndex, myTeamId, signCaptain, playerDatabase }) {
   const [activeTeam, setActiveTeam] = useState(myTeamId || teams[0].id);
   const [moveError, setMoveError] = useState("");
   const [captainForm, setCaptainForm] = useState({ name: "", position: "CM", rating: 75, club: "", age: 25 });
@@ -2713,7 +2744,7 @@ function SquadsTab({ teams, squads, squadStats, renameTeam, setTab, movePlayerTo
     if (!err) setCaptainForm({ name: "", position: "CM", rating: 75, club: team.homeClub || "", age: 25 });
   };
 
-  const captain = sq.starters[CAPTAIN_SLOT_INDEX];
+  const captain = [...sq.starters, ...sq.reserves].find((p) => p && p.isCaptain) || null;
 
   return (
     <div className="grid gap-4">
@@ -2814,23 +2845,16 @@ function SquadsTab({ teams, squads, squadStats, renameTeam, setTab, movePlayerTo
         )}
 
         <div style={{ background: C.panelAlt, border: `1px solid ${C.gold}55`, borderRadius: 8, padding: 12, marginBottom: 16 }}>
-          <div style={{ color: C.gold, fontWeight: 700, fontSize: 13, marginBottom: 6 }}>Club Captain (slot 21 — free, no budget or wage impact)</div>
+          <div style={{ color: C.gold, fontWeight: 700, fontSize: 13, marginBottom: 6 }}>Club Captain (free, no budget or wage impact)</div>
           <div style={{ color: C.muted, fontSize: 11.5, marginBottom: 10 }}>
             A loyal, club-only signing — must be from your Home Club above and rated {CAPTAIN_MAX_RATING} or below.
+            Once appointed, this can only be changed by an admin, or naturally if the Captain is ever sold or released.
           </div>
           {captain ? (
-            activeTeam === myTeamId ? (
-              <div className="flex items-center justify-between flex-wrap gap-2">
-                <div style={{ color: C.text, fontSize: 13 }}>
-                  <b>{captain.name}</b> — {captain.position}, {captain.rating} OVR, {captain.club}
-                </div>
-                <Btn size="sm" variant="outline" onClick={() => releaseCaptain(activeTeam)}>Release Captain</Btn>
-              </div>
-            ) : (
-              <div style={{ color: C.text, fontSize: 13 }}>
-                <b>{captain.name}</b> — {captain.position}, {captain.rating} OVR, {captain.club}
-              </div>
-            )
+            <div className="flex items-center gap-2" style={{ color: C.text, fontSize: 13 }}>
+              <CaptainBadge />
+              <b>{captain.name}</b> — {captain.position}, {captain.rating} OVR, {captain.club}
+            </div>
           ) : activeTeam === myTeamId ? (
             <>
               <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))" }}>
@@ -2875,13 +2899,13 @@ function SquadsTab({ teams, squads, squadStats, renameTeam, setTab, movePlayerTo
               return i < 11 ? positions[i] : i + 1;
             }}
             group="starters" onMove={(index) => move("starters", index, "reserves")} moveLabel="Bench" moveIcon={ChevronDown}
-            reorderPlayer={(index, dir) => reorderPlayer(activeTeam, "starters", index, dir)} minWidth={600} />
+            movePlayerToIndex={(from, to) => movePlayerToIndex(activeTeam, "starters", from, to)} minWidth={600} />
           <FormationPitch formation={team.formation || "4-4-2"} starters={sq.starters} />
         </div>
         <div style={{ height: 18 }} />
         <SquadTable title={`Reserves (${RESERVE_SLOTS} slots)`} players={sq.reserves} labelForIdx={(i) => `R${i + 1}`}
           group="reserves" onMove={(index) => move("reserves", index, "starters")} moveLabel="Start" moveIcon={ChevronUp}
-          reorderPlayer={(index, dir) => reorderPlayer(activeTeam, "reserves", index, dir)} />
+          movePlayerToIndex={(from, to) => movePlayerToIndex(activeTeam, "reserves", from, to)} />
       </Panel>
     </div>
   );
@@ -2898,9 +2922,23 @@ const SORTABLE_COLUMNS = [
   { key: "wage", label: "Wage (£k)" },
 ];
 
-function SquadTable({ title, players, labelForIdx, group, onMove, moveLabel, moveIcon: MoveIcon, reorderPlayer, minWidth = 780 }) {
+function DragHandleIcon() {
+  return (
+    <svg width="10" height="16" viewBox="0 0 10 16" fill="currentColor">
+      <circle cx="2" cy="2" r="1.5" /><circle cx="8" cy="2" r="1.5" />
+      <circle cx="2" cy="8" r="1.5" /><circle cx="8" cy="8" r="1.5" />
+      <circle cx="2" cy="14" r="1.5" /><circle cx="8" cy="14" r="1.5" />
+    </svg>
+  );
+}
+
+function SquadTable({ title, players, labelForIdx, group, onMove, moveLabel, moveIcon: MoveIcon, movePlayerToIndex, minWidth = 780 }) {
   const [sortKey, setSortKey] = useState(null);
   const [sortDir, setSortDir] = useState(1); // 1 = asc, -1 = desc
+  const [dragIndex, setDragIndex] = useState(null);
+  const [overIndex, setOverIndex] = useState(null);
+  const dragIndexRef = useRef(null);
+  const overIndexRef = useRef(null);
 
   const indexed = players.map((p, i) => ({ player: p, index: i }));
   const sorted = sortKey
@@ -2923,6 +2961,48 @@ function SquadTable({ title, players, labelForIdx, group, onMove, moveLabel, mov
     setSortDir(1);
   };
 
+  const canDrag = sortKey === null; // dragging only makes sense on the unsorted, real slot order
+
+  const startDrag = (index) => {
+    dragIndexRef.current = index;
+    overIndexRef.current = index;
+    setDragIndex(index);
+    setOverIndex(index);
+  };
+
+  useEffect(() => {
+    if (dragIndex === null) return;
+    const handleMove = (e) => {
+      const point = e.touches && e.touches[0] ? e.touches[0] : e;
+      const el = document.elementFromPoint(point.clientX, point.clientY);
+      const row = el && el.closest && el.closest("tr[data-row-index]");
+      if (row) {
+        const idx = Number(row.getAttribute("data-row-index"));
+        if (!Number.isNaN(idx) && idx !== overIndexRef.current) {
+          overIndexRef.current = idx;
+          setOverIndex(idx);
+        }
+      }
+    };
+    const handleUp = () => {
+      if (dragIndexRef.current !== null && overIndexRef.current !== null && overIndexRef.current !== dragIndexRef.current) {
+        movePlayerToIndex(dragIndexRef.current, overIndexRef.current);
+      }
+      dragIndexRef.current = null;
+      overIndexRef.current = null;
+      setDragIndex(null);
+      setOverIndex(null);
+    };
+    document.addEventListener("pointermove", handleMove);
+    document.addEventListener("pointerup", handleUp);
+    document.addEventListener("pointercancel", handleUp);
+    return () => {
+      document.removeEventListener("pointermove", handleMove);
+      document.removeEventListener("pointerup", handleUp);
+      document.removeEventListener("pointercancel", handleUp);
+    };
+  }, [dragIndex, movePlayerToIndex]);
+
   return (
     <div>
       <div style={{ color: C.gold, fontWeight: 700, fontSize: 13, marginBottom: 8 }}>{title}</div>
@@ -2944,42 +3024,43 @@ function SquadTable({ title, players, labelForIdx, group, onMove, moveLabel, mov
             </tr>
           </thead>
           <tbody>
-            {sorted.map(({ player, index }, rowPos) => (
+            {sorted.map(({ player, index }) => (
               <SquadRow key={index} label={labelForIdx(index)} player={player}
                 onMove={() => onMove(index)} moveLabel={moveLabel} moveIcon={MoveIcon}
-                canReorder={sortKey === null}
-                onMoveUp={rowPos > 0 ? () => reorderPlayer(index, -1) : null}
-                onMoveDown={rowPos < players.length - 1 ? () => reorderPlayer(index, 1) : null} />
+                rowIndex={index} canDrag={canDrag}
+                isDragging={dragIndex === index}
+                isDragOver={overIndex === index && dragIndex !== null && dragIndex !== index}
+                onDragHandlePointerDown={() => startDrag(index)} />
             ))}
           </tbody>
         </table>
       </div>
+      {canDrag && players.some(Boolean) && (
+        <div style={{ color: C.muted, fontSize: 10.5, marginTop: 6 }}>
+          Drag the handle (⠿) to reorder{group === "starters" ? " — updates the formation pitch too" : ""}.
+        </div>
+      )}
     </div>
   );
 }
 
-function SquadRow({ label, player, onMove, moveLabel, moveIcon: MoveIcon, canReorder, onMoveUp, onMoveDown }) {
+function SquadRow({ label, player, onMove, moveLabel, moveIcon: MoveIcon, rowIndex, canDrag, isDragging, isDragOver, onDragHandlePointerDown }) {
   const filled = !!player;
   const cellPad = { padding: "5px 6px", borderBottom: `1px solid ${C.border}33` };
   const highlight = filled && Number(player.rating) >= 86 ? { background: `${C.gold}1a` } : {};
   const emptyStyle = { color: C.muted, fontStyle: "italic" };
+  const dragFx = { ...(isDragging ? { opacity: 0.45 } : {}), ...(isDragOver ? { boxShadow: `inset 0 2px 0 ${C.gold}` } : {}) };
 
-  const reorderControls = canReorder && filled && (
-    <div className="flex items-center gap-1">
-      <button onClick={onMoveUp} disabled={!onMoveUp} title="Move up"
-        style={{ background: "transparent", border: "none", cursor: onMoveUp ? "pointer" : "default", color: onMoveUp ? C.muted : C.border, padding: 0 }}>
-        <ChevronUp size={13} />
-      </button>
-      <button onClick={onMoveDown} disabled={!onMoveDown} title="Move down"
-        style={{ background: "transparent", border: "none", cursor: onMoveDown ? "pointer" : "default", color: onMoveDown ? C.muted : C.border, padding: 0 }}>
-        <ChevronDown size={13} />
-      </button>
-    </div>
+  const dragHandle = canDrag && filled && (
+    <button onPointerDown={onDragHandlePointerDown} title="Drag to reorder"
+      style={{ background: "transparent", border: "none", cursor: "grab", color: C.muted, padding: "4px 2px", touchAction: "none", display: "inline-flex" }}>
+      <DragHandleIcon />
+    </button>
   );
 
   if (!filled) {
     return (
-      <tr style={highlight}>
+      <tr data-row-index={rowIndex} style={highlight}>
         <td style={{ ...cellPad, textAlign: "center", color: C.muted }}>{label}</td>
         <td colSpan={7} style={{ ...cellPad, ...emptyStyle }}>Empty slot</td>
         <td style={cellPad}></td>
@@ -2988,9 +3069,14 @@ function SquadRow({ label, player, onMove, moveLabel, moveIcon: MoveIcon, canReo
   }
 
   return (
-    <tr style={highlight}>
+    <tr data-row-index={rowIndex} style={{ ...highlight, ...dragFx }}>
       <td style={{ ...cellPad, textAlign: "center", color: C.muted }}>{label}</td>
-      <td style={{ ...cellPad, color: C.text, fontWeight: 600 }}>{player.name}</td>
+      <td style={{ ...cellPad, color: C.text, fontWeight: 600 }}>
+        <div className="flex items-center gap-1.5">
+          {player.isCaptain && <CaptainBadge />}
+          {player.name}
+        </div>
+      </td>
       <td style={{ ...cellPad, textAlign: "center", color: C.text }}>{player.position}</td>
       <td style={{ ...cellPad, textAlign: "center", color: C.text }}>{player.rating}</td>
       <td style={{ ...cellPad, color: C.text }}>{player.club}</td>
@@ -2999,7 +3085,7 @@ function SquadRow({ label, player, onMove, moveLabel, moveIcon: MoveIcon, canReo
       <td style={{ ...cellPad, textAlign: "center", color: C.text }}>{moneyK(player.wage)}</td>
       <td style={{ ...cellPad, textAlign: "center" }}>
         <div className="flex items-center justify-center gap-2">
-          {reorderControls}
+          {dragHandle}
           <button onClick={onMove} title={`Move to ${moveLabel}`}
             style={{ background: "transparent", border: `1px solid ${C.border}`, borderRadius: 6, padding: "3px 7px", cursor: "pointer", color: C.gold, display: "inline-flex", alignItems: "center", gap: 3, fontSize: 11 }}>
             <MoveIcon size={12} /> {moveLabel}
@@ -5031,7 +5117,7 @@ function AddPrizeTools({ teams, addPrize }) {
   );
 }
 
-function AdminTab({ teams, squads, myTeamId, playerDatabase, adminPin, logAdminReward, resetAll, changeAdminPin, addFundsToTeam, addEarned86Slot, exportBackup, restoreBackup, restoreFromNightlyBackup, endSeason, season, seasonHistory, standings, importPlayerDatabase, clearPlayerDatabase, teamLockOverride, toggleTeamLockOverride, clearChat, resetTeamPassword, squadStats, transferWindow, setTransferWindowDates, clearTransferWindow, addPrize, exportPlayerDatabaseCSV }) {
+function AdminTab({ teams, squads, myTeamId, playerDatabase, adminPin, logAdminReward, resetAll, changeAdminPin, addFundsToTeam, addEarned86Slot, exportBackup, restoreBackup, restoreFromNightlyBackup, endSeason, season, seasonHistory, standings, importPlayerDatabase, clearPlayerDatabase, teamLockOverride, toggleTeamLockOverride, clearChat, resetTeamPassword, squadStats, transferWindow, setTransferWindowDates, clearTransferWindow, addPrize, exportPlayerDatabaseCSV, adminRemoveCaptain }) {
   const [unlocked, setUnlocked] = useState(false);
   const [pinInput, setPinInput] = useState("");
   const [err, setErr] = useState("");
@@ -5072,11 +5158,12 @@ function AdminTab({ teams, squads, myTeamId, playerDatabase, adminPin, logAdminR
 
       <EndSeasonTools endSeason={endSeason} season={season} seasonHistory={seasonHistory} standings={standings} teams={teams} />
 
-      <AdminTools teams={teams} resetAll={resetAll} changeAdminPin={changeAdminPin}
+      <AdminTools teams={teams} squads={squads} resetAll={resetAll} changeAdminPin={changeAdminPin}
         addFundsToTeam={addFundsToTeam} addEarned86Slot={addEarned86Slot}
         teamLockOverride={teamLockOverride} toggleTeamLockOverride={toggleTeamLockOverride} clearChat={clearChat}
         resetTeamPassword={resetTeamPassword}
-        transferWindow={transferWindow} setTransferWindowDates={setTransferWindowDates} clearTransferWindow={clearTransferWindow} />
+        transferWindow={transferWindow} setTransferWindowDates={setTransferWindowDates} clearTransferWindow={clearTransferWindow}
+        adminRemoveCaptain={adminRemoveCaptain} />
     </div>
   );
 }
@@ -5650,7 +5737,7 @@ function EndSeasonTools({ endSeason, season, seasonHistory, standings, teams }) 
   );
 }
 
-function AdminTools({ teams, resetAll, changeAdminPin, addFundsToTeam, addEarned86Slot, teamLockOverride, toggleTeamLockOverride, clearChat, resetTeamPassword, transferWindow, setTransferWindowDates, clearTransferWindow }) {
+function AdminTools({ teams, squads, resetAll, changeAdminPin, addFundsToTeam, addEarned86Slot, teamLockOverride, toggleTeamLockOverride, clearChat, resetTeamPassword, transferWindow, setTransferWindowDates, clearTransferWindow, adminRemoveCaptain }) {
   const [pin, setPin] = useState("");
   const [msg, setMsg] = useState(null); // { text, tone }
   const [showChangePin, setShowChangePin] = useState(false);
@@ -5665,8 +5752,16 @@ function AdminTools({ teams, resetAll, changeAdminPin, addFundsToTeam, addEarned
   const [pwTeam, setPwTeam] = useState(teams[0]?.id || "");
   const [windowOpens, setWindowOpens] = useState("");
   const [windowCloses, setWindowCloses] = useState("");
+  const [captainTeam, setCaptainTeam] = useState(teams[0]?.id || "");
 
   const show = (text, tone) => setMsg({ text, tone });
+
+  const doRemoveCaptain = () => {
+    const err = adminRemoveCaptain(pin, captainTeam);
+    setPin("");
+    if (err) show(err, "red");
+    else show(`${teams.find((t) => t.id === captainTeam)?.name}'s Captain has been cleared — they can appoint a new one now.`, "green");
+  };
 
   const doSetWindow = () => {
     const opensAt = windowOpens ? new Date(windowOpens).getTime() : null;
@@ -5841,6 +5936,26 @@ function AdminTools({ teams, resetAll, changeAdminPin, addFundsToTeam, addEarned
             </Select>
           </Field>
           <Btn onClick={doResetTeamPassword}>Clear Password</Btn>
+        </div>
+      </div>
+
+      {/* Captain override */}
+      <div style={{ paddingTop: 18, marginTop: 18, borderTop: `1px solid ${C.border}` }}>
+        <div style={{ color: C.text, fontWeight: 700, fontSize: 13, marginBottom: 6 }}>Clear a Team's Captain</div>
+        <div style={{ color: C.muted, fontSize: 11.5, marginBottom: 10 }}>
+          Once a team appoints a Captain, they can't change it themselves — this is the only way to free that team up
+          to appoint a new one (this removes the Captain from their squad entirely; it doesn't just unmark them).
+        </div>
+        <div className="flex items-end gap-2 flex-wrap">
+          <Field label="Team">
+            <Select value={captainTeam} onChange={(e) => setCaptainTeam(e.target.value)}>
+              {teams.map((t) => {
+                const hasCaptain = [...(squads[t.id]?.starters || []), ...(squads[t.id]?.reserves || [])].some((p) => p && p.isCaptain);
+                return <option key={t.id} value={t.id}>{t.name}{hasCaptain ? "" : " (no Captain)"}</option>;
+              })}
+            </Select>
+          </Field>
+          <Btn variant="danger" onClick={doRemoveCaptain}>Clear Captain</Btn>
         </div>
       </div>
 
