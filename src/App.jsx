@@ -596,6 +596,12 @@ export default function EafcLeagueApp() {
   // everything downstream of them — interval timers, subscription setup) get torn down and rebuilt
   // every time teams gets a new array reference, which happens on essentially every sync tick.
   const teamsRef = useRef(teams);
+  // Tracks the last data we saved or received for each team, so the autosave effect can tell which
+  // teams THIS browser actually changed locally versus which ones just came along for the ride in
+  // the same array. Without this, any browser with an even slightly-stale copy of another team
+  // (one it never touched) would blindly overwrite that team's key with old data the moment its
+  // OWN team changed — which is exactly what was wiping out passwords across the whole league.
+  const lastSyncedTeamDataRef = useRef(new Map());
   useEffect(() => { teamsRef.current = teams; }, [teams]);
   const knownDmSavedAtRef = useRef(0); // same idea, but for the separate private-messages store
   const knownChatSavedAtRef = useRef(0); // same idea, but for the separate league chat store
@@ -749,6 +755,7 @@ export default function EafcLeagueApp() {
               const tdata = JSON.parse(tres.value);
               loadedTeams[i] = { ...fallback, ...tdata.team };
               knownTeamSavedAtRef.current.set(teamId, tdata.savedAt || Date.now());
+              lastSyncedTeamDataRef.current.set(teamId, JSON.stringify(loadedTeams[i]));
               return;
             }
           } catch (e) {
@@ -756,6 +763,7 @@ export default function EafcLeagueApp() {
           }
           loadedTeams[i] = fallback;
           knownTeamSavedAtRef.current.set(teamId, 0);
+          lastSyncedTeamDataRef.current.set(teamId, JSON.stringify(loadedTeams[i]));
         }));
         setTeams(loadedTeams.filter(Boolean));
       } catch (e) {
@@ -988,15 +996,22 @@ export default function EafcLeagueApp() {
 
   // Teams get the same per-team treatment as squads — editing your own team's name, formation,
   // Home Club, or password shouldn't be at risk from someone else editing theirs at the same time.
+  // Critically: only writes teams that ACTUALLY changed locally since we last synced them, never
+  // the whole array — otherwise any browser with an even-slightly-stale copy of a team it never
+  // touched would blindly overwrite that team's key the moment its own team changed.
   useEffect(() => {
     if (!loaded) return;
     teamSavingRef.current = true;
     const t = setTimeout(async () => {
       try {
         const savedAt = Date.now();
-        await Promise.all(teams.map((team) =>
+        const dirtyTeams = teams.filter((team) => lastSyncedTeamDataRef.current.get(team.id) !== JSON.stringify(team));
+        await Promise.all(dirtyTeams.map((team) =>
           storage.set(teamKeyFor(team.id), JSON.stringify({ team, savedAt }), true)
-            .then(() => knownTeamSavedAtRef.current.set(team.id, savedAt))
+            .then(() => {
+              knownTeamSavedAtRef.current.set(team.id, savedAt);
+              lastSyncedTeamDataRef.current.set(team.id, JSON.stringify(team));
+            })
             .catch(() => { /* best effort per team — next cycle reconciles */ })
         ));
       } finally {
@@ -1018,6 +1033,7 @@ export default function EafcLeagueApp() {
           if (remoteSavedAt > known && data.team) {
             setTeams((all) => all.map((t) => (t.id === team.id ? { ...t, ...data.team } : t)));
             knownTeamSavedAtRef.current.set(team.id, remoteSavedAt);
+            lastSyncedTeamDataRef.current.set(team.id, JSON.stringify({ ...team, ...data.team }));
           }
         }
       } catch (e) {
@@ -1044,6 +1060,7 @@ export default function EafcLeagueApp() {
           if (remoteSavedAt > known && !teamSavingRef.current && data.team) {
             setTeams((all) => all.map((t) => (t.id === team.id ? { ...t, ...data.team } : t)));
             knownTeamSavedAtRef.current.set(team.id, remoteSavedAt);
+            lastSyncedTeamDataRef.current.set(team.id, JSON.stringify({ ...team, ...data.team }));
           }
         } catch (e) {
           // ignore malformed payloads
