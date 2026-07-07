@@ -75,7 +75,7 @@ const N_TEAMS = 10;
 const STARTER_SLOTS = 21;
 const MIN_U21_PLAYERS = 5; // at least this many players aged 20 or under, somewhere in the squad
 const RESERVE_SLOTS = 5;
-const BASE_WAGE_CAP = 2;
+const BASE_WAGE_CAP = 1.5;
 const NEXT_CAP_MAX = 2.8; // £M for 1st place
 const NEXT_CAP_FLOOR = 1.8; // £M for last place — flattened range so winning doesn't compound the wage advantage
 
@@ -111,7 +111,7 @@ function defaultTeams() {
     id: `T${i + 1}`,
     name: `Team ${i + 1}`,
     manager: names[i],
-    budget: 500,
+    budget: 600,
     wageCap: BASE_WAGE_CAP,
     earned86: 0,
     notes: "",
@@ -539,6 +539,9 @@ function Pill({ children, tone = "muted" }) {
 const SYNC_POLL_MS = 120000; // safety-net poll only — realtime handles the fast path. Was 20s, which
 // across 10 separate polling loops (3 of which hit all 10 teams individually) meant ~37 database
 // requests every 20 seconds per open tab — a major, unnecessary load contributing to Disk IO exhaustion.
+const LOW_CHURN_POLL_MS = 360000; // 6 minutes — for things that only change via an explicit admin
+// action (player database imports), rather than ongoing player activity. Realtime still catches a
+// genuine change instantly; this is purely the safety-net fallback interval.
 
 export default function EafcLeagueApp() {
   const [teams, setTeams] = useState(defaultTeams());
@@ -1138,7 +1141,7 @@ export default function EafcLeagueApp() {
 
   useEffect(() => {
     if (!loaded) return;
-    const t = setInterval(() => pullLatestPlayerDb(), SYNC_POLL_MS);
+    const t = setInterval(() => pullLatestPlayerDb(), LOW_CHURN_POLL_MS);
     return () => clearInterval(t);
   }, [loaded, pullLatestPlayerDb]);
 
@@ -2388,7 +2391,7 @@ export default function EafcLeagueApp() {
     setSquads(defaultSquads());
     setTransfers([]);
     setAuctions([]);
-    setTeams((ts) => ts.map((t) => ({ ...t, budget: 500 })));
+    setTeams((ts) => ts.map((t) => ({ ...t, budget: 600 })));
     logActivity("Admin cleared every squad, all transfers, and all auctions for a fresh test.", "transfer");
     return null;
   };
