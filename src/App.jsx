@@ -533,7 +533,9 @@ function Pill({ children, tone = "muted" }) {
 }
 
 /* --------------------------------- App ----------------------------------- */
-const SYNC_POLL_MS = 20000; // safety-net poll — realtime handles the fast path
+const SYNC_POLL_MS = 120000; // safety-net poll only — realtime handles the fast path. Was 20s, which
+// across 10 separate polling loops (3 of which hit all 10 teams individually) meant ~37 database
+// requests every 20 seconds per open tab — a major, unnecessary load contributing to Disk IO exhaustion.
 
 export default function EafcLeagueApp() {
   const [teams, setTeams] = useState(defaultTeams());
