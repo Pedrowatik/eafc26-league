@@ -5043,7 +5043,11 @@ function DraftTab({ teams, squads, squadStats, myTeamId, playerDatabase, draftSt
   }, []);
 
   const myTeam = teams.find((t) => t.id === myTeamId);
-  const myPicks = draftPicks[myTeamId] || Array(DRAFT_SLOTS_UI).fill(null);
+  // Always exactly DRAFT_SLOTS_UI entries, however the underlying data is shaped — an empty array
+  // is truthy in JS, so a plain "|| fallback" doesn't catch a team whose picks were saved as []
+  // before they'd chosen anyone, which was silently collapsing the whole pick list to zero rows.
+  const rawPicks = draftPicks[myTeamId] || [];
+  const myPicks = Array.from({ length: DRAFT_SLOTS_UI }, (_, i) => rawPicks[i] || null);
   const submitted = !!draftSubmitted[myTeamId];
   const submittedCount = teams.filter((t) => draftSubmitted[t.id]).length;
   const allSubmitted = submittedCount === teams.length;
@@ -5052,7 +5056,8 @@ function DraftTab({ teams, squads, squadStats, myTeamId, playerDatabase, draftSt
   // reinitialized whenever a fresh draft opens or the team changes.
   const [queryTexts, setQueryTexts] = useState(() => myPicks.map((p) => (p ? p.name : "")));
   useEffect(() => {
-    setQueryTexts((draftPicks[myTeamId] || Array(DRAFT_SLOTS_UI).fill(null)).map((p) => (p ? p.name : "")));
+    const raw = draftPicks[myTeamId] || [];
+    setQueryTexts(Array.from({ length: DRAFT_SLOTS_UI }, (_, i) => (raw[i] ? raw[i].name : "")));
   }, [draftState.opensAt, myTeamId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const setSlotText = (i, text) => setQueryTexts((all) => { const next = [...all]; next[i] = text; return next; });
