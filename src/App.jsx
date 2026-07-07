@@ -168,6 +168,10 @@ const PLAYERDB_STORAGE_KEY = "eafc26-player-database-v1";
 // The admin PIN gets its own dedicated key — it's the "keys to the kingdom," and it's exactly what
 // just got wiped when a stale browser overwrote the whole shared blob back to defaults.
 const ADMIN_PIN_STORAGE_KEY = "eafc26-admin-pin-v1";
+// Blind bids need extra care beyond simple isolation — multiple teams submit bids to the SAME
+// record around the same time, which is exactly the "several people editing the same shared thing
+// at once" pattern that's caused every previous sync bug in this app.
+const BLINDBIDS_STORAGE_KEY = "eafc26-blindbids-v1";
 
 // Chat and private messages are append-only — merging by id (rather than replacing the whole
 // array) means an incoming sync can only ever add messages, never accidentally erase one that's
@@ -621,6 +625,10 @@ export default function EafcLeagueApp() {
   const knownTeamSavedAtRef = useRef(new Map()); // per-team: teamId -> savedAt
   const knownPlayerDbSavedAtRef = useRef(0);
   const knownAdminPinSavedAtRef = useRef(0);
+  const knownBlindBidsSavedAtRef = useRef(0);
+  // Snapshot of each blind bid's bids object as last synced, keyed by blind bid id — lets the
+  // autosave detect exactly which records this browser actually changed locally.
+  const lastSyncedBlindBidsRef = useRef(new Map());
   const knownDraftSavedAtRef = useRef(new Map()); // per-team: teamId -> savedAt
   // Same reasoning as teams: tracks what we last saved/received per team, so the autosave only
   // ever writes a team whose picks THIS browser actually changed locally, never every team just
@@ -636,6 +644,7 @@ export default function EafcLeagueApp() {
   const teamSavingRef = useRef(false);
   const playerDbSavingRef = useRef(false);
   const adminPinSavingRef = useRef(false);
+  const blindBidsSavingRef = useRef(false);
   const draftSavingRef = useRef(false);
 
   const applyRemoteData = useCallback((data) => {
@@ -649,7 +658,6 @@ export default function EafcLeagueApp() {
     if (data.injuries) setInjuries(data.injuries);
     if (data.teamLockOverride !== undefined) setTeamLockOverride(data.teamLockOverride);
     if (data.draftState) setDraftState(data.draftState);
-    if (data.blindBids) setBlindBids(data.blindBids);
     if (data.transferWindow) setTransferWindow(data.transferWindow);
     if (data.swapsUsed) setSwapsUsed(data.swapsUsed);
     if (data.swapOffers) setSwapOffers(data.swapOffers);
@@ -669,6 +677,7 @@ export default function EafcLeagueApp() {
       let legacyDraftPicksForMigration = null;
       let legacyDraftSubmittedForMigration = null;
       let legacyAdminPinForMigration = null;
+      let legacyBlindBidsForMigration = null;
       let teamIdsForSquadLoad = defaultTeams().map((t) => t.id);
       try {
         const res = await storage.get(STORAGE_KEY, true);
@@ -684,6 +693,7 @@ export default function EafcLeagueApp() {
           legacyDraftPicksForMigration = data.draftPicks || null;
           legacyDraftSubmittedForMigration = data.draftSubmitted || null;
           legacyAdminPinForMigration = data.adminPin || null;
+          legacyBlindBidsForMigration = data.blindBids || null;
           if (data.teams && data.teams.length) teamIdsForSquadLoad = data.teams.map((t) => t.id);
           knownSavedAtRef.current = data.savedAt || Date.now();
           setLastSyncedAt(knownSavedAtRef.current);
@@ -770,6 +780,23 @@ export default function EafcLeagueApp() {
         }
       } catch (e) {
         if (legacyAdminPinForMigration) setAdminPin(legacyAdminPinForMigration);
+      }
+      // Blind bids — its own key, with a per-record snapshot so the autosave can tell which
+      // specific records this browser actually touched (several teams bid on the same record).
+      try {
+        const bbRes = await storage.get(BLINDBIDS_STORAGE_KEY, true);
+        if (bbRes && bbRes.value) {
+          const bbData = JSON.parse(bbRes.value);
+          const loadedBlindBids = bbData.blindBids || [];
+          setBlindBids(loadedBlindBids);
+          knownBlindBidsSavedAtRef.current = bbData.savedAt || Date.now();
+          loadedBlindBids.forEach((bb) => lastSyncedBlindBidsRef.current.set(bb.id, JSON.stringify(bb.bids || {})));
+        } else if (legacyBlindBidsForMigration) {
+          setBlindBids(legacyBlindBidsForMigration);
+          legacyBlindBidsForMigration.forEach((bb) => lastSyncedBlindBidsRef.current.set(bb.id, JSON.stringify(bb.bids || {})));
+        }
+      } catch (e) {
+        if (legacyBlindBidsForMigration) setBlindBids(legacyBlindBidsForMigration);
       }
       // Each team's own record (name, manager, formation, password, etc.) now lives under its own
       // key too — same reasoning as squads, since everyone tends to be editing their own team's
@@ -902,7 +929,7 @@ export default function EafcLeagueApp() {
         const savedAt = Date.now();
         await storage.set(
           STORAGE_KEY,
-          JSON.stringify({ transfers, fixtures, prizes, events, season, seasonHistory, activity, injuries, teamLockOverride, draftState, blindBids, cardTally, suspensions, transferWindow, swapsUsed, swapOffers, savedAt }),
+          JSON.stringify({ transfers, fixtures, prizes, events, season, seasonHistory, activity, injuries, teamLockOverride, draftState, cardTally, suspensions, transferWindow, swapsUsed, swapOffers, savedAt }),
           true
         );
         knownSavedAtRef.current = savedAt;
@@ -915,7 +942,7 @@ export default function EafcLeagueApp() {
       }
     }, 300);
     return () => clearTimeout(t);
-  }, [transfers, fixtures, prizes, events, season, seasonHistory, activity, injuries, teamLockOverride, draftState, blindBids, cardTally, suspensions, transferWindow, swapsUsed, swapOffers, loaded]);
+  }, [transfers, fixtures, prizes, events, season, seasonHistory, activity, injuries, teamLockOverride, draftState, cardTally, suspensions, transferWindow, swapsUsed, swapOffers, loaded]);
 
   // Private messages save to their own separate key, on their own quick timer — this is what
   // actually stops a message from getting silently erased if someone else's browser (with a
@@ -1220,6 +1247,78 @@ export default function EafcLeagueApp() {
         if (remoteSavedAt > knownAdminPinSavedAtRef.current && !adminPinSavingRef.current && data.pin) {
           setAdminPin(data.pin);
           knownAdminPinSavedAtRef.current = remoteSavedAt;
+        }
+      } catch (e) {
+        // ignore malformed payloads
+      }
+    });
+    return unsubscribe;
+  }, [loaded]);
+
+  // Blind bids save to their own key too. Dirty-tracking works per-record here (comparing each
+  // blind bid's bids object against what was last synced), same principle as squads/teams — only
+  // writes the whole array when at least one record actually changed locally, and submitBlindBid
+  // itself (below) does a direct read-merge-write for the moment of submission specifically, since
+  // that's the highest-risk instant — two teams bidding on the same record within moments of each
+  // other is exactly the scenario a periodic debounced save can't fully protect against.
+  useEffect(() => {
+    if (!loaded) return;
+    blindBidsSavingRef.current = true;
+    const t = setTimeout(async () => {
+      try {
+        const anyDirty = blindBids.some((bb) => lastSyncedBlindBidsRef.current.get(bb.id) !== JSON.stringify(bb.bids || {}));
+        if (anyDirty) {
+          const savedAt = Date.now();
+          await storage.set(BLINDBIDS_STORAGE_KEY, JSON.stringify({ blindBids, savedAt }), true);
+          knownBlindBidsSavedAtRef.current = savedAt;
+          blindBids.forEach((bb) => lastSyncedBlindBidsRef.current.set(bb.id, JSON.stringify(bb.bids || {})));
+        }
+      } catch (e) {
+        // best effort
+      } finally {
+        blindBidsSavingRef.current = false;
+      }
+    }, 300);
+    return () => clearTimeout(t);
+  }, [blindBids, loaded]);
+
+  const pullLatestBlindBids = useCallback(async () => {
+    if (blindBidsSavingRef.current) return;
+    try {
+      const res = await storage.get(BLINDBIDS_STORAGE_KEY, true);
+      if (res && res.value) {
+        const data = JSON.parse(res.value);
+        const remoteSavedAt = data.savedAt || 0;
+        if (remoteSavedAt > knownBlindBidsSavedAtRef.current) {
+          const incoming = data.blindBids || [];
+          setBlindBids(incoming);
+          knownBlindBidsSavedAtRef.current = remoteSavedAt;
+          incoming.forEach((bb) => lastSyncedBlindBidsRef.current.set(bb.id, JSON.stringify(bb.bids || {})));
+        }
+      }
+    } catch (e) {
+      // best effort
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!loaded) return;
+    const t = setInterval(() => pullLatestBlindBids(), SYNC_POLL_MS);
+    return () => clearInterval(t);
+  }, [loaded, pullLatestBlindBids]);
+
+  useEffect(() => {
+    if (!loaded) return;
+    const unsubscribe = subscribeToKey(BLINDBIDS_STORAGE_KEY, (row) => {
+      if (!row || !row.value) return;
+      try {
+        const data = JSON.parse(row.value);
+        const remoteSavedAt = data.savedAt || 0;
+        if (remoteSavedAt > knownBlindBidsSavedAtRef.current && !blindBidsSavingRef.current) {
+          const incoming = data.blindBids || [];
+          setBlindBids(incoming);
+          knownBlindBidsSavedAtRef.current = remoteSavedAt;
+          incoming.forEach((bb) => lastSyncedBlindBidsRef.current.set(bb.id, JSON.stringify(bb.bids || {})));
         }
       } catch (e) {
         // ignore malformed payloads
@@ -1874,12 +1973,19 @@ export default function EafcLeagueApp() {
       const committedTax = leadingAuctions.reduce((s, a) => s + Math.max(Number(a.currentBid || 0) * 0.1, 0.25), 0);
       const committedWage = leadingAuctions.reduce((s, a) => s + Number(a.player?.wage || 0), 0) / 1000;
 
-      const current = t.budget + received - spent - tax - committedSpend - committedTax;
+      // Same idea for any blind bid this team has submitted but hasn't been resolved yet — the
+      // amount is reserved the moment they bid, and only actually released if they lose.
+      const activeBlindBids = blindBids.filter((bb) => !bb.resolved && bb.bids[t.id] !== undefined);
+      const committedBlindBidSpend = activeBlindBids.reduce((s, bb) => s + Number(bb.bids[t.id] || 0), 0);
+      const committedBlindBidWage = activeBlindBids.reduce((s, bb) => s + Number(bb.player?.wage || 0), 0) / 1000;
+
+      const current = t.budget + received - spent - tax - committedSpend - committedTax - committedBlindBidSpend;
       const wages = (squadStats[t.id] && squadStats[t.id].wageM) || 0;
-      const wagesWithCommitted = wages + committedWage;
+      const wagesWithCommitted = wages + committedWage + committedBlindBidWage;
       out[t.id] = {
         spent, tax, received, current, wages,
         committedSpend, committedTax, committedWage, wagesWithCommitted,
+        committedBlindBidSpend, committedBlindBidWage,
         compliant: wagesWithCommitted <= t.wageCap,
       };
     }
@@ -2807,18 +2913,46 @@ export default function EafcLeagueApp() {
   // Submits a sealed bid — amounts stay hidden from other teams until everyone eligible has gone
   // in, at which point it resolves immediately and the highest bidder wins outright (no live
   // bidding war, no waiting on a countdown once everyone's actually submitted).
-  const submitBlindBid = (teamId, blindBidId, amount) => {
+  const submitBlindBid = async (teamId, blindBidId, amount) => {
     const bb = blindBids.find((b) => b.id === blindBidId);
     if (!bb) return "Blind bid not found.";
     if (bb.resolved) return "This has already been resolved.";
     if (!bb.eligibleTeams.includes(teamId)) return "You're not one of the teams involved in this one.";
     const amt = Number(amount);
     if (!amt || amt < bb.minBid) return `Bid must be at least ${money(bb.minBid)}.`;
+    const available = budgetStats[teamId]?.current ?? 0;
+    if (amt > available) return `You only have ${money(available)} left — that bid is more than your remaining budget.`;
 
-    const updatedBids = { ...bb.bids, [teamId]: amt };
-    const allIn = bb.eligibleTeams.every((tid) => updatedBids[tid] !== undefined);
+    // Re-read the freshest server copy right before writing, and merge in just this team's bid —
+    // closes the window where two teams bidding within moments of each other could otherwise have
+    // one submission silently overwrite the other's (a periodic debounced save alone can't fully
+    // protect against this, since it's the two bids happening close together that's the risk).
+    let freshBlindBids = blindBids;
+    try {
+      const res = await storage.get(BLINDBIDS_STORAGE_KEY, true);
+      if (res && res.value) {
+        const data = JSON.parse(res.value);
+        if (data.blindBids) freshBlindBids = data.blindBids;
+      }
+    } catch (e) {
+      // fall back to local state if the fresh read fails
+    }
 
-    setBlindBids((all) => all.map((b) => (b.id === blindBidId ? { ...b, bids: updatedBids } : b)));
+    const freshBb = freshBlindBids.find((b) => b.id === blindBidId) || bb;
+    if (freshBb.resolved) return "This has already been resolved.";
+    const updatedBids = { ...freshBb.bids, [teamId]: amt };
+    const allIn = freshBb.eligibleTeams.every((tid) => updatedBids[tid] !== undefined);
+    const mergedBlindBids = freshBlindBids.map((b) => (b.id === blindBidId ? { ...b, bids: updatedBids } : b));
+
+    setBlindBids(mergedBlindBids);
+    try {
+      const savedAt = Date.now();
+      await storage.set(BLINDBIDS_STORAGE_KEY, JSON.stringify({ blindBids: mergedBlindBids, savedAt }), true);
+      knownBlindBidsSavedAtRef.current = savedAt;
+      mergedBlindBids.forEach((b) => lastSyncedBlindBidsRef.current.set(b.id, JSON.stringify(b.bids || {})));
+    } catch (e) {
+      // best effort — the periodic autosave will pick this up if this direct write fails
+    }
 
     if (allIn) {
       resolveBlindBidInternal(blindBidId, updatedBids);
@@ -5121,6 +5255,7 @@ function DraftTab({ teams, squads, squadStats, myTeamId, playerDatabase, draftSt
   const liveError = myTeamId && !submitted ? validateDraft(myTeamId) : null;
   const [bidAmounts, setBidAmounts] = useState({}); // blindBidId -> typed amount, kept local until submitted
   const [bbPin, setBbPin] = useState({}); // blindBidId -> admin pin, for the force-resolve override
+  const [submittingBid, setSubmittingBid] = useState(null); // blindBidId currently being submitted
 
   const doSubmit = () => {
     const err = submitDraft(myTeamId);
@@ -5137,9 +5272,14 @@ function DraftTab({ teams, squads, squadStats, myTeamId, playerDatabase, draftSt
     setPin("");
     setMsg(err ? { text: err, tone: "red" } : { text: "Draft resolved — check below for any blind bids that need a bid from you.", tone: "green" });
   };
-  const doSubmitBid = (bbId) => {
-    const err = submitBlindBid(myTeamId, bbId, bidAmounts[bbId]);
-    setMsg(err ? { text: err, tone: "red" } : { text: "Bid submitted — sealed until everyone's in.", tone: "green" });
+  const doSubmitBid = async (bbId) => {
+    setSubmittingBid(bbId);
+    try {
+      const err = await submitBlindBid(myTeamId, bbId, bidAmounts[bbId]);
+      setMsg(err ? { text: err, tone: "red" } : { text: "Bid submitted — sealed until everyone's in.", tone: "green" });
+    } finally {
+      setSubmittingBid(null);
+    }
   };
   const doForceResolve = (bbId) => {
     if (!window.confirm("Resolve this blind bid now using whichever bids have come in? Anyone who hasn't bid yet is simply left out.")) return;
@@ -5289,7 +5429,9 @@ function DraftTab({ teams, squads, squadStats, myTeamId, playerDatabase, draftSt
                         <Field label={`Your bid (£M) — min ${money(bb.minBid)}`}>
                           <TextInput type="number" step="0.25" value={bidAmounts[bb.id] || ""} onChange={(e) => setBidAmounts((all) => ({ ...all, [bb.id]: e.target.value }))} style={{ width: 130 }} />
                         </Field>
-                        <Btn size="sm" onClick={() => doSubmitBid(bb.id)}>Submit Sealed Bid</Btn>
+                        <Btn size="sm" onClick={() => doSubmitBid(bb.id)} disabled={submittingBid === bb.id}>
+                          {submittingBid === bb.id ? "Submitting…" : "Submit Sealed Bid"}
+                        </Btn>
                       </div>
                     )
                   )}
