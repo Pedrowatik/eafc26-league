@@ -3762,6 +3762,11 @@ function formationPositions(name) {
     let subtype = "CM";
     if (totalMidBands === 2) subtype = midPos === 0 ? "CDM" : "CAM";
     else if (totalMidBands >= 3) subtype = midPos === 0 ? "CDM" : midPos === totalMidBands - 1 ? "CAM" : "CM";
+    // A 4+ wide band is always a standard flat midfield line with genuine wide players (LM/RM) —
+    // there's no such thing as "4 defensive mids" or "4 attacking mids" in a real formation, so this
+    // overrides the depth-based CDM/CAM guess whenever the band is that wide (e.g. 4-4-1-1's front
+    // 4 was being read as 4 CDMs with no wide players at all before this).
+    if (count >= 4) subtype = "CM";
     labels.push(...labelsForBand(count, subtype));
   });
   return labels;
