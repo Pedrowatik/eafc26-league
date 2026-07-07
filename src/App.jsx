@@ -2667,7 +2667,14 @@ export default function EafcLeagueApp() {
     const allowed86 = 3 + (team.earned86 || 0);
     if (rated86 > allowed86) return `Too many 86+ rated players (${rated86}, max ${allowed86}).`;
     const u21Count = picks.filter((p) => Number(p.age) > 0 && Number(p.age) <= 20).length;
-    if (u21Count < MIN_U21_PLAYERS) return `Not enough U21 players (${u21Count} — need at least ${MIN_U21_PLAYERS}).`;
+    // A captain signed separately (before or during the draft) still counts toward the squad's
+    // overall U21 total — if they're U21, the draft itself only needs to cover the rest.
+    const existingCaptain = [...(squads[teamId]?.starters || []), ...(squads[teamId]?.reserves || [])].find((p) => p && p.isCaptain);
+    const captainIsU21 = existingCaptain && Number(existingCaptain.age) > 0 && Number(existingCaptain.age) <= 20;
+    const requiredU21 = captainIsU21 ? MIN_U21_PLAYERS - 1 : MIN_U21_PLAYERS;
+    if (u21Count < requiredU21) {
+      return `Not enough U21 players (${u21Count} — need at least ${requiredU21}${captainIsU21 ? ", since your U21 Captain already covers one" : ""}).`;
+    }
     // Same 10% (min £250k) tax as any other signing applies here too — factored into the budget check.
     const totalCost = picks.reduce((s, p) => {
       const value = roundUpTo250k(Number(p.value) || 0);
