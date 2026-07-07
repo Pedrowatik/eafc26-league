@@ -1140,11 +1140,11 @@ export default function EafcLeagueApp() {
     }
   }, []);
 
-  useEffect(() => {
-    if (!loaded) return;
-    const t = setInterval(() => pullLatestPlayerDb(), LOW_CHURN_POLL_MS);
-    return () => clearInterval(t);
-  }, [loaded, pullLatestPlayerDb]);
+  // No recurring poll for the player database — unlike squads/auctions/etc., this barely ever
+  // changes (only on an explicit import), but its payload can be several MB with full Sofifa stats
+  // for thousands of players. Polling that repeatedly, even infrequently, was a major contributor
+  // to egress overage. Realtime alone is the right mechanism here — it only transfers data when an
+  // import actually happens, not on a timer regardless of whether anything changed.
 
   useEffect(() => {
     if (!loaded) return;
@@ -3178,7 +3178,7 @@ export default function EafcLeagueApp() {
           <RulesTab teams={teams} standings={standings} />
         )}
         {tab === "playerdb" && (
-          <PlayerDatabaseTab teams={teams} squads={squads} playerDatabase={playerDatabase} openPlayerStats={openPlayerStats} />
+          <PlayerDatabaseTab teams={teams} squads={squads} playerDatabase={playerDatabase} openPlayerStats={openPlayerStats} refreshPlayerDatabase={pullLatestPlayerDb} />
         )}
         {tab === "admin" && (
           <AdminTab teams={teams} squads={squads} myTeamId={myTeamId} playerDatabase={playerDatabase}
@@ -6184,10 +6184,20 @@ function ChatTab({ chat, setChat, teams, myTeamId, markChatSeen }) {
 }
 
 /* --------------------------------- Rules ---------------------------------- */
-function PlayerDatabaseTab({ teams, squads, playerDatabase, openPlayerStats }) {
+function PlayerDatabaseTab({ teams, squads, playerDatabase, openPlayerStats, refreshPlayerDatabase }) {
   const [query, setQuery] = useState("");
   const [sortKey, setSortKey] = useState("rating");
   const [sortDir, setSortDir] = useState(-1);
+  const [refreshing, setRefreshing] = useState(false);
+
+  const doRefresh = async () => {
+    setRefreshing(true);
+    try {
+      await refreshPlayerDatabase();
+    } finally {
+      setRefreshing(false);
+    }
+  };
 
   const allPlayers = useMemo(() => {
     // Who currently owns each player, by name — this overrides the original (Sofifa/import) club
@@ -6259,9 +6269,14 @@ function PlayerDatabaseTab({ teams, squads, playerDatabase, openPlayerStats }) {
         this list shows that team's name instead of their original real-world club.
       </div>
 
-      <Field label="Search by name, club/team, position (incl. secondary), or playstyle">
-        <TextInput value={query} onChange={(e) => setQuery(e.target.value)} placeholder="e.g. Haaland, Arsenal, ST, Finesse Shot…" />
-      </Field>
+      <div className="flex items-end gap-2 flex-wrap" style={{ marginBottom: 14 }}>
+        <Field label="Search by name, club/team, position (incl. secondary), or playstyle" style={{ flex: 1, minWidth: 240 }}>
+          <TextInput value={query} onChange={(e) => setQuery(e.target.value)} placeholder="e.g. Haaland, Arsenal, ST, Finesse Shot…" />
+        </Field>
+        <Btn variant="outline" size="sm" icon={refreshing ? Loader2 : RotateCcw} onClick={doRefresh} disabled={refreshing}>
+          {refreshing ? "Refreshing…" : "Refresh"}
+        </Btn>
+      </div>
 
       <div style={{ overflowX: "auto", marginTop: 14 }}>
         <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5, minWidth: 700 }}>
