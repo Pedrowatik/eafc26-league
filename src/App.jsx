@@ -622,6 +622,10 @@ export default function EafcLeagueApp() {
   const knownPlayerDbSavedAtRef = useRef(0);
   const knownAdminPinSavedAtRef = useRef(0);
   const knownDraftSavedAtRef = useRef(new Map()); // per-team: teamId -> savedAt
+  // Same reasoning as teams: tracks what we last saved/received per team, so the autosave only
+  // ever writes a team whose picks THIS browser actually changed locally, never every team just
+  // because the array reference changed for an unrelated reason.
+  const lastSyncedDraftDataRef = useRef(new Map());
   const savingRef = useRef(false);
   const dmSavingRef = useRef(false);
   const chatSavingRef = useRef(false);
@@ -738,6 +742,7 @@ export default function EafcLeagueApp() {
               loadedPicks[teamId] = ddata.picks || (legacyDraftPicksForMigration && legacyDraftPicksForMigration[teamId]) || [];
               loadedSubmitted[teamId] = !!ddata.submitted;
               knownDraftSavedAtRef.current.set(teamId, ddata.savedAt || Date.now());
+              lastSyncedDraftDataRef.current.set(teamId, JSON.stringify({ picks: loadedPicks[teamId], submitted: loadedSubmitted[teamId] }));
               return;
             }
           } catch (e) {
@@ -746,6 +751,7 @@ export default function EafcLeagueApp() {
           loadedPicks[teamId] = (legacyDraftPicksForMigration && legacyDraftPicksForMigration[teamId]) || [];
           loadedSubmitted[teamId] = !!(legacyDraftSubmittedForMigration && legacyDraftSubmittedForMigration[teamId]);
           knownDraftSavedAtRef.current.set(teamId, 0);
+          lastSyncedDraftDataRef.current.set(teamId, JSON.stringify({ picks: loadedPicks[teamId], submitted: loadedSubmitted[teamId] }));
         }));
         setDraftPicks(loadedPicks);
         setDraftSubmitted(loadedSubmitted);
@@ -1224,17 +1230,28 @@ export default function EafcLeagueApp() {
 
   // Draft picks + submitted flag, per team — same reasoning as squads: every team edits their own
   // picks at the same time, so this needs the same per-team isolation, not one shared object.
+  // Critically: only writes teams that ACTUALLY changed locally since we last synced them — the
+  // same fix applied to teams earlier, since this had the exact same blanket-overwrite flaw (any
+  // browser with a stale copy of another team's picks would silently revert them the moment its
+  // own picks changed for any reason at all).
   useEffect(() => {
     if (!loaded) return;
     draftSavingRef.current = true;
     const t = setTimeout(async () => {
       try {
         const savedAt = Date.now();
-        await Promise.all(teams.map((team) =>
+        const dirtyTeams = teams.filter((team) => {
+          const current = JSON.stringify({ picks: draftPicks[team.id] || [], submitted: !!draftSubmitted[team.id] });
+          return lastSyncedDraftDataRef.current.get(team.id) !== current;
+        });
+        await Promise.all(dirtyTeams.map((team) =>
           storage.set(draftKeyFor(team.id), JSON.stringify({
             picks: draftPicks[team.id] || [], submitted: !!draftSubmitted[team.id], savedAt,
           }), true)
-            .then(() => knownDraftSavedAtRef.current.set(team.id, savedAt))
+            .then(() => {
+              knownDraftSavedAtRef.current.set(team.id, savedAt);
+              lastSyncedDraftDataRef.current.set(team.id, JSON.stringify({ picks: draftPicks[team.id] || [], submitted: !!draftSubmitted[team.id] }));
+            })
             .catch(() => { /* best effort per team */ })
         ));
       } finally {
@@ -1257,6 +1274,7 @@ export default function EafcLeagueApp() {
             setDraftPicks((all) => ({ ...all, [team.id]: data.picks || [] }));
             setDraftSubmitted((all) => ({ ...all, [team.id]: !!data.submitted }));
             knownDraftSavedAtRef.current.set(team.id, remoteSavedAt);
+            lastSyncedDraftDataRef.current.set(team.id, JSON.stringify({ picks: data.picks || [], submitted: !!data.submitted }));
           }
         }
       } catch (e) {
@@ -1284,6 +1302,7 @@ export default function EafcLeagueApp() {
             setDraftPicks((all) => ({ ...all, [team.id]: data.picks || [] }));
             setDraftSubmitted((all) => ({ ...all, [team.id]: !!data.submitted }));
             knownDraftSavedAtRef.current.set(team.id, remoteSavedAt);
+            lastSyncedDraftDataRef.current.set(team.id, JSON.stringify({ picks: data.picks || [], submitted: !!data.submitted }));
           }
         } catch (e) {
           // ignore malformed payloads
