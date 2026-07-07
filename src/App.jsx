@@ -645,6 +645,11 @@ export default function EafcLeagueApp() {
   const playerDbSavingRef = useRef(false);
   const adminPinSavingRef = useRef(false);
   const blindBidsSavingRef = useRef(false);
+  // Guards against resolveDraft running twice in overlapping succession (e.g. a double-click, or
+  // clicking again before the "closed" status has actually landed) — React state doesn't update
+  // synchronously, so checking draftState.status alone isn't enough to stop two calls both seeing
+  // "still open" and both deducting every uncontested player's cost a second time.
+  const resolvingDraftRef = useRef(false);
   const draftSavingRef = useRef(false);
 
   const applyRemoteData = useCallback((data) => {
@@ -2782,6 +2787,28 @@ export default function EafcLeagueApp() {
     return null;
   };
 
+  // Puts the draft back to "open" WITHOUT touching anyone's actual picks or submitted status —
+  // unlike openDraft above, which wipes everything for a genuinely fresh start. This is for
+  // undoing a bad resolution so it can be tried again with everyone's existing picks intact.
+  const reopenDraftKeepPicks = (pinAttempt) => {
+    if (pinAttempt !== adminPin) return "Incorrect PIN.";
+    if (!window.confirm("Reopen the draft, keeping everyone's existing picks and submissions? Use this alongside clearing squads/blind bids to fully undo a bad resolution.")) return null;
+    const now = Date.now();
+    setDraftState((d) => ({ ...d, status: "open", deadline: now + DRAFT_WINDOW_MS }));
+    logActivity("Admin reopened the draft, keeping everyone's existing picks.", "transfer");
+    return null;
+  };
+
+  // Empties out every blind bid — for use alongside reopenDraftKeepPicks, so re-resolving the
+  // draft generates fresh blind bids instead of duplicating whatever was already created.
+  const clearBlindBids = (pinAttempt) => {
+    if (pinAttempt !== adminPin) return "Incorrect PIN.";
+    if (!window.confirm("Clear every blind bid, including any bids already submitted? This can't be undone.")) return null;
+    setBlindBids([]);
+    logActivity("Admin cleared all blind bids.", "transfer");
+    return null;
+  };
+
   const updateDraftPick = (teamId, slotIndex, player) => {
     if (draftState.status !== "open") return "The draft isn't currently open.";
     if (draftSubmitted[teamId]) return "You've already submitted your draft.";
@@ -2839,9 +2866,28 @@ export default function EafcLeagueApp() {
   // deducted as normal). For anyone picked by 2+ teams, kick off a real auction restricted to just
   // those teams, opening bid = the player's value rounded to £250k — everything from there on
   // (bidding, ratification) runs through the normal auction system unchanged.
-  const resolveDraft = (pinAttempt) => {
+  const resolveDraft = async (pinAttempt) => {
     if (pinAttempt !== adminPin) return "Incorrect PIN.";
     if (draftState.status !== "open") return "The draft isn't currently open.";
+    if (resolvingDraftRef.current) return "Already resolving — hang on.";
+    resolvingDraftRef.current = true;
+
+    // Re-check directly against the server right before proceeding — closes the real risk here,
+    // which is a DIFFERENT device or tab (not this one) resolving the draft moments earlier, and
+    // this browser's local view simply not having synced that "closed" status yet. Checking only
+    // local React state can't catch that; this can, since it goes straight to the shared data.
+    try {
+      const fresh = await storage.get(STORAGE_KEY, true);
+      if (fresh && fresh.value) {
+        const freshData = JSON.parse(fresh.value);
+        if (freshData.draftState && freshData.draftState.status !== "open") {
+          resolvingDraftRef.current = false;
+          return "This draft has already been resolved (likely from another device) — refresh to see the results.";
+        }
+      }
+    } catch (e) {
+      // if the recheck itself fails, fall through rather than blocking a genuine resolution
+    }
 
     const pickersByPlayer = {}; // "name::club" -> [{ teamId, player }]
     teams.forEach((t) => {
@@ -2908,6 +2954,7 @@ export default function EafcLeagueApp() {
 
     setDraftState((d) => ({ ...d, status: "closed" }));
     logActivity(`Draft resolved — ${instantAssignments.length} uncontested signing${instantAssignments.length === 1 ? "" : "s"}, ${newBlindBids.length} player${newBlindBids.length === 1 ? "" : "s"} going to a blind bid.`, "transfer");
+    resolvingDraftRef.current = false;
     return null;
   };
 
@@ -5279,6 +5326,7 @@ function DraftTab({ teams, squads, squadStats, myTeamId, playerDatabase, draftSt
   const [bidAmounts, setBidAmounts] = useState({}); // blindBidId -> typed amount, kept local until submitted
   const [bbPin, setBbPin] = useState({}); // blindBidId -> admin pin, for the force-resolve override
   const [submittingBid, setSubmittingBid] = useState(null); // blindBidId currently being submitted
+  const [resolving, setResolving] = useState(false);
 
   const doSubmit = () => {
     const err = submitDraft(myTeamId);
@@ -5289,11 +5337,14 @@ function DraftTab({ teams, squads, squadStats, myTeamId, playerDatabase, draftSt
     setPin("");
     setMsg(err ? { text: err, tone: "red" } : { text: "Draft opened — 7 days on the clock.", tone: "green" });
   };
-  const doResolve = () => {
+  const doResolve = async () => {
+    if (resolving) return;
     if (!window.confirm("Resolve the draft now? Uncontested picks sign instantly, and anyone with a conflict goes to a blind bid. This can't be undone.")) return;
-    const err = resolveDraft(pin);
+    setResolving(true);
+    const err = await resolveDraft(pin);
     setPin("");
     setMsg(err ? { text: err, tone: "red" } : { text: "Draft resolved — check below for any blind bids that need a bid from you.", tone: "green" });
+    setResolving(false);
   };
   const doSubmitBid = async (bbId) => {
     setSubmittingBid(bbId);
@@ -5337,7 +5388,7 @@ function DraftTab({ teams, squads, squadStats, myTeamId, playerDatabase, draftSt
             {draftState.status !== "open" ? (
               <Btn onClick={doOpen}>Open New Draft (7 days)</Btn>
             ) : (
-              <Btn variant="danger" onClick={doResolve}>Resolve Draft Now</Btn>
+              <Btn variant="danger" onClick={doResolve} disabled={resolving}>{resolving ? "Resolving…" : "Resolve Draft Now"}</Btn>
             )}
           </div>
           {msg && <div style={{ color: msg.tone === "green" ? C.green : C.red, fontSize: 12, marginTop: 8 }}>{msg.text}</div>}
@@ -6661,7 +6712,7 @@ function RulesTab({ teams, standings }) {
   );
 }
 
-function DraftSubmissionsTools({ teams, draftPicks, draftSubmitted, adminPin, resetTeamDraft }) {
+function DraftSubmissionsTools({ teams, draftPicks, draftSubmitted, adminPin, resetTeamDraft, reopenDraftKeepPicks, clearBlindBids }) {
   const submittedTeams = teams.filter((t) => draftSubmitted[t.id]);
   const [pin, setPin] = useState("");
   const [resetTeamId, setResetTeamId] = useState(teams[0]?.id || "");
@@ -6750,6 +6801,29 @@ function DraftSubmissionsTools({ teams, draftPicks, draftSubmitted, adminPin, re
         </div>
         {msg && <div style={{ color: msg.tone === "green" ? C.green : C.red, fontSize: 12, marginTop: 8 }}>{msg.text}</div>}
       </div>
+
+      <div style={{ marginTop: 18, paddingTop: 14, borderTop: `1px solid ${C.border}` }}>
+        <div style={{ color: C.text, fontWeight: 700, fontSize: 13, marginBottom: 6 }}>Undo a Bad Resolution</div>
+        <div style={{ color: C.muted, fontSize: 11.5, marginBottom: 10 }}>
+          To fully undo a resolution and try again: (1) clear squads/transfers/auctions and reset budgets in
+          the main Admin Tools section, (2) clear blind bids below, (3) reopen the draft below — everyone's
+          original picks and submissions stay intact throughout.
+        </div>
+        <div className="flex items-center gap-2 flex-wrap">
+          <Btn variant="outline" onClick={() => {
+            const err = clearBlindBids(pin);
+            setMsg(err ? { text: err, tone: "red" } : { text: "Blind bids cleared.", tone: "green" });
+          }}>
+            Clear Blind Bids
+          </Btn>
+          <Btn variant="outline" onClick={() => {
+            const err = reopenDraftKeepPicks(pin);
+            setMsg(err ? { text: err, tone: "red" } : { text: "Draft reopened — everyone's picks are intact.", tone: "green" });
+          }}>
+            Reopen Draft (keep picks)
+          </Btn>
+        </div>
+      </div>
     </Panel>
   );
 }
@@ -6826,7 +6900,7 @@ function AdminTab({ teams, squads, myTeamId, playerDatabase, adminPin, logAdminR
     <div className="grid gap-4">
       <AdminPlayerRewards teams={teams} squads={squads} logAdminReward={logAdminReward} myTeamId={myTeamId} playerDatabase={playerDatabase} squadStats={squadStats} />
 
-      <DraftSubmissionsTools teams={teams} draftPicks={draftPicks} draftSubmitted={draftSubmitted} adminPin={adminPin} resetTeamDraft={resetTeamDraft} />
+      <DraftSubmissionsTools teams={teams} draftPicks={draftPicks} draftSubmitted={draftSubmitted} adminPin={adminPin} resetTeamDraft={resetTeamDraft} reopenDraftKeepPicks={reopenDraftKeepPicks} clearBlindBids={clearBlindBids} />
 
       <AddPrizeTools teams={teams} addPrize={addPrize} />
 
