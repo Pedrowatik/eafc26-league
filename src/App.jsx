@@ -551,6 +551,11 @@ export default function EafcLeagueApp() {
   const [playerDatabase, setPlayerDatabase] = useState([]); // imported from Sofifa for autocomplete
   const [injuries, setInjuries] = useState({}); // { [teamId]: { [playerName]: lastInjuredMatchday } }
   const [teamLockOverride, setTeamLockOverride] = useState(false); // admin toggle to allow re-picks mid-season
+  // Stable across renders unless the actual set of team IDs changes (not just team.budget/formation/
+  // etc. updating, which creates a new array reference via .map() but the same underlying teams).
+  // Used as the dependency for subscription-setup effects so they don't tear down and rebuild their
+  // realtime connections constantly during ordinary syncing.
+  const teamIdsKey = useMemo(() => teams.map((t) => t.id).join(","), [teams]);
   const [draftState, setDraftState] = useState({ status: "closed", opensAt: null, deadline: null });
   const [draftPicks, setDraftPicks] = useState({}); // { [teamId]: [21 player-or-null entries] }
   const [draftSubmitted, setDraftSubmitted] = useState({}); // { [teamId]: true }
@@ -587,6 +592,11 @@ export default function EafcLeagueApp() {
   // Tracks the newest "savedAt" timestamp we know about, whether from our own last save or
   // someone else's. Used to decide whether an incoming poll actually has newer data.
   const knownSavedAtRef = useRef(0);
+  // Keeps the latest teams array accessible to poll callbacks without making those callbacks (and
+  // everything downstream of them — interval timers, subscription setup) get torn down and rebuilt
+  // every time teams gets a new array reference, which happens on essentially every sync tick.
+  const teamsRef = useRef(teams);
+  useEffect(() => { teamsRef.current = teams; }, [teams]);
   const knownDmSavedAtRef = useRef(0); // same idea, but for the separate private-messages store
   const knownChatSavedAtRef = useRef(0); // same idea, but for the separate league chat store
   const knownSquadSavedAtRef = useRef(new Map()); // per-team: teamId -> savedAt
@@ -931,7 +941,7 @@ export default function EafcLeagueApp() {
 
   const pullLatestSquads = useCallback(async () => {
     if (squadSavingRef.current) return;
-    await Promise.all(teams.map(async (team) => {
+    await Promise.all(teamsRef.current.map(async (team) => {
       try {
         const res = await storage.get(squadKeyFor(team.id), true);
         if (res && res.value) {
@@ -947,7 +957,7 @@ export default function EafcLeagueApp() {
         // best effort — one team failing to load shouldn't block the others
       }
     }));
-  }, [teams]);
+  }, []);
 
   useEffect(() => {
     if (!loaded) return;
@@ -974,7 +984,7 @@ export default function EafcLeagueApp() {
       })
     );
     return () => unsubscribers.forEach((unsub) => unsub && unsub());
-  }, [loaded, teams]);
+  }, [loaded, teamIdsKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Teams get the same per-team treatment as squads — editing your own team's name, formation,
   // Home Club, or password shouldn't be at risk from someone else editing theirs at the same time.
@@ -998,7 +1008,7 @@ export default function EafcLeagueApp() {
 
   const pullLatestTeams = useCallback(async () => {
     if (teamSavingRef.current) return;
-    await Promise.all(teams.map(async (team) => {
+    await Promise.all(teamsRef.current.map(async (team) => {
       try {
         const res = await storage.get(teamKeyFor(team.id), true);
         if (res && res.value) {
@@ -1014,7 +1024,7 @@ export default function EafcLeagueApp() {
         // best effort
       }
     }));
-  }, [teams]);
+  }, []);
 
   useEffect(() => {
     if (!loaded) return;
@@ -1041,7 +1051,7 @@ export default function EafcLeagueApp() {
       })
     );
     return () => unsubscribers.forEach((unsub) => unsub && unsub());
-  }, [loaded, teams]);
+  }, [loaded, teamIdsKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Player database saves to its own key, merging incoming updates by name+club rather than
   // replacing wholesale — a concurrent re-import from another admin session (or a slightly-behind
@@ -1136,7 +1146,7 @@ export default function EafcLeagueApp() {
 
   const pullLatestDraft = useCallback(async () => {
     if (draftSavingRef.current) return;
-    await Promise.all(teams.map(async (team) => {
+    await Promise.all(teamsRef.current.map(async (team) => {
       try {
         const res = await storage.get(draftKeyFor(team.id), true);
         if (res && res.value) {
@@ -1153,7 +1163,7 @@ export default function EafcLeagueApp() {
         // best effort
       }
     }));
-  }, [teams]);
+  }, []);
 
   useEffect(() => {
     if (!loaded) return;
@@ -1181,7 +1191,7 @@ export default function EafcLeagueApp() {
       })
     );
     return () => unsubscribers.forEach((unsub) => unsub && unsub());
-  }, [loaded, teams]);
+  }, [loaded, teamIdsKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Auctions, Transfer List, and Wanted List each get their own isolated key too — several teams
   // bidding, listing, or offering around the same time is exactly the pattern that caused trouble
