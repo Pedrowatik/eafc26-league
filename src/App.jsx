@@ -3437,7 +3437,8 @@ export default function EafcLeagueApp() {
             transferWindow={transferWindow} setTransferWindowDates={setTransferWindowDates} clearTransferWindow={clearTransferWindow}
             addPrize={addPrize} exportPlayerDatabaseCSV={exportPlayerDatabaseCSV} adminRemoveCaptain={adminRemoveCaptain}
             draftPicks={draftPicks} draftSubmitted={draftSubmitted} clearSquadsAndTransfers={clearSquadsAndTransfers}
-            applyNewBudgetAndWageCap={applyNewBudgetAndWageCap} resetTeamDraft={resetTeamDraft} />
+            applyNewBudgetAndWageCap={applyNewBudgetAndWageCap} resetTeamDraft={resetTeamDraft}
+            reopenDraftKeepPicks={reopenDraftKeepPicks} clearBlindBids={clearBlindBids} />
         )}
       </div>
 
@@ -6868,7 +6869,7 @@ function AddPrizeTools({ teams, addPrize }) {
   );
 }
 
-function AdminTab({ teams, squads, myTeamId, playerDatabase, adminPin, logAdminReward, resetAll, changeAdminPin, addFundsToTeam, addEarned86Slot, exportBackup, restoreBackup, restoreFromNightlyBackup, endSeason, season, seasonHistory, standings, importPlayerDatabase, clearPlayerDatabase, teamLockOverride, toggleTeamLockOverride, clearChat, resetTeamPassword, squadStats, transferWindow, setTransferWindowDates, clearTransferWindow, addPrize, exportPlayerDatabaseCSV, adminRemoveCaptain, draftPicks, draftSubmitted, clearSquadsAndTransfers, applyNewBudgetAndWageCap, resetTeamDraft }) {
+function AdminTab({ teams, squads, myTeamId, playerDatabase, adminPin, logAdminReward, resetAll, changeAdminPin, addFundsToTeam, addEarned86Slot, exportBackup, restoreBackup, restoreFromNightlyBackup, endSeason, season, seasonHistory, standings, importPlayerDatabase, clearPlayerDatabase, teamLockOverride, toggleTeamLockOverride, clearChat, resetTeamPassword, squadStats, transferWindow, setTransferWindowDates, clearTransferWindow, addPrize, exportPlayerDatabaseCSV, adminRemoveCaptain, draftPicks, draftSubmitted, clearSquadsAndTransfers, applyNewBudgetAndWageCap, resetTeamDraft, reopenDraftKeepPicks, clearBlindBids }) {
   const [unlocked, setUnlocked] = useState(false);
   const [pinInput, setPinInput] = useState("");
   const [err, setErr] = useState("");
