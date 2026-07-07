@@ -2564,10 +2564,11 @@ export default function EafcLeagueApp() {
       setPlayerDatabase(cleaned);
     } else {
       setPlayerDatabase((existing) => {
-        // Keyed by name + club, not name alone — two real players who happen to share a name
-        // (it happens more than you'd think) no longer silently overwrite each other, as long as
-        // they're not also at the same club.
-        const dedupeKey = (p) => `${p.name.toLowerCase()}::${p.club.toLowerCase()}`;
+        // Keyed by name + position + club — matches on the full combination so an update only
+        // ever overwrites the exact same player, never accidentally merging two different people
+        // who happen to share a name, while still reliably catching genuine re-imports of the same
+        // player at the same club in the same position.
+        const dedupeKey = (p) => `${p.name.toLowerCase()}::${p.position.toLowerCase()}::${p.club.toLowerCase()}`;
         const byKey = new Map(existing.map((p) => [dedupeKey(p), p]));
         cleaned.forEach((p) => byKey.set(dedupeKey(p), p));
         return Array.from(byKey.values());
