@@ -2411,6 +2411,19 @@ export default function EafcLeagueApp() {
     return null;
   };
 
+  // Resets just one team's draft picks and submission status — everyone else's picks are
+  // completely untouched, since each team's draft data lives in its own isolated key.
+  const resetTeamDraft = (pinAttempt, teamId) => {
+    if (pinAttempt !== adminPin) return "Incorrect PIN.";
+    const team = teams.find((t) => t.id === teamId);
+    if (!team) return "Team not found.";
+    if (!window.confirm(`Reset ${team.name}'s draft picks and submission status? They'll be able to redraft from scratch. Nobody else's picks are affected. This can't be undone.`)) return null;
+    setDraftPicks((all) => ({ ...all, [teamId]: [] }));
+    setDraftSubmitted((all) => ({ ...all, [teamId]: false }));
+    logActivity(`Admin reset ${team.name}'s draft — they can redraft from scratch.`, "transfer");
+    return null;
+  };
+
 
   // leaves team identity (name, manager, formation, Home Club, password/login) completely untouched.
   // Budgets reset back to the season's starting amount, since an empty squad with a depleted budget
@@ -6478,8 +6491,18 @@ function RulesTab({ teams, standings }) {
   );
 }
 
-function DraftSubmissionsTools({ teams, draftPicks, draftSubmitted }) {
+function DraftSubmissionsTools({ teams, draftPicks, draftSubmitted, adminPin, resetTeamDraft }) {
   const submittedTeams = teams.filter((t) => draftSubmitted[t.id]);
+  const [pin, setPin] = useState("");
+  const [resetTeamId, setResetTeamId] = useState(teams[0]?.id || "");
+  const [msg, setMsg] = useState(null);
+
+  const doReset = () => {
+    const err = resetTeamDraft(pin, resetTeamId);
+    setPin("");
+    if (err) setMsg({ text: err, tone: "red" });
+    else setMsg({ text: `${teams.find((t) => t.id === resetTeamId)?.name}'s draft has been reset — they can redraft.`, tone: "green" });
+  };
 
   const buildCsv = () => {
     const escapeCsv = (val) => {
@@ -6538,6 +6561,25 @@ function DraftSubmissionsTools({ teams, draftPicks, draftSubmitted }) {
           </div>
         </>
       )}
+
+      <div style={{ marginTop: 18, paddingTop: 14, borderTop: `1px solid ${C.border}` }}>
+        <div style={{ color: C.text, fontWeight: 700, fontSize: 13, marginBottom: 6 }}>Reset One Team's Draft</div>
+        <div style={{ color: C.muted, fontSize: 11.5, marginBottom: 10 }}>
+          Clears just this team's picks and submission status so they can redraft from scratch — nobody else's picks are affected.
+        </div>
+        <div className="flex items-end gap-2 flex-wrap">
+          <Field label="Team">
+            <Select value={resetTeamId} onChange={(e) => setResetTeamId(e.target.value)}>
+              {teams.map((t) => <option key={t.id} value={t.id}>{t.name}{draftSubmitted[t.id] ? " (submitted)" : ""}</option>)}
+            </Select>
+          </Field>
+          <Field label="Admin PIN">
+            <TextInput type="password" value={pin} onChange={(e) => setPin(e.target.value)} style={{ width: 130 }} />
+          </Field>
+          <Btn variant="danger" onClick={doReset}>Reset Draft</Btn>
+        </div>
+        {msg && <div style={{ color: msg.tone === "green" ? C.green : C.red, fontSize: 12, marginTop: 8 }}>{msg.text}</div>}
+      </div>
     </Panel>
   );
 }
@@ -6614,7 +6656,7 @@ function AdminTab({ teams, squads, myTeamId, playerDatabase, adminPin, logAdminR
     <div className="grid gap-4">
       <AdminPlayerRewards teams={teams} squads={squads} logAdminReward={logAdminReward} myTeamId={myTeamId} playerDatabase={playerDatabase} squadStats={squadStats} />
 
-      <DraftSubmissionsTools teams={teams} draftPicks={draftPicks} draftSubmitted={draftSubmitted} />
+      <DraftSubmissionsTools teams={teams} draftPicks={draftPicks} draftSubmitted={draftSubmitted} adminPin={adminPin} resetTeamDraft={resetTeamDraft} />
 
       <AddPrizeTools teams={teams} addPrize={addPrize} />
 
