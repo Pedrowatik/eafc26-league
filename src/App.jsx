@@ -2843,13 +2843,14 @@ export default function EafcLeagueApp() {
     if (pinAttempt !== adminPin) return "Incorrect PIN.";
     if (draftState.status !== "open") return "The draft isn't currently open.";
 
-    const pickersByPlayer = {}; // playerName -> [{ teamId, player }]
+    const pickersByPlayer = {}; // "name::club" -> [{ teamId, player }]
     teams.forEach((t) => {
       if (!draftSubmitted[t.id]) return; // teams that never submitted just start with an empty squad
       (draftPicks[t.id] || []).forEach((p) => {
         if (!p) return;
-        if (!pickersByPlayer[p.name]) pickersByPlayer[p.name] = [];
-        pickersByPlayer[p.name].push({ teamId: t.id, player: p });
+        const key = `${p.name}::${p.club || ""}`;
+        if (!pickersByPlayer[key]) pickersByPlayer[key] = [];
+        pickersByPlayer[key].push({ teamId: t.id, player: p });
       });
     });
 
@@ -2923,35 +2924,56 @@ export default function EafcLeagueApp() {
     const available = budgetStats[teamId]?.current ?? 0;
     if (amt > available) return `You only have ${money(available)} left — that bid is more than your remaining budget.`;
 
-    // Re-read the freshest server copy right before writing, and merge in just this team's bid —
-    // closes the window where two teams bidding within moments of each other could otherwise have
-    // one submission silently overwrite the other's (a periodic debounced save alone can't fully
-    // protect against this, since it's the two bids happening close together that's the risk).
-    let freshBlindBids = blindBids;
-    try {
-      const res = await storage.get(BLINDBIDS_STORAGE_KEY, true);
-      if (res && res.value) {
-        const data = JSON.parse(res.value);
-        if (data.blindBids) freshBlindBids = data.blindBids;
+    // Re-read, merge, write, then VERIFY the write actually landed — since every blind bid shares
+    // one combined array, a different team writing a completely different record at nearly the same
+    // moment can still clobber this one (their own "fresh read" just happened to be a beat before
+    // this write landed). If verification shows we got clobbered, retry the whole cycle.
+    let allIn = false;
+    let updatedBids = null;
+    for (let attempt = 0; attempt < 4; attempt++) {
+      let freshBlindBids = blindBids;
+      try {
+        const res = await storage.get(BLINDBIDS_STORAGE_KEY, true);
+        if (res && res.value) {
+          const data = JSON.parse(res.value);
+          if (data.blindBids) freshBlindBids = data.blindBids;
+        }
+      } catch (e) {
+        // fall back to local state if the fresh read fails
       }
-    } catch (e) {
-      // fall back to local state if the fresh read fails
-    }
 
-    const freshBb = freshBlindBids.find((b) => b.id === blindBidId) || bb;
-    if (freshBb.resolved) return "This has already been resolved.";
-    const updatedBids = { ...freshBb.bids, [teamId]: amt };
-    const allIn = freshBb.eligibleTeams.every((tid) => updatedBids[tid] !== undefined);
-    const mergedBlindBids = freshBlindBids.map((b) => (b.id === blindBidId ? { ...b, bids: updatedBids } : b));
+      const freshBb = freshBlindBids.find((b) => b.id === blindBidId) || bb;
+      if (freshBb.resolved) return "This has already been resolved.";
+      updatedBids = { ...freshBb.bids, [teamId]: amt };
+      allIn = freshBb.eligibleTeams.every((tid) => updatedBids[tid] !== undefined);
+      const mergedBlindBids = freshBlindBids.map((b) => (b.id === blindBidId ? { ...b, bids: updatedBids } : b));
 
-    setBlindBids(mergedBlindBids);
-    try {
+      setBlindBids(mergedBlindBids);
       const savedAt = Date.now();
-      await storage.set(BLINDBIDS_STORAGE_KEY, JSON.stringify({ blindBids: mergedBlindBids, savedAt }), true);
-      knownBlindBidsSavedAtRef.current = savedAt;
-      mergedBlindBids.forEach((b) => lastSyncedBlindBidsRef.current.set(b.id, JSON.stringify(b.bids || {})));
-    } catch (e) {
-      // best effort — the periodic autosave will pick this up if this direct write fails
+      try {
+        await storage.set(BLINDBIDS_STORAGE_KEY, JSON.stringify({ blindBids: mergedBlindBids, savedAt }), true);
+        knownBlindBidsSavedAtRef.current = savedAt;
+        mergedBlindBids.forEach((b) => lastSyncedBlindBidsRef.current.set(b.id, JSON.stringify(b.bids || {})));
+      } catch (e) {
+        // best effort — fall through to verification, which will retry if needed
+      }
+
+      // Small pause, then verify our bid actually stuck.
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      try {
+        const verifyRes = await storage.get(BLINDBIDS_STORAGE_KEY, true);
+        if (verifyRes && verifyRes.value) {
+          const verifyData = JSON.parse(verifyRes.value);
+          const verifyBb = (verifyData.blindBids || []).find((b) => b.id === blindBidId);
+          if (verifyBb && verifyBb.bids && verifyBb.bids[teamId] === amt) {
+            break; // confirmed landed — done
+          }
+        }
+      } catch (e) {
+        // if verification itself fails, just trust the write and move on
+        break;
+      }
+      // otherwise, loop again and retry the whole read-merge-write
     }
 
     if (allIn) {
@@ -3326,7 +3348,8 @@ export default function EafcLeagueApp() {
             playerDatabase={playerDatabase} draftState={draftState} draftPicks={draftPicks}
             draftSubmitted={draftSubmitted} updateDraftPick={updateDraftPick} submitDraft={submitDraft}
             validateDraft={validateDraft} openDraft={openDraft} resolveDraft={resolveDraft}
-            blindBids={blindBids} submitBlindBid={submitBlindBid} resolveBlindBidNow={resolveBlindBidNow} />
+            blindBids={blindBids} submitBlindBid={submitBlindBid} resolveBlindBidNow={resolveBlindBidNow}
+            budgetStats={budgetStats} />
         )}
         {tab === "fixtures" && (
           <FixturesTab teams={teams} fixtures={fixtures} setFixtures={setFixtures} logActivity={logActivity}
@@ -5211,7 +5234,7 @@ function TransferWindowBanner({ transferWindow, transferWindowOpen, nowTick }) {
 
 const DRAFT_SLOTS_UI = 21;
 
-function DraftTab({ teams, squads, squadStats, myTeamId, playerDatabase, draftState, draftPicks, draftSubmitted, updateDraftPick, submitDraft, validateDraft, openDraft, resolveDraft, blindBids, submitBlindBid, resolveBlindBidNow }) {
+function DraftTab({ teams, squads, squadStats, myTeamId, playerDatabase, draftState, draftPicks, draftSubmitted, updateDraftPick, submitDraft, validateDraft, openDraft, resolveDraft, blindBids, submitBlindBid, resolveBlindBidNow, budgetStats }) {
   const [pin, setPin] = useState("");
   const [msg, setMsg] = useState(null);
   const [now, setNow] = useState(Date.now());
@@ -5402,6 +5425,11 @@ function DraftTab({ teams, squads, squadStats, myTeamId, playerDatabase, draftSt
             These players were picked by more than one team in the draft. Everyone involved submits one sealed bid —
             nobody sees anyone else's amount. The moment everyone's in, the highest bid wins outright.
           </div>
+          {myTeamId && (
+            <div style={{ marginBottom: 14 }}>
+              <Pill tone="gold">Your available funds: {money(budgetStats[myTeamId]?.current ?? 0)}</Pill>
+            </div>
+          )}
           <div className="grid gap-3">
             {blindBids.map((bb) => {
               const involved = bb.eligibleTeams.includes(myTeamId);
