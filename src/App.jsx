@@ -76,6 +76,7 @@ const STARTER_SLOTS = 21;
 const MIN_U21_PLAYERS = 5; // at least this many players aged 20 or under, somewhere in the squad
 const RESERVE_SLOTS = 5;
 const BASE_WAGE_CAP = 1.5;
+const BASE_BUDGET = 600;
 const NEXT_CAP_MAX = 2.8; // £M for 1st place
 const NEXT_CAP_FLOOR = 1.8; // £M for last place — flattened range so winning doesn't compound the wage advantage
 
@@ -111,7 +112,7 @@ function defaultTeams() {
     id: `T${i + 1}`,
     name: `Team ${i + 1}`,
     manager: names[i],
-    budget: 600,
+    budget: BASE_BUDGET,
     wageCap: BASE_WAGE_CAP,
     earned86: 0,
     notes: "",
@@ -2381,7 +2382,17 @@ export default function EafcLeagueApp() {
     return null;
   };
 
-  // A lighter reset for testing — clears every squad, all transfer history, and all auctions, but
+  // One-time catch-up for existing teams after a starting budget/wage cap change — sets every
+  // team directly to the current constants, regardless of what they've spent so far.
+  const applyNewBudgetAndWageCap = (pinAttempt) => {
+    if (pinAttempt !== adminPin) return "Incorrect PIN.";
+    if (!window.confirm(`Set every team's budget to ${money(BASE_BUDGET)} and wage cap to ${money(BASE_WAGE_CAP)} directly? This overrides whatever they currently have, regardless of spending so far. This can't be undone.`)) return null;
+    setTeams((ts) => ts.map((t) => ({ ...t, budget: BASE_BUDGET, wageCap: BASE_WAGE_CAP })));
+    logActivity(`Admin applied the new starting budget (${money(BASE_BUDGET)}) and wage cap (${money(BASE_WAGE_CAP)}) to every team.`, "transfer");
+    return null;
+  };
+
+
   // leaves team identity (name, manager, formation, Home Club, password/login) completely untouched.
   // Budgets reset back to the season's starting amount, since an empty squad with a depleted budget
   // wouldn't really be a clean slate.
@@ -2391,7 +2402,7 @@ export default function EafcLeagueApp() {
     setSquads(defaultSquads());
     setTransfers([]);
     setAuctions([]);
-    setTeams((ts) => ts.map((t) => ({ ...t, budget: 600 })));
+    setTeams((ts) => ts.map((t) => ({ ...t, budget: BASE_BUDGET })));
     logActivity("Admin cleared every squad, all transfers, and all auctions for a fresh test.", "transfer");
     return null;
   };
@@ -3181,7 +3192,8 @@ export default function EafcLeagueApp() {
             resetTeamPassword={resetTeamPassword} squadStats={squadStats}
             transferWindow={transferWindow} setTransferWindowDates={setTransferWindowDates} clearTransferWindow={clearTransferWindow}
             addPrize={addPrize} exportPlayerDatabaseCSV={exportPlayerDatabaseCSV} adminRemoveCaptain={adminRemoveCaptain}
-            draftPicks={draftPicks} draftSubmitted={draftSubmitted} clearSquadsAndTransfers={clearSquadsAndTransfers} />
+            draftPicks={draftPicks} draftSubmitted={draftSubmitted} clearSquadsAndTransfers={clearSquadsAndTransfers}
+            applyNewBudgetAndWageCap={applyNewBudgetAndWageCap} />
         )}
       </div>
 
@@ -6518,7 +6530,7 @@ function AddPrizeTools({ teams, addPrize }) {
   );
 }
 
-function AdminTab({ teams, squads, myTeamId, playerDatabase, adminPin, logAdminReward, resetAll, changeAdminPin, addFundsToTeam, addEarned86Slot, exportBackup, restoreBackup, restoreFromNightlyBackup, endSeason, season, seasonHistory, standings, importPlayerDatabase, clearPlayerDatabase, teamLockOverride, toggleTeamLockOverride, clearChat, resetTeamPassword, squadStats, transferWindow, setTransferWindowDates, clearTransferWindow, addPrize, exportPlayerDatabaseCSV, adminRemoveCaptain, draftPicks, draftSubmitted, clearSquadsAndTransfers }) {
+function AdminTab({ teams, squads, myTeamId, playerDatabase, adminPin, logAdminReward, resetAll, changeAdminPin, addFundsToTeam, addEarned86Slot, exportBackup, restoreBackup, restoreFromNightlyBackup, endSeason, season, seasonHistory, standings, importPlayerDatabase, clearPlayerDatabase, teamLockOverride, toggleTeamLockOverride, clearChat, resetTeamPassword, squadStats, transferWindow, setTransferWindowDates, clearTransferWindow, addPrize, exportPlayerDatabaseCSV, adminRemoveCaptain, draftPicks, draftSubmitted, clearSquadsAndTransfers, applyNewBudgetAndWageCap }) {
   const [unlocked, setUnlocked] = useState(false);
   const [pinInput, setPinInput] = useState("");
   const [err, setErr] = useState("");
@@ -6566,7 +6578,8 @@ function AdminTab({ teams, squads, myTeamId, playerDatabase, adminPin, logAdminR
         teamLockOverride={teamLockOverride} toggleTeamLockOverride={toggleTeamLockOverride} clearChat={clearChat}
         resetTeamPassword={resetTeamPassword}
         transferWindow={transferWindow} setTransferWindowDates={setTransferWindowDates} clearTransferWindow={clearTransferWindow}
-        adminRemoveCaptain={adminRemoveCaptain} clearSquadsAndTransfers={clearSquadsAndTransfers} />
+        adminRemoveCaptain={adminRemoveCaptain} clearSquadsAndTransfers={clearSquadsAndTransfers}
+        applyNewBudgetAndWageCap={applyNewBudgetAndWageCap} />
     </div>
   );
 }
@@ -7172,7 +7185,7 @@ function EndSeasonTools({ endSeason, season, seasonHistory, standings, teams }) 
   );
 }
 
-function AdminTools({ teams, squads, resetAll, changeAdminPin, addFundsToTeam, addEarned86Slot, teamLockOverride, toggleTeamLockOverride, clearChat, resetTeamPassword, transferWindow, setTransferWindowDates, clearTransferWindow, adminRemoveCaptain, clearSquadsAndTransfers }) {
+function AdminTools({ teams, squads, resetAll, changeAdminPin, addFundsToTeam, addEarned86Slot, teamLockOverride, toggleTeamLockOverride, clearChat, resetTeamPassword, transferWindow, setTransferWindowDates, clearTransferWindow, adminRemoveCaptain, clearSquadsAndTransfers, applyNewBudgetAndWageCap }) {
   const [pin, setPin] = useState("");
   const [msg, setMsg] = useState(null); // { text, tone }
   const [showChangePin, setShowChangePin] = useState(false);
@@ -7242,6 +7255,13 @@ function AdminTools({ teams, squads, resetAll, changeAdminPin, addFundsToTeam, a
     setPin("");
     if (err) show(err, "red");
     else show("Every squad, transfer, and auction cleared — budgets reset, team names/managers/passwords untouched.", "green");
+  };
+
+  const doApplyBudget = () => {
+    const err = applyNewBudgetAndWageCap(pin);
+    setPin("");
+    if (err) show(err, "red");
+    else show(`Every team's budget and wage cap set to the current starting values.`, "green");
   };
 
   const doChangePin = () => {
@@ -7335,6 +7355,7 @@ function AdminTools({ teams, squads, resetAll, changeAdminPin, addFundsToTeam, a
         <div className="flex items-center gap-2 flex-wrap">
           <Btn variant="danger" icon={RotateCcw} onClick={doReset}>Reset all league data</Btn>
           <Btn variant="outline" icon={Trash2} onClick={doClearSquads}>Clear Squads, Transfers & Auctions</Btn>
+          <Btn variant="outline" icon={Wallet} onClick={doApplyBudget}>Apply New Budget/Wage Cap to All Teams</Btn>
           <Btn variant="outline" icon={Trash2} onClick={doClearChat}>Clear League Chat</Btn>
           <Btn variant="outline" icon={KeyRound} onClick={() => setShowChangePin((s) => !s)}>
             {showChangePin ? "Cancel" : "Change PIN"}
