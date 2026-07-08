@@ -1958,7 +1958,7 @@ export default function EafcLeagueApp() {
     const out = {};
     for (const t of teams) {
       const boughtFromOthers = transfers.filter(
-        (tx) => tx.to === t.id && tx.from !== t.id && (tx.instant || nowTick - (tx.createdAt || 0) >= BUYER_RATIFY_MS)
+        (tx) => tx.to === t.id && tx.from !== t.id && !tx.buyerAlreadyPaidDirectly && (tx.instant || nowTick - (tx.createdAt || 0) >= BUYER_RATIFY_MS)
       );
       const soldToOthersOrFA = transfers.filter(
         (tx) => tx.from === t.id && tx.to !== t.id && (tx.instant || nowTick - (tx.createdAt || 0) >= SELLER_CREDIT_MS)
@@ -2950,6 +2950,26 @@ export default function EafcLeagueApp() {
       }, 0);
       return { ...t, budget: (t.budget || 0) - totalCost };
     }));
+    // Log a proper transfer record for each uncontested signing too — budget was already deducted
+    // directly above, so these are flagged to avoid being double-counted there, but this is what
+    // actually gets the tax counted toward the prize pool, which was the whole reason these weren't
+    // showing up in the tax pot at all before.
+    if (instantAssignments.length > 0) {
+      const draftTransferRecords = instantAssignments.map(({ teamId, player }) => {
+        const value = roundUpTo250k(Number(player.value) || 0);
+        const tax = value > 0 ? Math.max(value * 0.1, 0.25) : 0;
+        return {
+          id: uid(), date: todayISO(), player: player.name, position: player.position,
+          rating: Number(player.rating) || 0, club: player.club, age: Number(player.age) || 0,
+          wage: Number(player.wage) || 0, from: "FA", to: teamId, price: value,
+          tax: +tax.toFixed(3), finalCost: +(value + tax).toFixed(3),
+          notes: "Uncontested draft signing", createdAt: Date.now(),
+          sellerProcessed: true, buyerProcessed: true, instant: true,
+          buyerAlreadyPaidDirectly: true,
+        };
+      });
+      setTransfers((tx) => [...draftTransferRecords, ...tx]);
+    }
     if (newBlindBids.length) setBlindBids((all) => [...newBlindBids, ...all]);
 
     setDraftState((d) => ({ ...d, status: "closed" }));
@@ -3050,12 +3070,24 @@ export default function EafcLeagueApp() {
       next[winnerTeamId][slot.group][slot.idx] = playerObj;
       return next;
     });
+    const blindBidValue = roundUpTo250k(winningBid);
+    const blindBidTax = blindBidValue > 0 ? Math.max(blindBidValue * 0.1, 0.25) : 0;
     setTeams((ts) => ts.map((t) => {
       if (t.id !== winnerTeamId) return t;
-      const value = roundUpTo250k(winningBid);
-      const tax = value > 0 ? Math.max(value * 0.1, 0.25) : 0;
-      return { ...t, budget: (t.budget || 0) - value - tax };
+      return { ...t, budget: (t.budget || 0) - blindBidValue - blindBidTax };
     }));
+    // Same reasoning as the draft's uncontested signings — log a proper transfer record so the
+    // tax actually reaches the prize pool, flagged so budgetStats doesn't also double-deduct the
+    // budget that was already taken off directly above.
+    setTransfers((tx) => [{
+      id: uid(), date: todayISO(), player: bb.player.name, position: bb.player.position,
+      rating: Number(bb.player.rating) || 0, club: bb.player.club, age: Number(bb.player.age) || 0,
+      wage: Number(bb.player.wage) || 0, from: "FA", to: winnerTeamId, price: blindBidValue,
+      tax: +blindBidTax.toFixed(3), finalCost: +(blindBidValue + blindBidTax).toFixed(3),
+      notes: "Won blind bid", createdAt: Date.now(),
+      sellerProcessed: true, buyerProcessed: true, instant: true,
+      buyerAlreadyPaidDirectly: true,
+    }, ...tx]);
     setBlindBids((all) => all.map((b) => (b.id === blindBidId ? { ...b, bids, resolved: true, winner: winnerTeamId, winningBid } : b)));
     logActivity(`Blind bid resolved: ${teams.find((t) => t.id === winnerTeamId)?.name} won ${bb.player.name} for ${money(winningBid)}.`, "transfer");
   };
