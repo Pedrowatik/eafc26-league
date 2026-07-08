@@ -2982,13 +2982,20 @@ export default function EafcLeagueApp() {
     }
 
     const pickersByPlayer = {}; // "name::club" -> [{ teamId, player }]
+    // A draft pick only ever stored a snapshot of the player's value/wage from the moment it was
+    // selected — if a re-import has since corrected that player's data, the pick would otherwise
+    // resolve using stale numbers. Look up the current database entry for each pick and use its
+    // value/wage instead, falling back to the stored snapshot if the player can't be found anymore.
+    const currentPlayerLookup = new Map(playerDatabase.map((p) => [`${p.name}::${p.club || ""}`, p]));
     teams.forEach((t) => {
       if (!draftSubmitted[t.id]) return; // teams that never submitted just start with an empty squad
       (draftPicks[t.id] || []).forEach((p) => {
         if (!p) return;
         const key = `${p.name}::${p.club || ""}`;
+        const current = currentPlayerLookup.get(key);
+        const freshPlayer = current ? { ...p, value: current.value, wage: current.wage, rating: current.rating } : p;
         if (!pickersByPlayer[key]) pickersByPlayer[key] = [];
-        pickersByPlayer[key].push({ teamId: t.id, player: p });
+        pickersByPlayer[key].push({ teamId: t.id, player: freshPlayer });
       });
     });
 
@@ -7190,6 +7197,12 @@ async function sofifaFetch(path) {
   return json.data;
 }
 
+// Sofifa's price/wage figures are Euro-denominated (confirmed directly against sofifa.com), not
+// pounds — this app tracks everything in £, so every import needs converting. Exchange rates drift
+// over time; this is a reasonable current approximation, not something that needs to track live
+// rates to the penny for a fantasy league.
+const EUR_TO_GBP = 0.855;
+
 function mapSofifaPlayer(p, clubName) {
   const positions = [p.position1, p.position2, p.position3, p.position4, p.position5, p.position6, p.position7]
     .filter((code) => code != null && code !== -1)
@@ -7204,8 +7217,8 @@ function mapSofifaPlayer(p, clubName) {
     potential: p.potential,
     club: clubName,
     age: p.age,
-    value: (p.price || 0) / 1000000, // Sofifa returns raw £, we track £M
-    wage: (p.wage || 0) / 1000,      // Sofifa returns raw £/week, we track £k/week
+    value: ((p.price || 0) / 1000000) * EUR_TO_GBP, // Sofifa returns raw €, converted to £M
+    wage: ((p.wage || 0) / 1000) * EUR_TO_GBP,      // Sofifa returns raw €/week, converted to £k/week
     weakFoot: p.weakFoot,
     skillMoves: p.skillMoves,
     accelerationType: p.accelerationType,
