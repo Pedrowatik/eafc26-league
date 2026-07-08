@@ -6592,6 +6592,7 @@ function PlayerDatabaseTab({ teams, squads, playerDatabase, openPlayerStats, ref
   const [sortKey, setSortKey] = useState("rating");
   const [sortDir, setSortDir] = useState(-1);
   const [refreshing, setRefreshing] = useState(false);
+  const [missingOnly, setMissingOnly] = useState(false);
 
   const doRefresh = async () => {
     setRefreshing(true);
@@ -6640,13 +6641,16 @@ function PlayerDatabaseTab({ teams, squads, playerDatabase, openPlayerStats, ref
       if (p.roles && p.roles.some((r) => r.toLowerCase().includes(q))) return true;
       return false;
     });
+    if (missingOnly) list = list.filter((p) => !p.value || !p.wage);
     list = [...list].sort((a, b) => {
       const av = a[sortKey], bv = b[sortKey];
       if (typeof av === "string") return (av || "").localeCompare(bv || "") * sortDir;
       return ((Number(av) || 0) - (Number(bv) || 0)) * sortDir;
     });
     return list;
-  }, [allPlayers, query, sortKey, sortDir]);
+  }, [allPlayers, query, sortKey, sortDir, missingOnly]);
+
+  const missingCount = useMemo(() => allPlayers.filter((p) => !p.value || !p.wage).length, [allPlayers]);
 
   const toggleSort = (key) => {
     if (sortKey !== key) { setSortKey(key); setSortDir(1); return; }
@@ -6681,6 +6685,16 @@ function PlayerDatabaseTab({ teams, squads, playerDatabase, openPlayerStats, ref
         </Btn>
       </div>
 
+      {missingCount > 0 && (
+        <div className="flex items-center gap-2" style={{ marginBottom: 14 }}>
+          <label className="flex items-center gap-2" style={{ cursor: "pointer", fontSize: 12.5, color: C.text }}>
+            <input type="checkbox" checked={missingOnly} onChange={(e) => setMissingOnly(e.target.checked)} />
+            Show only players missing a value or wage
+          </label>
+          <Pill tone="red">{missingCount} missing</Pill>
+        </div>
+      )}
+
       <div style={{ overflowX: "auto", marginTop: 14 }}>
         <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5, minWidth: 700 }}>
           <thead>
@@ -6701,13 +6715,16 @@ function PlayerDatabaseTab({ teams, squads, playerDatabase, openPlayerStats, ref
             {filtered.length === 0 && (
               <tr><td colSpan={columns.length} style={{ padding: 16, textAlign: "center", color: C.muted }}>No players match that search.</td></tr>
             )}
-            {filtered.slice(0, 300).map((p, i) => (
-              <tr key={p.name + i} style={{ background: i % 2 ? C.panelAlt : "transparent" }}>
+            {filtered.slice(0, 300).map((p, i) => {
+              const missing = !p.value || !p.wage;
+              return (
+              <tr key={p.name + i} style={{ background: missing ? `${C.red}14` : (i % 2 ? C.panelAlt : "transparent") }}>
                 <td style={{ padding: "6px 8px", borderBottom: `1px solid ${C.border}33`, color: C.text, fontWeight: 600 }}>
                   <button onClick={() => openPlayerStats && openPlayerStats(p)}
                     style={{ background: "transparent", border: "none", padding: 0, cursor: openPlayerStats ? "pointer" : "default", color: C.text, fontWeight: 600, fontSize: "inherit", textDecoration: openPlayerStats ? "underline" : "none", textDecorationColor: `${C.gold}66` }}>
                     {p.name}
                   </button>
+                  {missing && <AlertTriangle size={11} color={C.red} style={{ marginLeft: 6, verticalAlign: "middle" }} />}
                 </td>
                 <td style={{ padding: "6px 8px", borderBottom: `1px solid ${C.border}33`, textAlign: "center", color: C.text }}>{p.position}</td>
                 <td style={{ padding: "6px 8px", borderBottom: `1px solid ${C.border}33`, textAlign: "center", color: C.text }}>{p.rating}</td>
@@ -6715,10 +6732,11 @@ function PlayerDatabaseTab({ teams, squads, playerDatabase, openPlayerStats, ref
                   {p.displayClub}{p.ownedBy && <span style={{ color: C.muted, fontSize: 10.5, textTransform: "uppercase", marginLeft: 6 }}>Owned</span>}
                 </td>
                 <td style={{ padding: "6px 8px", borderBottom: `1px solid ${C.border}33`, textAlign: "center", color: C.text }}>{p.age}</td>
-                <td style={{ padding: "6px 8px", borderBottom: `1px solid ${C.border}33`, textAlign: "center", color: C.text }}>{money(p.value)}</td>
-                <td style={{ padding: "6px 8px", borderBottom: `1px solid ${C.border}33`, textAlign: "center", color: C.text }}>{moneyK(p.wage)}</td>
+                <td style={{ padding: "6px 8px", borderBottom: `1px solid ${C.border}33`, textAlign: "center", color: !p.value ? C.red : C.text }}>{p.value ? money(p.value) : "Missing"}</td>
+                <td style={{ padding: "6px 8px", borderBottom: `1px solid ${C.border}33`, textAlign: "center", color: !p.wage ? C.red : C.text }}>{p.wage ? moneyK(p.wage) : "Missing"}</td>
               </tr>
-            ))}
+              );
+            })}
           </tbody>
         </table>
         {filtered.length > 300 && (
@@ -7436,6 +7454,25 @@ function PlayerDatabaseTools({ playerDatabase, importPlayerDatabase, clearPlayer
   const [pin, setPin] = useState("");
   const [clearPin, setClearPin] = useState(""); // separate from the import PIN above — that field only renders once there's pasted/uploaded data, so clearing needs its own always-visible one
   const [msg, setMsg] = useState(null);
+  const blankSinglePlayer = { name: "", position: "ST", rating: 75, club: "", age: 25, value: 0, wage: 0 };
+  const [singlePlayer, setSinglePlayer] = useState(blankSinglePlayer);
+  const [singlePin, setSinglePin] = useState("");
+  const [singleMsg, setSingleMsg] = useState(null);
+
+  const doAddSinglePlayer = () => {
+    if (!singlePlayer.name.trim()) { setSingleMsg({ text: "Enter a player name.", tone: "red" }); return; }
+    const err = importPlayerDatabase(singlePin, [{
+      name: singlePlayer.name.trim(), position: singlePlayer.position, rating: Number(singlePlayer.rating) || 0,
+      club: singlePlayer.club.trim(), age: Number(singlePlayer.age) || 0,
+      value: Number(singlePlayer.value) || 0, wage: Number(singlePlayer.wage) || 0,
+    }], "merge");
+    setSinglePin("");
+    if (err) setSingleMsg({ text: err, tone: "red" });
+    else {
+      setSingleMsg({ text: `${singlePlayer.name} added/updated in the database.`, tone: "green" });
+      setSinglePlayer(blankSinglePlayer);
+    }
+  };
 
   const parsed = useMemo(() => parsePastedTable(raw), [raw]);
 
@@ -7496,6 +7533,50 @@ function PlayerDatabaseTools({ playerDatabase, importPlayerDatabase, clearPlayer
 
       <div style={{ margin: "20px 0", paddingTop: 6, borderTop: `1px solid ${C.border}` }}>
         <div style={{ color: C.text, fontWeight: 700, fontSize: 13, marginBottom: 10 }}>Or Paste / Upload From Anywhere Else</div>
+      </div>
+
+      <div style={{ background: C.panelAlt, borderRadius: 8, padding: 12, marginBottom: 18 }}>
+        <div style={{ color: C.gold, fontWeight: 700, fontSize: 13, marginBottom: 8 }}>Add / Update a Single Player</div>
+        <div style={{ color: C.muted, fontSize: 11.5, marginBottom: 10 }}>
+          Quicker than a bulk import for fixing one player at a time — e.g. filling in a missing value or wage.
+          Matches on name + position + club, so this updates an existing player if all three match, or adds a new one otherwise.
+        </div>
+        <div className="grid gap-2" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(120px, 1fr))" }}>
+          <Field label="Name">
+            <TextInput value={singlePlayer.name} onChange={(e) => setSinglePlayer((f) => ({ ...f, name: e.target.value }))} />
+          </Field>
+          <Field label="Position">
+            <Select value={singlePlayer.position} onChange={(e) => setSinglePlayer((f) => ({ ...f, position: e.target.value }))}>
+              {POSITIONS.map((pos) => <option key={pos}>{pos}</option>)}
+            </Select>
+          </Field>
+          <Field label="Rating">
+            <TextInput type="number" value={singlePlayer.rating} onChange={(e) => setSinglePlayer((f) => ({ ...f, rating: e.target.value }))} />
+          </Field>
+          <Field label="Club">
+            <TextInput value={singlePlayer.club} onChange={(e) => setSinglePlayer((f) => ({ ...f, club: e.target.value }))} />
+          </Field>
+          <Field label="Age">
+            <TextInput type="number" value={singlePlayer.age} onChange={(e) => setSinglePlayer((f) => ({ ...f, age: e.target.value }))} />
+          </Field>
+          <Field label="Value (£M)">
+            <TextInput type="number" step="0.25" value={singlePlayer.value} onChange={(e) => setSinglePlayer((f) => ({ ...f, value: e.target.value }))} />
+          </Field>
+          <Field label="Wage (£k/week)">
+            <TextInput type="number" value={singlePlayer.wage} onChange={(e) => setSinglePlayer((f) => ({ ...f, wage: e.target.value }))} />
+          </Field>
+        </div>
+        <div className="flex items-end gap-2 flex-wrap" style={{ marginTop: 10 }}>
+          <Field label="Admin PIN">
+            <TextInput type="password" value={singlePin} onChange={(e) => setSinglePin(e.target.value)} style={{ width: 130 }} />
+          </Field>
+          <Btn icon={Plus} onClick={doAddSinglePlayer}>Add / Update Player</Btn>
+        </div>
+        {singleMsg && (
+          <div className="flex items-center gap-2" style={{ marginTop: 8, color: singleMsg.tone === "green" ? C.green : C.red, fontSize: 12.5 }}>
+            {singleMsg.tone === "green" ? <CheckCircle2 size={14} /> : <AlertTriangle size={14} />} {singleMsg.text}
+          </div>
+        )}
       </div>
 
       <div className="flex items-center gap-2 flex-wrap" style={{ marginBottom: 12 }}>
