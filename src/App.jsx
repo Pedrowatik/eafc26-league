@@ -172,6 +172,10 @@ const ADMIN_PIN_STORAGE_KEY = "eafc26-admin-pin-v1";
 // record around the same time, which is exactly the "several people editing the same shared thing
 // at once" pattern that's caused every previous sync bug in this app.
 const BLINDBIDS_STORAGE_KEY = "eafc26-blindbids-v1";
+// Transfers was still part of the shared blob — mostly-additive records with unique IDs, so this
+// uses merge-by-id (like chat/messages), ensuring a stale browser overwriting this can only ever
+// add/update records, never silently drop ones (like tax-bearing entries) that aren't in its copy.
+const TRANSFERS_STORAGE_KEY = "eafc26-transfers-v1";
 
 // Chat and private messages are append-only — merging by id (rather than replacing the whole
 // array) means an incoming sync can only ever add messages, never accidentally erase one that's
@@ -626,6 +630,7 @@ export default function EafcLeagueApp() {
   const knownPlayerDbSavedAtRef = useRef(0);
   const knownAdminPinSavedAtRef = useRef(0);
   const knownBlindBidsSavedAtRef = useRef(0);
+  const knownTransfersSavedAtRef = useRef(0);
   // Snapshot of each blind bid's bids object as last synced, keyed by blind bid id — lets the
   // autosave detect exactly which records this browser actually changed locally.
   const lastSyncedBlindBidsRef = useRef(new Map());
@@ -645,6 +650,7 @@ export default function EafcLeagueApp() {
   const playerDbSavingRef = useRef(false);
   const adminPinSavingRef = useRef(false);
   const blindBidsSavingRef = useRef(false);
+  const transfersSavingRef = useRef(false);
   // Guards against resolveDraft running twice in overlapping succession (e.g. a double-click, or
   // clicking again before the "closed" status has actually landed) — React state doesn't update
   // synchronously, so checking draftState.status alone isn't enough to stop two calls both seeing
@@ -653,7 +659,6 @@ export default function EafcLeagueApp() {
   const draftSavingRef = useRef(false);
 
   const applyRemoteData = useCallback((data) => {
-    if (data.transfers) setTransfers(data.transfers);
     if (data.fixtures) setFixtures(data.fixtures);
     if (data.prizes) setPrizes(data.prizes);
     if (data.events) setEvents(data.events);
@@ -683,6 +688,7 @@ export default function EafcLeagueApp() {
       let legacyDraftSubmittedForMigration = null;
       let legacyAdminPinForMigration = null;
       let legacyBlindBidsForMigration = null;
+      let legacyTransfersForMigration = null;
       let teamIdsForSquadLoad = defaultTeams().map((t) => t.id);
       try {
         const res = await storage.get(STORAGE_KEY, true);
@@ -699,6 +705,7 @@ export default function EafcLeagueApp() {
           legacyDraftSubmittedForMigration = data.draftSubmitted || null;
           legacyAdminPinForMigration = data.adminPin || null;
           legacyBlindBidsForMigration = data.blindBids || null;
+          legacyTransfersForMigration = data.transfers || null;
           if (data.teams && data.teams.length) teamIdsForSquadLoad = data.teams.map((t) => t.id);
           knownSavedAtRef.current = data.savedAt || Date.now();
           setLastSyncedAt(knownSavedAtRef.current);
@@ -802,6 +809,19 @@ export default function EafcLeagueApp() {
         }
       } catch (e) {
         if (legacyBlindBidsForMigration) setBlindBids(legacyBlindBidsForMigration);
+      }
+      // Transfers — own key too, merge-based since records are additive with unique ids.
+      try {
+        const txRes = await storage.get(TRANSFERS_STORAGE_KEY, true);
+        if (txRes && txRes.value) {
+          const txData = JSON.parse(txRes.value);
+          setTransfers(txData.transfers || []);
+          knownTransfersSavedAtRef.current = txData.savedAt || Date.now();
+        } else if (legacyTransfersForMigration) {
+          setTransfers(legacyTransfersForMigration);
+        }
+      } catch (e) {
+        if (legacyTransfersForMigration) setTransfers(legacyTransfersForMigration);
       }
       // Each team's own record (name, manager, formation, password, etc.) now lives under its own
       // key too — same reasoning as squads, since everyone tends to be editing their own team's
@@ -934,7 +954,7 @@ export default function EafcLeagueApp() {
         const savedAt = Date.now();
         await storage.set(
           STORAGE_KEY,
-          JSON.stringify({ transfers, fixtures, prizes, events, season, seasonHistory, activity, injuries, teamLockOverride, draftState, cardTally, suspensions, transferWindow, swapsUsed, swapOffers, savedAt }),
+          JSON.stringify({ fixtures, prizes, events, season, seasonHistory, activity, injuries, teamLockOverride, draftState, cardTally, suspensions, transferWindow, swapsUsed, swapOffers, savedAt }),
           true
         );
         knownSavedAtRef.current = savedAt;
@@ -947,7 +967,7 @@ export default function EafcLeagueApp() {
       }
     }, 300);
     return () => clearTimeout(t);
-  }, [transfers, fixtures, prizes, events, season, seasonHistory, activity, injuries, teamLockOverride, draftState, cardTally, suspensions, transferWindow, swapsUsed, swapOffers, loaded]);
+  }, [fixtures, prizes, events, season, seasonHistory, activity, injuries, teamLockOverride, draftState, cardTally, suspensions, transferWindow, swapsUsed, swapOffers, loaded]);
 
   // Private messages save to their own separate key, on their own quick timer — this is what
   // actually stops a message from getting silently erased if someone else's browser (with a
@@ -1144,6 +1164,17 @@ export default function EafcLeagueApp() {
     return Array.from(byKey.values());
   };
 
+  // Same idea for transfers — records are almost always purely additive (new signings, auctions,
+  // draft/blind-bid resolutions) and each has a unique id, so merging by id means a stale browser
+  // can only ever add/update records, never silently wipe out ones (like tax-bearing entries) that
+  // aren't in its own out-of-date copy. This is what was actually causing tax to never reach the
+  // prize pool even after the records were correctly created.
+  const mergeTransfersById = (local, incoming) => {
+    const byId = new Map(local.map((tx) => [tx.id, tx]));
+    (incoming || []).forEach((tx) => byId.set(tx.id, tx));
+    return Array.from(byId.values()).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  };
+
   useEffect(() => {
     if (!loaded) return;
     playerDbSavingRef.current = true;
@@ -1324,6 +1355,67 @@ export default function EafcLeagueApp() {
           setBlindBids(incoming);
           knownBlindBidsSavedAtRef.current = remoteSavedAt;
           incoming.forEach((bb) => lastSyncedBlindBidsRef.current.set(bb.id, JSON.stringify(bb.bids || {})));
+        }
+      } catch (e) {
+        // ignore malformed payloads
+      }
+    });
+    return unsubscribe;
+  }, [loaded]);
+
+  // Transfers save to their own key too, merging by id — a stale browser overwriting this can only
+  // ever add/update records, never silently drop ones (this is what was actually losing the
+  // tax-bearing records from draft/blind-bid resolutions).
+  useEffect(() => {
+    if (!loaded) return;
+    transfersSavingRef.current = true;
+    const t = setTimeout(async () => {
+      try {
+        const savedAt = Date.now();
+        await storage.set(TRANSFERS_STORAGE_KEY, JSON.stringify({ transfers, savedAt }), true);
+        knownTransfersSavedAtRef.current = savedAt;
+      } catch (e) {
+        // best effort
+      } finally {
+        transfersSavingRef.current = false;
+      }
+    }, 300);
+    return () => clearTimeout(t);
+  }, [transfers, loaded]);
+
+  const pullLatestTransfers = useCallback(async () => {
+    if (transfersSavingRef.current) return;
+    try {
+      const res = await storage.get(TRANSFERS_STORAGE_KEY, true);
+      if (res && res.value) {
+        const data = JSON.parse(res.value);
+        const remoteSavedAt = data.savedAt || 0;
+        if (remoteSavedAt > knownTransfersSavedAtRef.current) {
+          setTransfers((local) => mergeTransfersById(local, data.transfers));
+          knownTransfersSavedAtRef.current = remoteSavedAt;
+        }
+      }
+    } catch (e) {
+      // best effort
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!loaded) return;
+    const t = setInterval(() => pullLatestTransfers(), SYNC_POLL_MS);
+    return () => clearInterval(t);
+  }, [loaded, pullLatestTransfers]);
+
+  useEffect(() => {
+    if (!loaded) return;
+    const unsubscribe = subscribeToKey(TRANSFERS_STORAGE_KEY, (row) => {
+      if (!row || !row.value) return;
+      try {
+        const data = JSON.parse(row.value);
+        const remoteSavedAt = data.savedAt || 0;
+        if (remoteSavedAt > knownTransfersSavedAtRef.current && !transfersSavingRef.current) {
+          setTransfers((local) => mergeTransfersById(local, data.transfers));
+          knownTransfersSavedAtRef.current = remoteSavedAt;
         }
       } catch (e) {
         // ignore malformed payloads
