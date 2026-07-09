@@ -2827,6 +2827,15 @@ export default function EafcLeagueApp() {
     return null;
   };
 
+  // Removes several players in one go — same name+position+club matching as the single-player
+  // delete above, just applied as one batch so it's a single state update, not one per player.
+  const deleteMultiplePlayersFromDatabase = (pinAttempt, playersToDelete) => {
+    if (pinAttempt !== adminPin) return "Incorrect PIN.";
+    const keySet = new Set(playersToDelete.map((p) => `${p.name}::${p.position}::${p.club || ""}`));
+    setPlayerDatabase((all) => all.filter((p) => !keySet.has(`${p.name}::${p.position}::${p.club || ""}`)));
+    return null;
+  };
+
   const clearActivity = (pinAttempt) => {
     if (pinAttempt !== adminPin) return "Incorrect PIN.";
     setActivity([]);
@@ -3562,7 +3571,7 @@ export default function EafcLeagueApp() {
           <RulesTab teams={teams} standings={standings} />
         )}
         {tab === "playerdb" && (
-          <PlayerDatabaseTab teams={teams} squads={squads} playerDatabase={playerDatabase} openPlayerStats={openPlayerStats} refreshPlayerDatabase={pullLatestPlayerDb} adminPin={adminPin} importPlayerDatabase={importPlayerDatabase} deletePlayerFromDatabase={deletePlayerFromDatabase} />
+          <PlayerDatabaseTab teams={teams} squads={squads} playerDatabase={playerDatabase} openPlayerStats={openPlayerStats} refreshPlayerDatabase={pullLatestPlayerDb} adminPin={adminPin} importPlayerDatabase={importPlayerDatabase} deletePlayerFromDatabase={deletePlayerFromDatabase} deleteMultiplePlayersFromDatabase={deleteMultiplePlayersFromDatabase} />
         )}
         {tab === "admin" && (
           <AdminTab teams={teams} squads={squads} myTeamId={myTeamId} playerDatabase={playerDatabase}
@@ -6596,7 +6605,7 @@ function ChatTab({ chat, setChat, teams, myTeamId, markChatSeen }) {
 }
 
 /* --------------------------------- Rules ---------------------------------- */
-function PlayerDatabaseTab({ teams, squads, playerDatabase, openPlayerStats, refreshPlayerDatabase, adminPin, importPlayerDatabase, deletePlayerFromDatabase }) {
+function PlayerDatabaseTab({ teams, squads, playerDatabase, openPlayerStats, refreshPlayerDatabase, adminPin, importPlayerDatabase, deletePlayerFromDatabase, deleteMultiplePlayersFromDatabase }) {
   const [query, setQuery] = useState("");
   const [sortKey, setSortKey] = useState("rating");
   const [sortDir, setSortDir] = useState(-1);
@@ -6608,6 +6617,8 @@ function PlayerDatabaseTab({ teams, squads, playerDatabase, openPlayerStats, ref
   const [unlockError, setUnlockError] = useState(null);
   const [editValues, setEditValues] = useState({}); // rowKey -> { value, wage }
   const [rowMsg, setRowMsg] = useState({}); // rowKey -> { text, tone }
+  const [selected, setSelected] = useState(() => new Set()); // Set of rowKeys currently ticked
+  const [bulkMsg, setBulkMsg] = useState(null);
 
   const rowKeyOf = (p) => `${p.name}::${p.position}::${p.club || ""}`;
 
@@ -6634,6 +6645,33 @@ function PlayerDatabaseTab({ teams, squads, playerDatabase, openPlayerStats, ref
     const err = deletePlayerFromDatabase(adminPin, p.name, p.position, p.club);
     const key = rowKeyOf(p);
     setRowMsg((all) => ({ ...all, [key]: err ? { text: err, tone: "red" } : { text: "Deleted.", tone: "green" } }));
+  };
+
+  const toggleRowSelected = (p) => {
+    const key = rowKeyOf(p);
+    setSelected((all) => {
+      const next = new Set(all);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      return next;
+    });
+  };
+
+  // "Page" here means whatever's currently visible given the search/filters — there's no separate
+  // multi-page navigation, just a cap on how many rows render at once, so select-all only ever
+  // touches what's actually on screen right now, never anything hidden by the current search.
+  const doSelectAllOnPage = () => setSelected(new Set(visibleRows.map((p) => rowKeyOf(p))));
+  const doDeselectAllOnPage = () => setSelected(new Set());
+
+  const doDeleteSelected = () => {
+    const toDelete = visibleRows.filter((p) => selected.has(rowKeyOf(p)));
+    if (toDelete.length === 0) return;
+    if (!window.confirm(`Delete ${toDelete.length} selected player${toDelete.length === 1 ? "" : "s"} from the database? This can't be undone.`)) return;
+    const err = deleteMultiplePlayersFromDatabase(adminPin, toDelete);
+    if (err) setBulkMsg({ text: err, tone: "red" });
+    else {
+      setBulkMsg({ text: `${toDelete.length} player${toDelete.length === 1 ? "" : "s"} deleted.`, tone: "green" });
+      setSelected(new Set());
+    }
   };
 
   const doRefresh = async () => {
@@ -6705,7 +6743,11 @@ function PlayerDatabaseTab({ teams, squads, playerDatabase, openPlayerStats, ref
       return ((Number(av) || 0) - (Number(bv) || 0)) * sortDir;
     });
     return list;
-  }, [allPlayers, query, sortKey, sortDir, missingOnly]);
+  }, [allPlayers, query, sortKey, sortDir, missingOnly, duplicatesOnly]);
+
+  // What's actually on screen right now — select-all/deselect-all only ever touches this set,
+  // never anything hidden by the current search or beyond the display cap.
+  const visibleRows = useMemo(() => filtered.slice(0, 300), [filtered]);
 
   const missingCount = useMemo(() => allPlayers.filter((p) => !p.value || !p.wage).length, [allPlayers]);
   const duplicateCount = useMemo(() => allPlayers.filter((p) => p.likelyDuplicate).length, [allPlayers]);
@@ -6769,8 +6811,18 @@ function PlayerDatabaseTab({ teams, squads, playerDatabase, openPlayerStats, ref
 
       <div style={{ background: C.panelAlt, borderRadius: 8, padding: 12, marginBottom: 14 }}>
         {adminUnlocked ? (
-          <div className="flex items-center gap-2" style={{ color: C.green, fontSize: 12.5 }}>
-            <CheckCircle2 size={14} /> Admin editing unlocked — you can now edit values/wages and delete players directly below.
+          <div>
+            <div className="flex items-center gap-2" style={{ color: C.green, fontSize: 12.5, marginBottom: 10 }}>
+              <CheckCircle2 size={14} /> Admin editing unlocked — you can now edit values/wages and delete players directly below.
+            </div>
+            <div className="flex items-center gap-2 flex-wrap">
+              <Btn size="sm" variant="outline" onClick={doSelectAllOnPage}>Select All (this view)</Btn>
+              <Btn size="sm" variant="outline" onClick={doDeselectAllOnPage}>Deselect All</Btn>
+              <Btn size="sm" variant="danger" onClick={doDeleteSelected} disabled={selected.size === 0}>
+                Delete Selected ({selected.size})
+              </Btn>
+              {bulkMsg && <div style={{ color: bulkMsg.tone === "green" ? C.green : C.red, fontSize: 12 }}>{bulkMsg.text}</div>}
+            </div>
           </div>
         ) : (
           <div className="flex items-end gap-2 flex-wrap">
@@ -6803,7 +6855,7 @@ function PlayerDatabaseTab({ teams, squads, playerDatabase, openPlayerStats, ref
             {filtered.length === 0 && (
               <tr><td colSpan={tableColumns.length} style={{ padding: 16, textAlign: "center", color: C.muted }}>No players match that search.</td></tr>
             )}
-            {filtered.slice(0, 300).map((p, i) => {
+            {visibleRows.map((p, i) => {
               const missing = !p.value || !p.wage;
               const key = rowKeyOf(p);
               const edit = editValues[key] || { value: p.value || "", wage: p.wage || "" };
@@ -6842,6 +6894,7 @@ function PlayerDatabaseTab({ teams, squads, playerDatabase, openPlayerStats, ref
                 {adminUnlocked && (
                   <td style={{ padding: "6px 8px", borderBottom: `1px solid ${C.border}33`, textAlign: "center" }}>
                     <div className="flex items-center justify-center gap-1.5">
+                      <input type="checkbox" checked={selected.has(key)} onChange={() => toggleRowSelected(p)} title="Select for bulk delete" />
                       <Btn size="sm" variant="outline" onClick={() => doSaveEdit(p)}>Save</Btn>
                       <button onClick={() => doDeletePlayer(p)} title="Delete player" style={{ background: "transparent", border: "none", cursor: "pointer", color: C.red, padding: 4 }}>
                         <Trash2 size={14} />
