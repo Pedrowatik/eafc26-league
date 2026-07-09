@@ -1335,7 +1335,9 @@ export default function EafcLeagueApp() {
           const incoming = data.blindBids || [];
           setBlindBids(incoming);
           knownBlindBidsSavedAtRef.current = remoteSavedAt;
-          incoming.forEach((bb) => lastSyncedBlindBidsRef.current.set(bb.id, JSON.stringify(bb.bids || {})));
+          // Full replace, not .forEach() append — forEach on an empty incoming array does nothing
+          // at all, leaving stale entries behind that make a genuine clear look "dirty" again.
+          lastSyncedBlindBidsRef.current = new Map(incoming.map((bb) => [bb.id, JSON.stringify(bb.bids || {})]));
         }
       }
     } catch (e) {
@@ -1360,7 +1362,7 @@ export default function EafcLeagueApp() {
           const incoming = data.blindBids || [];
           setBlindBids(incoming);
           knownBlindBidsSavedAtRef.current = remoteSavedAt;
-          incoming.forEach((bb) => lastSyncedBlindBidsRef.current.set(bb.id, JSON.stringify(bb.bids || {})));
+          lastSyncedBlindBidsRef.current = new Map(incoming.map((bb) => [bb.id, JSON.stringify(bb.bids || {})]));
         }
       } catch (e) {
         // ignore malformed payloads
@@ -2917,10 +2919,21 @@ export default function EafcLeagueApp() {
 
   // Empties out every blind bid — for use alongside reopenDraftKeepPicks, so re-resolving the
   // draft generates fresh blind bids instead of duplicating whatever was already created.
-  const clearBlindBids = (pinAttempt) => {
+  const clearBlindBids = async (pinAttempt) => {
     if (pinAttempt !== adminPin) return "Incorrect PIN.";
     if (!window.confirm("Clear every blind bid, including any bids already submitted? This can't be undone.")) return null;
     setBlindBids([]);
+    // Write immediately and directly rather than relying purely on the debounced autosave — this
+    // is a high-stakes, one-shot admin action, so it shouldn't depend on the general dirty-check
+    // heuristics at all (those had a real bug with exactly this "clear everything" case before).
+    try {
+      const savedAt = Date.now();
+      await storage.set(BLINDBIDS_STORAGE_KEY, JSON.stringify({ blindBids: [], savedAt }), true);
+      knownBlindBidsSavedAtRef.current = savedAt;
+      lastSyncedBlindBidsRef.current = new Map();
+    } catch (e) {
+      // best effort — the (now-fixed) autosave will still pick this up if this direct write fails
+    }
     logActivity("Admin cleared all blind bids.", "transfer");
     return null;
   };
@@ -7135,8 +7148,8 @@ function DraftSubmissionsTools({ teams, draftPicks, draftSubmitted, adminPin, re
           original picks and submissions stay intact throughout.
         </div>
         <div className="flex items-center gap-2 flex-wrap">
-          <Btn variant="outline" onClick={() => {
-            const err = clearBlindBids(pin);
+          <Btn variant="outline" onClick={async () => {
+            const err = await clearBlindBids(pin);
             setMsg(err ? { text: err, tone: "red" } : { text: "Blind bids cleared.", tone: "green" });
           }}>
             Clear Blind Bids
