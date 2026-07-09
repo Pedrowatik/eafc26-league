@@ -6602,6 +6602,7 @@ function PlayerDatabaseTab({ teams, squads, playerDatabase, openPlayerStats, ref
   const [sortDir, setSortDir] = useState(-1);
   const [refreshing, setRefreshing] = useState(false);
   const [missingOnly, setMissingOnly] = useState(false);
+  const [duplicatesOnly, setDuplicatesOnly] = useState(false);
   const [adminUnlocked, setAdminUnlocked] = useState(false);
   const [unlockPin, setUnlockPin] = useState("");
   const [unlockError, setUnlockError] = useState(null);
@@ -6655,19 +6656,33 @@ function PlayerDatabaseTab({ teams, squads, playerDatabase, openPlayerStats, ref
     });
 
     // Combine the imported database with any players that only exist because they were signed
-    // directly (instant rewards, manual entries) and never went through an import.
-    const byName = {};
-    playerDatabase.forEach((p) => { if (p.name) byName[p.name] = { ...p }; });
+    // directly (instant rewards, manual entries) and never went through an import. Keyed by
+    // name+position+club — NOT name alone, which was silently hiding genuinely different players
+    // (or actual duplicates worth deleting) who happen to share just a name.
+    const byKey = {};
+    const keyOf = (p) => `${p.name}::${p.position}::${p.club || ""}`;
+    playerDatabase.forEach((p) => { if (p.name) byKey[keyOf(p)] = { ...p }; });
     teams.forEach((t) => {
       [...(squads[t.id]?.starters || []), ...(squads[t.id]?.reserves || [])].forEach((p) => {
-        if (p && !byName[p.name]) byName[p.name] = { ...p };
+        if (p && !byKey[keyOf(p)]) byKey[keyOf(p)] = { ...p };
       });
     });
 
-    return Object.values(byName).map((p) => ({
+    const list = Object.values(byKey);
+    // Same name + position + age showing up more than once strongly suggests the same real
+    // person imported twice (under different clubs, or a stale vs. corrected entry) — flagged so
+    // it's easy to spot and clean up, separately from two different real people sharing a name.
+    const dupeCounts = {};
+    list.forEach((p) => {
+      const dk = `${p.name}::${p.position}::${p.age}`;
+      dupeCounts[dk] = (dupeCounts[dk] || 0) + 1;
+    });
+
+    return list.map((p) => ({
       ...p,
       ownedBy: ownerByName[p.name] || null,
       displayClub: ownerByName[p.name] || p.club,
+      likelyDuplicate: dupeCounts[`${p.name}::${p.position}::${p.age}`] > 1,
     }));
   }, [playerDatabase, teams, squads]);
 
@@ -6683,6 +6698,7 @@ function PlayerDatabaseTab({ teams, squads, playerDatabase, openPlayerStats, ref
       return false;
     });
     if (missingOnly) list = list.filter((p) => !p.value || !p.wage);
+    if (duplicatesOnly) list = list.filter((p) => p.likelyDuplicate);
     list = [...list].sort((a, b) => {
       const av = a[sortKey], bv = b[sortKey];
       if (typeof av === "string") return (av || "").localeCompare(bv || "") * sortDir;
@@ -6692,6 +6708,7 @@ function PlayerDatabaseTab({ teams, squads, playerDatabase, openPlayerStats, ref
   }, [allPlayers, query, sortKey, sortDir, missingOnly]);
 
   const missingCount = useMemo(() => allPlayers.filter((p) => !p.value || !p.wage).length, [allPlayers]);
+  const duplicateCount = useMemo(() => allPlayers.filter((p) => p.likelyDuplicate).length, [allPlayers]);
 
   const toggleSort = (key) => {
     if (sortKey !== key) { setSortKey(key); setSortDir(1); return; }
@@ -6727,13 +6744,26 @@ function PlayerDatabaseTab({ teams, squads, playerDatabase, openPlayerStats, ref
         </Btn>
       </div>
 
-      {missingCount > 0 && (
-        <div className="flex items-center gap-2" style={{ marginBottom: 14 }}>
-          <label className="flex items-center gap-2" style={{ cursor: "pointer", fontSize: 12.5, color: C.text }}>
-            <input type="checkbox" checked={missingOnly} onChange={(e) => setMissingOnly(e.target.checked)} />
-            Show only players missing a value or wage
-          </label>
-          <Pill tone="red">{missingCount} missing</Pill>
+      {(missingCount > 0 || duplicateCount > 0) && (
+        <div className="flex items-center gap-3 flex-wrap" style={{ marginBottom: 14 }}>
+          {missingCount > 0 && (
+            <div className="flex items-center gap-2">
+              <label className="flex items-center gap-2" style={{ cursor: "pointer", fontSize: 12.5, color: C.text }}>
+                <input type="checkbox" checked={missingOnly} onChange={(e) => setMissingOnly(e.target.checked)} />
+                Show only players missing a value or wage
+              </label>
+              <Pill tone="red">{missingCount} missing</Pill>
+            </div>
+          )}
+          {duplicateCount > 0 && (
+            <div className="flex items-center gap-2">
+              <label className="flex items-center gap-2" style={{ cursor: "pointer", fontSize: 12.5, color: C.text }}>
+                <input type="checkbox" checked={duplicatesOnly} onChange={(e) => setDuplicatesOnly(e.target.checked)} />
+                Show only likely duplicates (same name, position &amp; age)
+              </label>
+              <Pill tone="gold">{duplicateCount} possible duplicates</Pill>
+            </div>
+          )}
         </div>
       )}
 
@@ -6778,14 +6808,16 @@ function PlayerDatabaseTab({ teams, squads, playerDatabase, openPlayerStats, ref
               const key = rowKeyOf(p);
               const edit = editValues[key] || { value: p.value || "", wage: p.wage || "" };
               const msg = rowMsg[key];
+              const rowBg = missing ? `${C.red}14` : p.likelyDuplicate ? `${C.gold}14` : (i % 2 ? C.panelAlt : "transparent");
               return (
-              <tr key={p.name + i} style={{ background: missing ? `${C.red}14` : (i % 2 ? C.panelAlt : "transparent") }}>
+              <tr key={p.name + i} style={{ background: rowBg }}>
                 <td style={{ padding: "6px 8px", borderBottom: `1px solid ${C.border}33`, color: C.text, fontWeight: 600 }}>
                   <button onClick={() => openPlayerStats && openPlayerStats(p)}
                     style={{ background: "transparent", border: "none", padding: 0, cursor: openPlayerStats ? "pointer" : "default", color: C.text, fontWeight: 600, fontSize: "inherit", textDecoration: openPlayerStats ? "underline" : "none", textDecorationColor: `${C.gold}66` }}>
                     {p.name}
                   </button>
-                  {missing && <AlertTriangle size={11} color={C.red} style={{ marginLeft: 6, verticalAlign: "middle" }} />}
+                  {missing && <AlertTriangle size={11} color={C.red} style={{ marginLeft: 6, verticalAlign: "middle" }} title="Missing value or wage" />}
+                  {p.likelyDuplicate && <AlertTriangle size={11} color={C.gold} style={{ marginLeft: 6, verticalAlign: "middle" }} title="Likely duplicate - same name, position & age" />}
                 </td>
                 <td style={{ padding: "6px 8px", borderBottom: `1px solid ${C.border}33`, textAlign: "center", color: C.text }}>{p.position}</td>
                 <td style={{ padding: "6px 8px", borderBottom: `1px solid ${C.border}33`, textAlign: "center", color: C.text }}>{p.rating}</td>
