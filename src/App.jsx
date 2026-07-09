@@ -1302,12 +1302,18 @@ export default function EafcLeagueApp() {
     blindBidsSavingRef.current = true;
     const t = setTimeout(async () => {
       try {
-        const anyDirty = blindBids.some((bb) => lastSyncedBlindBidsRef.current.get(bb.id) !== JSON.stringify(bb.bids || {}));
+        // .some() on an empty array is always false, so clearing every blind bid down to []
+        // could never be detected as "dirty" by comparing existing records alone — that's what
+        // was actually causing cleared blind bids to never persist and reappear on the next sync.
+        // A straight count mismatch against what's tracked catches that case too.
+        const countChanged = blindBids.length !== lastSyncedBlindBidsRef.current.size;
+        const anyRecordDirty = blindBids.some((bb) => lastSyncedBlindBidsRef.current.get(bb.id) !== JSON.stringify(bb.bids || {}));
+        const anyDirty = countChanged || anyRecordDirty;
         if (anyDirty) {
           const savedAt = Date.now();
           await storage.set(BLINDBIDS_STORAGE_KEY, JSON.stringify({ blindBids, savedAt }), true);
           knownBlindBidsSavedAtRef.current = savedAt;
-          blindBids.forEach((bb) => lastSyncedBlindBidsRef.current.set(bb.id, JSON.stringify(bb.bids || {})));
+          lastSyncedBlindBidsRef.current = new Map(blindBids.map((bb) => [bb.id, JSON.stringify(bb.bids || {})]));
         }
       } catch (e) {
         // best effort
