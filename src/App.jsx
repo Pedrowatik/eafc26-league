@@ -2818,6 +2818,15 @@ export default function EafcLeagueApp() {
     return null;
   };
 
+  // Removes just one specific player, matched on name + position + club — same key used for
+  // import merging, so this reliably targets the exact row without touching anyone else,
+  // including a same-named player at a different club or in a different position.
+  const deletePlayerFromDatabase = (pinAttempt, name, position, club) => {
+    if (pinAttempt !== adminPin) return "Incorrect PIN.";
+    setPlayerDatabase((all) => all.filter((p) => !(p.name === name && p.position === position && (p.club || "") === (club || ""))));
+    return null;
+  };
+
   const clearActivity = (pinAttempt) => {
     if (pinAttempt !== adminPin) return "Incorrect PIN.";
     setActivity([]);
@@ -3553,7 +3562,7 @@ export default function EafcLeagueApp() {
           <RulesTab teams={teams} standings={standings} />
         )}
         {tab === "playerdb" && (
-          <PlayerDatabaseTab teams={teams} squads={squads} playerDatabase={playerDatabase} openPlayerStats={openPlayerStats} refreshPlayerDatabase={pullLatestPlayerDb} />
+          <PlayerDatabaseTab teams={teams} squads={squads} playerDatabase={playerDatabase} openPlayerStats={openPlayerStats} refreshPlayerDatabase={pullLatestPlayerDb} adminPin={adminPin} importPlayerDatabase={importPlayerDatabase} deletePlayerFromDatabase={deletePlayerFromDatabase} />
         )}
         {tab === "admin" && (
           <AdminTab teams={teams} squads={squads} myTeamId={myTeamId} playerDatabase={playerDatabase}
@@ -6587,12 +6596,44 @@ function ChatTab({ chat, setChat, teams, myTeamId, markChatSeen }) {
 }
 
 /* --------------------------------- Rules ---------------------------------- */
-function PlayerDatabaseTab({ teams, squads, playerDatabase, openPlayerStats, refreshPlayerDatabase }) {
+function PlayerDatabaseTab({ teams, squads, playerDatabase, openPlayerStats, refreshPlayerDatabase, adminPin, importPlayerDatabase, deletePlayerFromDatabase }) {
   const [query, setQuery] = useState("");
   const [sortKey, setSortKey] = useState("rating");
   const [sortDir, setSortDir] = useState(-1);
   const [refreshing, setRefreshing] = useState(false);
   const [missingOnly, setMissingOnly] = useState(false);
+  const [adminUnlocked, setAdminUnlocked] = useState(false);
+  const [unlockPin, setUnlockPin] = useState("");
+  const [unlockError, setUnlockError] = useState(null);
+  const [editValues, setEditValues] = useState({}); // rowKey -> { value, wage }
+  const [rowMsg, setRowMsg] = useState({}); // rowKey -> { text, tone }
+
+  const rowKeyOf = (p) => `${p.name}::${p.position}::${p.club || ""}`;
+
+  const doUnlock = () => {
+    if (unlockPin !== adminPin) { setUnlockError("Incorrect PIN."); return; }
+    setAdminUnlocked(true);
+    setUnlockError(null);
+    setUnlockPin("");
+  };
+
+  const doSaveEdit = (p) => {
+    const key = rowKeyOf(p);
+    const edit = editValues[key];
+    if (!edit) return;
+    const err = importPlayerDatabase(adminPin, [{
+      name: p.name, position: p.position, rating: p.rating, club: p.club,
+      age: p.age, value: Number(edit.value), wage: Number(edit.wage),
+    }], "merge");
+    setRowMsg((all) => ({ ...all, [key]: err ? { text: err, tone: "red" } : { text: "Saved.", tone: "green" } }));
+  };
+
+  const doDeletePlayer = (p) => {
+    if (!window.confirm(`Delete ${p.name} (${p.position}, ${p.club || "no club"}) from the database? This can't be undone.`)) return;
+    const err = deletePlayerFromDatabase(adminPin, p.name, p.position, p.club);
+    const key = rowKeyOf(p);
+    setRowMsg((all) => ({ ...all, [key]: err ? { text: err, tone: "red" } : { text: "Deleted.", tone: "green" } }));
+  };
 
   const doRefresh = async () => {
     setRefreshing(true);
@@ -6666,6 +6707,7 @@ function PlayerDatabaseTab({ teams, squads, playerDatabase, openPlayerStats, ref
     { key: "value", label: "Value" },
     { key: "wage", label: "Wage (£k)" },
   ];
+  const tableColumns = adminUnlocked ? [...columns, { key: "actions", label: "Admin" }] : columns;
 
   return (
     <Panel style={{ padding: 18 }}>
@@ -6695,16 +6737,32 @@ function PlayerDatabaseTab({ teams, squads, playerDatabase, openPlayerStats, ref
         </div>
       )}
 
+      <div style={{ background: C.panelAlt, borderRadius: 8, padding: 12, marginBottom: 14 }}>
+        {adminUnlocked ? (
+          <div className="flex items-center gap-2" style={{ color: C.green, fontSize: 12.5 }}>
+            <CheckCircle2 size={14} /> Admin editing unlocked — you can now edit values/wages and delete players directly below.
+          </div>
+        ) : (
+          <div className="flex items-end gap-2 flex-wrap">
+            <Field label="Admin PIN (to edit or delete players directly on this page)">
+              <TextInput type="password" value={unlockPin} onChange={(e) => setUnlockPin(e.target.value)} style={{ width: 160 }} />
+            </Field>
+            <Btn size="sm" onClick={doUnlock}>Unlock Editing</Btn>
+            {unlockError && <div style={{ color: C.red, fontSize: 12 }}>{unlockError}</div>}
+          </div>
+        )}
+      </div>
+
       <div style={{ overflowX: "auto", marginTop: 14 }}>
         <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5, minWidth: 700 }}>
           <thead>
             <tr>
-              {columns.map((col) => (
-                <th key={col.key} onClick={() => toggleSort(col.key)}
+              {tableColumns.map((col) => (
+                <th key={col.key} onClick={() => col.key !== "actions" && toggleSort(col.key)}
                   style={{
                     color: sortKey === col.key ? C.gold : C.muted, fontSize: 10.5, textTransform: "uppercase",
                     padding: "6px 8px", textAlign: col.key === "name" || col.key === "displayClub" ? "left" : "center",
-                    borderBottom: `1px solid ${C.border}`, cursor: "pointer", userSelect: "none", whiteSpace: "nowrap",
+                    borderBottom: `1px solid ${C.border}`, cursor: col.key === "actions" ? "default" : "pointer", userSelect: "none", whiteSpace: "nowrap",
                   }}>
                   {col.label}{sortKey === col.key ? (sortDir === 1 ? " ▲" : " ▼") : ""}
                 </th>
@@ -6713,10 +6771,13 @@ function PlayerDatabaseTab({ teams, squads, playerDatabase, openPlayerStats, ref
           </thead>
           <tbody>
             {filtered.length === 0 && (
-              <tr><td colSpan={columns.length} style={{ padding: 16, textAlign: "center", color: C.muted }}>No players match that search.</td></tr>
+              <tr><td colSpan={tableColumns.length} style={{ padding: 16, textAlign: "center", color: C.muted }}>No players match that search.</td></tr>
             )}
             {filtered.slice(0, 300).map((p, i) => {
               const missing = !p.value || !p.wage;
+              const key = rowKeyOf(p);
+              const edit = editValues[key] || { value: p.value || "", wage: p.wage || "" };
+              const msg = rowMsg[key];
               return (
               <tr key={p.name + i} style={{ background: missing ? `${C.red}14` : (i % 2 ? C.panelAlt : "transparent") }}>
                 <td style={{ padding: "6px 8px", borderBottom: `1px solid ${C.border}33`, color: C.text, fontWeight: 600 }}>
@@ -6732,8 +6793,31 @@ function PlayerDatabaseTab({ teams, squads, playerDatabase, openPlayerStats, ref
                   {p.displayClub}{p.ownedBy && <span style={{ color: C.muted, fontSize: 10.5, textTransform: "uppercase", marginLeft: 6 }}>Owned</span>}
                 </td>
                 <td style={{ padding: "6px 8px", borderBottom: `1px solid ${C.border}33`, textAlign: "center", color: C.text }}>{p.age}</td>
-                <td style={{ padding: "6px 8px", borderBottom: `1px solid ${C.border}33`, textAlign: "center", color: !p.value ? C.red : C.text }}>{p.value ? money(p.value) : "Missing"}</td>
-                <td style={{ padding: "6px 8px", borderBottom: `1px solid ${C.border}33`, textAlign: "center", color: !p.wage ? C.red : C.text }}>{p.wage ? moneyK(p.wage) : "Missing"}</td>
+                <td style={{ padding: "6px 8px", borderBottom: `1px solid ${C.border}33`, textAlign: "center", color: !p.value ? C.red : C.text }}>
+                  {adminUnlocked ? (
+                    <TextInput type="number" step="0.25" value={edit.value}
+                      onChange={(e) => setEditValues((all) => ({ ...all, [key]: { ...edit, value: e.target.value } }))}
+                      style={{ width: 70, textAlign: "center" }} />
+                  ) : (p.value ? money(p.value) : "Missing")}
+                </td>
+                <td style={{ padding: "6px 8px", borderBottom: `1px solid ${C.border}33`, textAlign: "center", color: !p.wage ? C.red : C.text }}>
+                  {adminUnlocked ? (
+                    <TextInput type="number" value={edit.wage}
+                      onChange={(e) => setEditValues((all) => ({ ...all, [key]: { ...edit, wage: e.target.value } }))}
+                      style={{ width: 70, textAlign: "center" }} />
+                  ) : (p.wage ? moneyK(p.wage) : "Missing")}
+                </td>
+                {adminUnlocked && (
+                  <td style={{ padding: "6px 8px", borderBottom: `1px solid ${C.border}33`, textAlign: "center" }}>
+                    <div className="flex items-center justify-center gap-1.5">
+                      <Btn size="sm" variant="outline" onClick={() => doSaveEdit(p)}>Save</Btn>
+                      <button onClick={() => doDeletePlayer(p)} title="Delete player" style={{ background: "transparent", border: "none", cursor: "pointer", color: C.red, padding: 4 }}>
+                        <Trash2 size={14} />
+                      </button>
+                    </div>
+                    {msg && <div style={{ color: msg.tone === "green" ? C.green : C.red, fontSize: 10, marginTop: 3 }}>{msg.text}</div>}
+                  </td>
+                )}
               </tr>
               );
             })}
