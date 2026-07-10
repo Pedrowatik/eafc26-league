@@ -72,6 +72,11 @@ function transferStatus(tx, nowMs) {
 }
 
 const N_TEAMS = 10;
+// Only 8 of the 10 team slots are actually being used this season — these two were never claimed
+// and have no data. Filtered out at load time everywhere teams are read, without touching N_TEAMS
+// itself or anything downstream that depends on it, since this app is in active mid-season use.
+// To bring a team back, just remove its id from this list.
+const HIDDEN_TEAM_IDS = ["T8", "T10"];
 const STARTER_SLOTS = 21;
 const MIN_U21_PLAYERS = 5; // at least this many players aged 20 or under, somewhere in the squad
 const RESERVE_SLOTS = 5;
@@ -848,7 +853,7 @@ export default function EafcLeagueApp() {
           knownTeamSavedAtRef.current.set(teamId, 0);
           lastSyncedTeamDataRef.current.set(teamId, JSON.stringify(loadedTeams[i]));
         }));
-        setTeams(loadedTeams.filter(Boolean));
+        setTeams(loadedTeams.filter(Boolean).filter((t) => !HIDDEN_TEAM_IDS.includes(t.id)));
       } catch (e) {
         // best effort
       }
