@@ -2631,7 +2631,6 @@ export default function EafcLeagueApp() {
     if (!window.confirm(`Reset ${team.name}'s draft picks and submission status? They'll be able to redraft from scratch. Nobody else's picks are affected. This can't be undone.`)) return null;
     setDraftPicks((all) => ({ ...all, [teamId]: [] }));
     setDraftSubmitted((all) => ({ ...all, [teamId]: false }));
-    logActivity(`Admin reset ${team.name}'s draft — they can redraft from scratch.`, "transfer");
     return null;
   };
 
