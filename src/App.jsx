@@ -2069,6 +2069,17 @@ export default function EafcLeagueApp() {
         .filter((tx) => teamById[tx.to] && !tx.sellerAlreadyPaidDirectly) // only real teams pay the seller; skip ones already settled directly
         .reduce((s, tx) => s + Number(tx.price || 0), 0);
 
+      // Display-only totals for the Budgets tab's "Spent"/"Tax Paid" columns — these include EVERY
+      // signing, including draft/blind-bid ones that are deliberately excluded from `spent`/`tax`
+      // above (to avoid double-counting, since those already deduct the budget directly). Without
+      // this, a season built entirely from draft/blind-bid signings showed those columns as empty,
+      // even though real money had genuinely been spent.
+      const allBought = transfers.filter(
+        (tx) => tx.to === t.id && tx.from !== t.id && (tx.instant || nowTick - (tx.createdAt || 0) >= BUYER_RATIFY_MS)
+      );
+      const spentAllSources = allBought.reduce((s, tx) => s + Number(tx.price || 0), 0);
+      const taxAllSources = allBought.reduce((s, tx) => s + Number(tx.tax || 0), 0);
+
       // Live auctions this team is currently winning aren't final yet, but the money and wage cost
       // are effectively spoken for — reflect that immediately rather than waiting for ratification.
       const leadingAuctions = auctions.filter(
@@ -2091,6 +2102,7 @@ export default function EafcLeagueApp() {
         spent, tax, received, current, wages,
         committedSpend, committedTax, committedWage, wagesWithCommitted,
         committedBlindBidSpend, committedBlindBidWage,
+        spentAllSources, taxAllSources,
         compliant: wagesWithCommitted <= t.wageCap,
       };
     }
@@ -3605,7 +3617,7 @@ export default function EafcLeagueApp() {
             addPrize={addPrize} exportPlayerDatabaseCSV={exportPlayerDatabaseCSV} adminRemoveCaptain={adminRemoveCaptain}
             draftPicks={draftPicks} draftSubmitted={draftSubmitted} clearSquadsAndTransfers={clearSquadsAndTransfers}
             applyNewBudgetAndWageCap={applyNewBudgetAndWageCap} resetTeamDraft={resetTeamDraft}
-            reopenDraftKeepPicks={reopenDraftKeepPicks} clearBlindBids={clearBlindBids} />
+            reopenDraftKeepPicks={reopenDraftKeepPicks} clearBlindBids={clearBlindBids} blindBids={blindBids} />
         )}
       </div>
 
@@ -4615,11 +4627,11 @@ function BudgetsTab({ teams, budgetStats }) {
           return [
             t.name,
             <b style={{ color: b.current < 20 ? C.red : C.text }}>{money(b.current)}</b>,
-            <b style={{ color: remainingWage < 0 ? C.red : C.text }}>{money(remainingWage)}</b>,
+            <b style={{ color: remainingWage <= 0.1 ? C.red : C.text }}>{money(remainingWage)}</b>,
             committedTotal > 0
               ? <Pill tone="gold">{money(committedTotal)} + {moneyK(b.committedWage * 1000)}/wk</Pill>
               : <span style={{ color: C.muted }}>—</span>,
-            money(t.budget), money(b.spent), money(b.tax), money(b.received),
+            money(t.budget), money(b.spentAllSources), money(b.taxAllSources), money(b.received),
             money(b.wages), money(t.wageCap),
             <Pill tone={b.compliant ? "green" : "red"}>{b.compliant ? "OK" : "Over"}</Pill>,
           ];
@@ -4630,8 +4642,8 @@ function BudgetsTab({ teams, budgetStats }) {
         moment a team holds the top bid, that bid's cost (+10% tax) and the player's wage are reserved against their
         budget and wage cap, even before the 24h ratification completes. If they get outbid, the hold moves to
         whoever takes the lead instead. "Tied Up in Live Bids" shows that reserved amount on its own for clarity.
-        Wages/Season and Spent/Received only reflect deals that have actually been ratified. Wage Cap is editable on
-        the Squad Lists tab per team for Season 2+.
+        Wages/Season and Spent/Received reflect every signing, including draft and blind-bid resolutions. Wage Cap is
+        editable on the Squad Lists tab per team for Season 2+. Remaining Wage Budget flags red at £100k or less.
       </div>
     </Panel>
   );
@@ -7049,7 +7061,7 @@ function RulesTab({ teams, standings }) {
   );
 }
 
-function DraftSubmissionsTools({ teams, draftPicks, draftSubmitted, adminPin, resetTeamDraft, reopenDraftKeepPicks, clearBlindBids }) {
+function DraftSubmissionsTools({ teams, draftPicks, draftSubmitted, adminPin, resetTeamDraft, reopenDraftKeepPicks, clearBlindBids, blindBids }) {
   const submittedTeams = teams.filter((t) => draftSubmitted[t.id]);
   const [pin, setPin] = useState("");
   const [resetTeamId, setResetTeamId] = useState(teams[0]?.id || "");
@@ -7161,6 +7173,25 @@ function DraftSubmissionsTools({ teams, draftPicks, draftSubmitted, adminPin, re
           </Btn>
         </div>
       </div>
+
+      {blindBids && blindBids.filter((bb) => !bb.resolved).length > 0 && (
+        <div style={{ marginTop: 18, paddingTop: 14, borderTop: `1px solid ${C.border}` }}>
+          <div style={{ color: C.text, fontWeight: 700, fontSize: 13, marginBottom: 6 }}>Blind Bid Status</div>
+          <div style={{ display: "grid", gap: 10 }}>
+            {blindBids.filter((bb) => !bb.resolved).map((bb) => (
+              <div key={bb.id} style={{ fontSize: 11.5, color: C.muted }}>
+                <span style={{ color: C.text, fontWeight: 600 }}>{bb.player.name}</span>
+                {" — "}
+                {bb.eligibleTeams.map((tid) => {
+                  const t = teams.find((tt) => tt.id === tid);
+                  const amt = bb.bids[tid];
+                  return `${t ? t.name : tid}: ${amt !== undefined ? money(amt) : "—"}`;
+                }).join(" · ")}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </Panel>
   );
 }
@@ -7205,7 +7236,7 @@ function AddPrizeTools({ teams, addPrize }) {
   );
 }
 
-function AdminTab({ teams, squads, myTeamId, playerDatabase, adminPin, logAdminReward, resetAll, changeAdminPin, addFundsToTeam, addEarned86Slot, exportBackup, restoreBackup, restoreFromNightlyBackup, endSeason, season, seasonHistory, standings, importPlayerDatabase, clearPlayerDatabase, teamLockOverride, toggleTeamLockOverride, clearChat, resetTeamPassword, squadStats, transferWindow, setTransferWindowDates, clearTransferWindow, addPrize, exportPlayerDatabaseCSV, adminRemoveCaptain, draftPicks, draftSubmitted, clearSquadsAndTransfers, applyNewBudgetAndWageCap, resetTeamDraft, reopenDraftKeepPicks, clearBlindBids }) {
+function AdminTab({ teams, squads, myTeamId, playerDatabase, adminPin, logAdminReward, resetAll, changeAdminPin, addFundsToTeam, addEarned86Slot, exportBackup, restoreBackup, restoreFromNightlyBackup, endSeason, season, seasonHistory, standings, importPlayerDatabase, clearPlayerDatabase, teamLockOverride, toggleTeamLockOverride, clearChat, resetTeamPassword, squadStats, transferWindow, setTransferWindowDates, clearTransferWindow, addPrize, exportPlayerDatabaseCSV, adminRemoveCaptain, draftPicks, draftSubmitted, clearSquadsAndTransfers, applyNewBudgetAndWageCap, resetTeamDraft, reopenDraftKeepPicks, clearBlindBids, blindBids }) {
   const [unlocked, setUnlocked] = useState(false);
   const [pinInput, setPinInput] = useState("");
   const [err, setErr] = useState("");
@@ -7237,7 +7268,7 @@ function AdminTab({ teams, squads, myTeamId, playerDatabase, adminPin, logAdminR
     <div className="grid gap-4">
       <AdminPlayerRewards teams={teams} squads={squads} logAdminReward={logAdminReward} myTeamId={myTeamId} playerDatabase={playerDatabase} squadStats={squadStats} />
 
-      <DraftSubmissionsTools teams={teams} draftPicks={draftPicks} draftSubmitted={draftSubmitted} adminPin={adminPin} resetTeamDraft={resetTeamDraft} reopenDraftKeepPicks={reopenDraftKeepPicks} clearBlindBids={clearBlindBids} />
+      <DraftSubmissionsTools teams={teams} draftPicks={draftPicks} draftSubmitted={draftSubmitted} adminPin={adminPin} resetTeamDraft={resetTeamDraft} reopenDraftKeepPicks={reopenDraftKeepPicks} clearBlindBids={clearBlindBids} blindBids={blindBids} />
 
       <AddPrizeTools teams={teams} addPrize={addPrize} />
 
