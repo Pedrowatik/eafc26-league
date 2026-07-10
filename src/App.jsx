@@ -93,6 +93,36 @@ function nextSeasonCap(position, nTeams) {
 
 // End-of-season budget top-up: scales by final position, top team gets the most.
 // Hand-tuned to land on clean round numbers (ending in 0 or 5) rather than perfectly even steps.
+// Season-end wage cap change: adds a bonus ON TOP of whatever a team's current wage cap already
+// is (so it compounds season over season), rather than resetting the whole cap by position like
+// nextSeasonCap used to. Scales linearly from +£300k for 1st down to +£50k for last place.
+const SEASON_WAGE_BONUS_MAX = 0.3; // £M for 1st place
+const SEASON_WAGE_BONUS_MIN = 0.05; // £M for last place
+
+// Cup prizes - budget in £M, wage in £M (both compound onto the team's current wage cap, same as
+// the season-end bonus, since the wage bonus is meant to be a lasting reward, not a one-off).
+const CUP_WINNER_BUDGET = 25;
+const CUP_WINNER_WAGE = 0.1;
+const CUP_RUNNERUP_BUDGET = 10;
+const CUP_RUNNERUP_WAGE = 0.04;
+
+// Sponsorship deals: assigned once per season, meant for the halfway point. Expected position
+// blends current league position (weighted more heavily) with squad quality (value + rating).
+const SPONSOR_POSITION_WEIGHT = 0.65;
+const SPONSOR_QUALITY_WEIGHT = 0.35;
+const SPONSOR_BONUS_BUDGET = 50;
+const SPONSOR_BONUS_WAGE = 0.1;
+const SPONSOR_COMPANIES = [
+  "Nike", "Adidas", "Emirates", "Pepsi", "Coca-Cola", "Rolex", "Heineken", "Puma",
+  "Amazon", "Samsung", "Visa", "Red Bull", "Under Armour", "Gillette", "Hyundai", "Qatar Airways",
+];
+
+function seasonWageBonus(position, nTeams) {
+  if (nTeams <= 1) return SEASON_WAGE_BONUS_MAX;
+  const raw = SEASON_WAGE_BONUS_MAX - (position - 1) * (SEASON_WAGE_BONUS_MAX - SEASON_WAGE_BONUS_MIN) / (nTeams - 1);
+  return +raw.toFixed(3);
+}
+
 const SEASON_BOOST_MAX = 120; // £M for 1st place
 const SEASON_BOOST_MIN = 40;  // £M for last place
 const SEASON_BOOST_TABLE_10 = [120, 110, 100, 90, 80, 70, 60, 50, 45, 40];
@@ -562,6 +592,22 @@ export default function EafcLeagueApp() {
   const [squads, setSquads] = useState(defaultSquads());
   const [transfers, setTransfers] = useState([]);
   const [fixtures, setFixtures] = useState([]);
+  // Cup competition: 2 groups of 4 (random draw), home+away group stage, cross-group semis
+  // (home+away), single-match final. Cup matches live in the same `fixtures` array as league
+  // matches, tagged with competition:"cup" and a stage, so the same entry/scoring flow works for
+  // both — only the standings/grouping logic treats them differently.
+  const [cupState, setCupState] = useState({
+    status: "none", // "none" | "groups" | "knockouts" | "final" | "completed"
+    season: null,
+    groups: null, // { A: [teamId x4], B: [teamId x4] }
+    semiFinalists: null, // { finalistA: teamId, finalistB: teamId } once semis resolve
+    winner: null,
+    runnerUp: null,
+  });
+  // Sponsorship deals: assigned once per season (admin-triggered, meant for the halfway point).
+  // { teamId: { company, expectedPosition, season, bonusAwarded } }. Visible to everyone the
+  // moment it's assigned — not hidden until season end.
+  const [sponsorships, setSponsorships] = useState({});
   const [prizes, setPrizes] = useState([]);
   const [events, setEvents] = useState([]);
   const [auctions, setAuctions] = useState([]);
@@ -673,6 +719,8 @@ export default function EafcLeagueApp() {
     if (data.injuries) setInjuries(data.injuries);
     if (data.teamLockOverride !== undefined) setTeamLockOverride(data.teamLockOverride);
     if (data.draftState) setDraftState(data.draftState);
+    if (data.cupState) setCupState(data.cupState);
+    if (data.sponsorships) setSponsorships(data.sponsorships);
     if (data.transferWindow) setTransferWindow(data.transferWindow);
     if (data.swapsUsed) setSwapsUsed(data.swapsUsed);
     if (data.swapOffers) setSwapOffers(data.swapOffers);
@@ -959,7 +1007,7 @@ export default function EafcLeagueApp() {
         const savedAt = Date.now();
         await storage.set(
           STORAGE_KEY,
-          JSON.stringify({ fixtures, prizes, events, season, seasonHistory, activity, injuries, teamLockOverride, draftState, cardTally, suspensions, transferWindow, swapsUsed, swapOffers, savedAt }),
+          JSON.stringify({ fixtures, prizes, events, season, seasonHistory, activity, injuries, teamLockOverride, draftState, cupState, sponsorships, cardTally, suspensions, transferWindow, swapsUsed, swapOffers, savedAt }),
           true
         );
         knownSavedAtRef.current = savedAt;
@@ -972,7 +1020,7 @@ export default function EafcLeagueApp() {
       }
     }, 300);
     return () => clearTimeout(t);
-  }, [fixtures, prizes, events, season, seasonHistory, activity, injuries, teamLockOverride, draftState, cardTally, suspensions, transferWindow, swapsUsed, swapOffers, loaded]);
+  }, [fixtures, prizes, events, season, seasonHistory, activity, injuries, teamLockOverride, draftState, cupState, sponsorships, cardTally, suspensions, transferWindow, swapsUsed, swapOffers, loaded]);
 
   // Private messages save to their own separate key, on their own quick timer — this is what
   // actually stops a message from getting silently erased if someone else's browser (with a
@@ -2054,7 +2102,8 @@ export default function EafcLeagueApp() {
       const wageM = wageK / 1000;
       const rated86 = all.filter((p) => Number(p.rating) >= 86).length;
       const u21Count = all.filter((p) => Number(p.age) > 0 && Number(p.age) <= 20).length;
-      out[t.id] = { filled, value, wageM, rated86, u21Count, allowed86: NEXT_CAP_MAX === NEXT_CAP_MAX ? 3 + (t.earned86 || 0) : 3 };
+      const avgRating = filled > 0 ? all.reduce((s, p) => s + (Number(p.rating) || 0), 0) / filled : 0;
+      out[t.id] = { filled, value, wageM, rated86, u21Count, avgRating, allowed86: NEXT_CAP_MAX === NEXT_CAP_MAX ? 3 + (t.earned86 || 0) : 3 };
     }
     return out;
   }, [teams, squads]);
@@ -2147,8 +2196,12 @@ export default function EafcLeagueApp() {
       points: r.w * 3 + r.d,
     }));
     table.sort((a, b) => b.points - a.points || b.gd - a.gd || b.gf - a.gf);
-    return table.map((r, i) => ({ ...r, position: i + 1, nextCap: nextSeasonCap(i + 1, teams.length) }));
-  }, [teams, fixtures]);
+    return table.map((r, i) => {
+      const team = teamById[r.id];
+      const bonus = seasonWageBonus(i + 1, teams.length);
+      return { ...r, position: i + 1, nextCap: +(((team && team.wageCap) || 0) + bonus).toFixed(3) };
+    });
+  }, [teams, fixtures, teamById]);
 
   const taxCollected = useMemo(
     () => transfers
@@ -2676,26 +2729,42 @@ export default function EafcLeagueApp() {
       return `Resolve ${liveAuctions.length} live auction${liveAuctions.length === 1 ? "" : "s"} first (finalize or let the seller decline) before ending the season.`;
     }
     if (!window.confirm(
-      `End Season ${season} and start Season ${season + 1}? This locks in final standings, tops up each team's leftover budget by position (£${SEASON_BOOST_MAX}M for 1st down to £${SEASON_BOOST_MIN}M for last), applies next season's wage caps, and archives this season's fixtures/transfers/prizes. Squads carry over unchanged.`
+      `End Season ${season} and start Season ${season + 1}? This locks in final standings, tops up each team's leftover budget by position (£${SEASON_BOOST_MAX}M for 1st down to £${SEASON_BOOST_MIN}M for last), adds a wage cap bonus on top of each team's current cap by position (+£${SEASON_WAGE_BONUS_MAX * 1000}k for 1st down to +£${SEASON_WAGE_BONUS_MIN * 1000}k for last), pays out any sponsorship bonuses earned, and archives this season's fixtures/transfers/prizes. Squads carry over unchanged.`
     )) return null;
 
     const finalStandings = standings.map((r) => ({
       teamId: r.id, teamName: teamById[r.id]?.name, manager: teamById[r.id]?.manager,
       position: r.position, played: r.played, points: r.points, gd: r.gd,
-      nextSeasonWageCap: r.nextCap, budgetBoost: seasonBudgetBoost(r.position, teams.length),
+      wageBonus: seasonWageBonus(r.position, teams.length), budgetBoost: seasonBudgetBoost(r.position, teams.length),
     }));
 
     setSeasonHistory((h) => [{
-      id: uid(), season, endedAt: Date.now(), standings: finalStandings,
+      id: uid(), season, endedAt: Date.now(), standings: finalStandings, sponsorships,
       fixtures, transfers, prizes, taxCollected,
     }, ...h]);
 
+    // Sponsorship bonus: awarded if a team's actual final position beats (any improvement at all)
+    // the expected position they were assigned at the halfway point of THIS season specifically.
     setTeams((ts) => ts.map((t) => {
       const row = standings.find((r) => r.id === t.id);
       const leftover = (budgetStats[t.id] && budgetStats[t.id].current) ?? t.budget;
       const boost = row ? seasonBudgetBoost(row.position, teams.length) : 0;
-      return { ...t, budget: +(leftover + boost).toFixed(2), wageCap: row ? row.nextCap : t.wageCap };
+      const wageBonus = row ? seasonWageBonus(row.position, teams.length) : 0;
+      const sponsorship = sponsorships[t.id];
+      // Beating the target means finishing strictly better - except when the target IS 1st place,
+      // since there's no better position to beat there. Winning the league itself counts in that case.
+      const earnedSponsorBonus = sponsorship && sponsorship.season === season && row && (
+        sponsorship.expectedPosition === 1 ? row.position === 1 : row.position < sponsorship.expectedPosition
+      );
+      const sponsorBudget = earnedSponsorBonus ? SPONSOR_BONUS_BUDGET : 0;
+      const sponsorWage = earnedSponsorBonus ? SPONSOR_BONUS_WAGE : 0;
+      return {
+        ...t,
+        budget: +(leftover + boost + sponsorBudget).toFixed(2),
+        wageCap: +((t.wageCap || 0) + wageBonus + sponsorWage).toFixed(3),
+      };
     }));
+    setSponsorships({}); // fresh deals get assigned at the halfway point of the new season
 
     setFixtures([]);
     setTransfers([]);
@@ -2703,6 +2772,209 @@ export default function EafcLeagueApp() {
     setAuctions((all) => all.filter((a) => a.status !== "closed" && a.status !== "declined")); // clear resolved history
 
     setSeason((s) => s + 1);
+    return null;
+  };
+
+  // Cup: random draw into 2 groups of 4, home+away group stage generated straight into the same
+  // fixtures list as the league (tagged competition/stage so the two never get mixed up).
+  const openCup = (pinAttempt) => {
+    if (pinAttempt !== adminPin) return "Incorrect PIN.";
+    if (cupState.status !== "none" && cupState.status !== "completed") return "A cup is already in progress.";
+    if (teams.length !== 8) return "The cup is set up for exactly 8 teams.";
+    if (!window.confirm("Open the cup? This randomly draws 2 groups of 4 and generates the full home-and-away group stage.")) return null;
+
+    const shuffled = [...teams.map((t) => t.id)];
+    for (let i = shuffled.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+    }
+    const groupA = shuffled.slice(0, 4);
+    const groupB = shuffled.slice(4, 8);
+
+    const cupFixtures = [];
+    [["A", groupA], ["B", groupB]].forEach(([groupName, groupTeams]) => {
+      const legs = generateRoundRobin(groupTeams, true);
+      legs.forEach((round, i) => {
+        round.forEach(([team1, team2]) => {
+          cupFixtures.push({
+            id: uid(), matchday: i + 1, team1, team2, date: todayISO(),
+            score1: "", score2: "", proof: "", hasProofImage: false,
+            competition: "cup", stage: "group", group: groupName,
+          });
+        });
+      });
+    });
+
+    setFixtures((f) => [...cupFixtures, ...f]);
+    setCupState({
+      status: "groups", season, groups: { A: groupA, B: groupB },
+      semiFinalists: null, winner: null, runnerUp: null,
+    });
+    logActivity("The cup is open — groups drawn, group stage fixtures generated.", "transfer");
+    return null;
+  };
+
+  // Computes a group's table from cup fixtures - same scoring/tiebreak rules as the league
+  // (points, then GD, then goals for).
+  const cupGroupTable = (groupTeamIds, groupFixtures) => {
+    const rows = groupTeamIds.map((id) => ({ id, played: 0, w: 0, d: 0, l: 0, gf: 0, ga: 0 }));
+    const byId = Object.fromEntries(rows.map((r) => [r.id, r]));
+    groupFixtures.forEach((f) => {
+      if (f.score1 === "" || f.score2 === "" || f.score1 == null || f.score2 == null) return;
+      const s1 = Number(f.score1), s2 = Number(f.score2);
+      const home = byId[f.team1], away = byId[f.team2];
+      if (!home || !away) return;
+      home.played++; away.played++;
+      home.gf += s1; home.ga += s2;
+      away.gf += s2; away.ga += s1;
+      if (s1 > s2) { home.w++; away.l++; } else if (s2 > s1) { away.w++; home.l++; } else { home.d++; away.d++; }
+    });
+    const table = rows.map((r) => ({ ...r, gd: r.gf - r.ga, points: r.w * 3 + r.d }));
+    table.sort((a, b) => b.points - a.points || b.gd - a.gd || b.gf - a.gf);
+    return table.map((r, i) => ({ ...r, position: i + 1 }));
+  };
+
+  // Resolves the group stage: takes the top 2 from each group, pairs them cross-group for the
+  // semis (Group A winner vs Group B runner-up, and vice versa), generates the home+away semis.
+  const resolveCupGroupStage = (pinAttempt) => {
+    if (pinAttempt !== adminPin) return "Incorrect PIN.";
+    if (cupState.status !== "groups") return "The cup isn't currently in the group stage.";
+    const groupFixtures = fixtures.filter((f) => f.competition === "cup" && f.stage === "group");
+    const unplayed = groupFixtures.filter((f) => f.score1 === "" || f.score2 === "" || f.score1 == null || f.score2 == null);
+    if (unplayed.length > 0) return `${unplayed.length} group stage fixture${unplayed.length === 1 ? "" : "s"} still need${unplayed.length === 1 ? "s" : ""} a result before resolving.`;
+    if (!window.confirm("Resolve the group stage and generate the semi-finals? This can't be undone.")) return null;
+
+    const tableA = cupGroupTable(cupState.groups.A, groupFixtures.filter((f) => f.group === "A"));
+    const tableB = cupGroupTable(cupState.groups.B, groupFixtures.filter((f) => f.group === "B"));
+    const [aFirst, aSecond] = tableA;
+    const [bFirst, bSecond] = tableB;
+
+    const semiFixtures = [
+      { tie: "semi1", homeFirst: aFirst.id, awayFirst: bSecond.id },
+      { tie: "semi2", homeFirst: bFirst.id, awayFirst: aSecond.id },
+    ].flatMap(({ tie, homeFirst, awayFirst }) => [
+      { id: uid(), matchday: 1, team1: homeFirst, team2: awayFirst, date: todayISO(), score1: "", score2: "", proof: "", hasProofImage: false, competition: "cup", stage: "semi", tie, leg: 1 },
+      { id: uid(), matchday: 2, team1: awayFirst, team2: homeFirst, date: todayISO(), score1: "", score2: "", proof: "", hasProofImage: false, competition: "cup", stage: "semi", tie, leg: 2 },
+    ]);
+
+    setFixtures((f) => [...semiFixtures, ...f]);
+    setCupState((cs) => ({ ...cs, status: "knockouts" }));
+    logActivity("Cup group stage resolved — semi-finals generated.", "transfer");
+    return null;
+  };
+
+  // Resolves the semis by aggregate (away goals as a tiebreaker, then a coinflip in the rare case
+  // it's still level - there's no penalty shootout mechanic here), generates the single-match final.
+  const resolveCupSemis = (pinAttempt) => {
+    if (pinAttempt !== adminPin) return "Incorrect PIN.";
+    if (cupState.status !== "knockouts") return "The cup isn't currently at the semi-final stage.";
+    const semiFixtures = fixtures.filter((f) => f.competition === "cup" && f.stage === "semi");
+    const unplayed = semiFixtures.filter((f) => f.score1 === "" || f.score2 === "" || f.score1 == null || f.score2 == null);
+    if (unplayed.length > 0) return `${unplayed.length} semi-final fixture${unplayed.length === 1 ? "" : "s"} still need${unplayed.length === 1 ? "s" : ""} a result before resolving.`;
+    if (!window.confirm("Resolve the semi-finals and generate the final? This can't be undone.")) return null;
+
+    const resolveTie = (tieId) => {
+      const legs = semiFixtures.filter((f) => f.tie === tieId).sort((a, b) => a.leg - b.leg);
+      const [leg1, leg2] = legs;
+      const teamX = leg1.team1, teamY = leg1.team2; // teamX = home in leg1 / away in leg2
+      const xAgg = Number(leg1.score1) + Number(leg2.score2);
+      const yAgg = Number(leg1.score2) + Number(leg2.score1);
+      if (xAgg !== yAgg) return xAgg > yAgg ? teamX : teamY;
+      const xAway = Number(leg2.score2); // teamX's away-leg goals (leg2, where X plays away)
+      const yAway = Number(leg1.score2); // teamY's away-leg goals (leg1, where Y plays away)
+      if (xAway !== yAway) return xAway > yAway ? teamX : teamY;
+      return Math.random() < 0.5 ? teamX : teamY; // still level - no shootout mechanic, so a coinflip
+    };
+
+    const finalistA = resolveTie("semi1");
+    const finalistB = resolveTie("semi2");
+
+    const finalFixture = {
+      id: uid(), matchday: 1, team1: finalistA, team2: finalistB, date: todayISO(),
+      score1: "", score2: "", proof: "", hasProofImage: false, competition: "cup", stage: "final",
+    };
+    setFixtures((f) => [finalFixture, ...f]);
+    setCupState((cs) => ({ ...cs, status: "final", semiFinalists: { finalistA, finalistB } }));
+    logActivity("Cup semi-finals resolved — the final is set.", "transfer");
+    return null;
+  };
+
+  // Resolves the final: a draw goes to a coinflip (single match, no replay/shootout mechanic),
+  // then applies prizes - winner £25M + £100k wage, runner-up £10M + £40k wage, both wage bonuses
+  // compounding onto each team's current cap, same pattern as the season-end bonus.
+  const resolveCupFinal = (pinAttempt) => {
+    if (pinAttempt !== adminPin) return "Incorrect PIN.";
+    if (cupState.status !== "final") return "The cup isn't currently at the final stage.";
+    const finalFixture = fixtures.find((f) => f.competition === "cup" && f.stage === "final");
+    if (!finalFixture) return "Final fixture not found.";
+    if (finalFixture.score1 === "" || finalFixture.score2 === "" || finalFixture.score1 == null || finalFixture.score2 == null) {
+      return "The final needs a result before resolving.";
+    }
+    if (!window.confirm("Resolve the final and award the cup prizes? This can't be undone.")) return null;
+
+    const s1 = Number(finalFixture.score1), s2 = Number(finalFixture.score2);
+    let winnerId, runnerUpId;
+    if (s1 > s2) { winnerId = finalFixture.team1; runnerUpId = finalFixture.team2; }
+    else if (s2 > s1) { winnerId = finalFixture.team2; runnerUpId = finalFixture.team1; }
+    else { // level - no shootout mechanic, so a coinflip decides
+      if (Math.random() < 0.5) { winnerId = finalFixture.team1; runnerUpId = finalFixture.team2; }
+      else { winnerId = finalFixture.team2; runnerUpId = finalFixture.team1; }
+    }
+
+    setTeams((ts) => ts.map((t) => {
+      if (t.id === winnerId) return { ...t, budget: +((t.budget || 0) + CUP_WINNER_BUDGET).toFixed(2), wageCap: +((t.wageCap || 0) + CUP_WINNER_WAGE).toFixed(3) };
+      if (t.id === runnerUpId) return { ...t, budget: +((t.budget || 0) + CUP_RUNNERUP_BUDGET).toFixed(2), wageCap: +((t.wageCap || 0) + CUP_RUNNERUP_WAGE).toFixed(3) };
+      return t;
+    }));
+    setCupState((cs) => ({ ...cs, status: "completed", winner: winnerId, runnerUp: runnerUpId }));
+    logActivity(`${teamById[winnerId]?.name || "A team"} won the cup, beating ${teamById[runnerUpId]?.name || "their opponent"} in the final!`, "transfer");
+    return null;
+  };
+
+  // Assigns a sponsorship deal to every team - meant to be triggered by the admin at the halfway
+  // point (after 7 games), though nothing here enforces exactly when; it's an admin judgment call.
+  // Expected position blends current league position (weighted more heavily) with squad quality
+  // (value + rating combined), both taken as ranks 1-N so the two very different scales combine
+  // fairly, then re-ranked into a clean 1-N expected position with no ties or gaps.
+  const assignSponsorships = (pinAttempt) => {
+    if (pinAttempt !== adminPin) return "Incorrect PIN.";
+    if (!window.confirm("Assign sponsorship deals to every team based on current form? This is meant for the halfway point of the season and can't be undone.")) return null;
+
+    const n = teams.length;
+    const byValue = [...teams].sort((a, b) => (squadStats[b.id]?.value || 0) - (squadStats[a.id]?.value || 0));
+    const valueRank = {}; byValue.forEach((t, i) => { valueRank[t.id] = i + 1; });
+    const byRating = [...teams].sort((a, b) => (squadStats[b.id]?.avgRating || 0) - (squadStats[a.id]?.avgRating || 0));
+    const ratingRank = {}; byRating.forEach((t, i) => { ratingRank[t.id] = i + 1; });
+    const qualityRank = {};
+    teams.forEach((t) => { qualityRank[t.id] = (valueRank[t.id] + ratingRank[t.id]) / 2; });
+
+    const positionRank = {};
+    standings.forEach((r) => { positionRank[r.id] = r.position; });
+
+    const blended = teams.map((t) => ({
+      id: t.id,
+      score: (positionRank[t.id] || n) * SPONSOR_POSITION_WEIGHT + qualityRank[t.id] * SPONSOR_QUALITY_WEIGHT,
+    }));
+    blended.sort((a, b) => a.score - b.score);
+    const expectedPosition = {};
+    blended.forEach((t, i) => { expectedPosition[t.id] = i + 1; });
+
+    const shuffledCompanies = [...SPONSOR_COMPANIES];
+    for (let i = shuffledCompanies.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [shuffledCompanies[i], shuffledCompanies[j]] = [shuffledCompanies[j], shuffledCompanies[i]];
+    }
+
+    const next = {};
+    teams.forEach((t, i) => {
+      next[t.id] = {
+        company: shuffledCompanies[i % shuffledCompanies.length],
+        expectedPosition: expectedPosition[t.id],
+        season, bonusAwarded: false,
+      };
+    });
+    setSponsorships(next);
+    logActivity("Sponsorship deals assigned for the second half of the season.", "transfer");
     return null;
   };
 
@@ -3445,6 +3717,7 @@ export default function EafcLeagueApp() {
     { id: "chat", label: "League Chat", icon: MessageCircle },
     { id: "fixtures", label: "Fixtures", icon: Swords },
     { id: "standings", label: "Standings", icon: Trophy },
+    { id: "cup", label: "Cup", icon: Trophy },
     { id: "prizes", label: "Prize Pool", icon: Coins },
     { id: "rules", label: "Rules", icon: BookOpen },
     { id: "admin", label: "Admin", icon: Lock },
@@ -3588,7 +3861,14 @@ export default function EafcLeagueApp() {
             cardTally={cardTally} setCardTally={setCardTally} suspensions={suspensions} setSuspensions={setSuspensions} />
         )}
         {tab === "standings" && (
-          <StandingsTab teams={teams} standings={standings} fixtures={fixtures} />
+          <StandingsTab teams={teams} standings={standings} fixtures={fixtures} sponsorships={sponsorships} />
+        )}
+
+        {tab === "cup" && (
+          <CupTab teams={teams} fixtures={fixtures} cupState={cupState} adminPin={adminPin}
+            openCup={openCup} resolveCupGroupStage={resolveCupGroupStage}
+            resolveCupSemis={resolveCupSemis} resolveCupFinal={resolveCupFinal}
+            cupGroupTable={cupGroupTable} />
         )}
         {tab === "prizes" && (
           <PrizesTab prizes={prizes} setPrizes={setPrizes} taxCollected={taxCollected} prizeTotal={prizeTotal}
@@ -3622,7 +3902,8 @@ export default function EafcLeagueApp() {
             addPrize={addPrize} exportPlayerDatabaseCSV={exportPlayerDatabaseCSV} adminRemoveCaptain={adminRemoveCaptain}
             draftPicks={draftPicks} draftSubmitted={draftSubmitted} clearSquadsAndTransfers={clearSquadsAndTransfers}
             applyNewBudgetAndWageCap={applyNewBudgetAndWageCap} resetTeamDraft={resetTeamDraft}
-            reopenDraftKeepPicks={reopenDraftKeepPicks} clearBlindBids={clearBlindBids} blindBids={blindBids} />
+            reopenDraftKeepPicks={reopenDraftKeepPicks} clearBlindBids={clearBlindBids} blindBids={blindBids}
+            assignSponsorships={assignSponsorships} />
         )}
       </div>
 
@@ -6284,7 +6565,156 @@ function FormDots({ results }) {
   );
 }
 
-function StandingsTab({ teams, standings, fixtures }) {
+function CupTab({ teams, fixtures, cupState, adminPin, openCup, resolveCupGroupStage, resolveCupSemis, resolveCupFinal, cupGroupTable }) {
+  const teamById = useMemo(() => Object.fromEntries(teams.map((t) => [t.id, t])), [teams]);
+  const [pin, setPin] = useState("");
+  const [msg, setMsg] = useState(null);
+  const teamName = (id) => teamById[id]?.name || id;
+
+  const runAction = (fn, successText) => {
+    const err = fn(pin);
+    setPin("");
+    setMsg(err ? { text: err, tone: "red" } : { text: successText, tone: "green" });
+  };
+
+  const cupFixtures = fixtures.filter((f) => f.competition === "cup");
+  const groupFixtures = cupFixtures.filter((f) => f.stage === "group");
+  const semiFixtures = cupFixtures.filter((f) => f.stage === "semi");
+  const finalFixture = cupFixtures.find((f) => f.stage === "final");
+
+  const renderScoreLine = (f) => {
+    const played = f.score1 !== "" && f.score1 != null && f.score2 !== "" && f.score2 != null;
+    return (
+      <div key={f.id} style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, padding: "5px 0", borderBottom: `1px solid ${C.border}33` }}>
+        <span style={{ color: C.text }}>{teamName(f.team1)} vs {teamName(f.team2)}</span>
+        <span style={{ color: played ? C.gold : C.muted, fontWeight: 700 }}>{played ? `${f.score1} - ${f.score2}` : "Not played"}</span>
+      </div>
+    );
+  };
+
+  const renderTie = (tieId, label) => {
+    const legs = semiFixtures.filter((f) => f.tie === tieId).sort((a, b) => a.leg - b.leg);
+    if (legs.length !== 2) return null;
+    const [leg1, leg2] = legs;
+    const bothPlayed = legs.every((f) => f.score1 !== "" && f.score1 != null && f.score2 !== "" && f.score2 != null);
+    const agg1 = bothPlayed ? Number(leg1.score1) + Number(leg2.score2) : null;
+    const agg2 = bothPlayed ? Number(leg1.score2) + Number(leg2.score1) : null;
+    return (
+      <div key={tieId} style={{ marginBottom: 14 }}>
+        <div style={{ color: C.gold, fontWeight: 700, fontSize: 12.5, marginBottom: 6 }}>
+          {label}: {teamName(leg1.team1)} vs {teamName(leg1.team2)}
+        </div>
+        {renderScoreLine(leg1)}
+        {renderScoreLine(leg2)}
+        {bothPlayed && (
+          <div style={{ fontSize: 11.5, color: C.muted, marginTop: 4 }}>
+            Aggregate: {teamName(leg1.team1)} {agg1} - {agg2} {teamName(leg1.team2)}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  return (
+    <Panel style={{ padding: 18 }}>
+      <SectionTitle icon={Trophy}>Cup</SectionTitle>
+
+      {cupState.status === "none" && (
+        <div>
+          <div style={{ color: C.muted, fontSize: 12.5, marginBottom: 14, lineHeight: 1.6 }}>
+            2 random groups of 4, home-and-away group stage, top 2 from each group go through to home-and-away
+            semi-finals (cross-group), then a single-match final. Winner gets £{CUP_WINNER_BUDGET}M + £{CUP_WINNER_WAGE * 1000}k
+            wage cap, runner-up gets £{CUP_RUNNERUP_BUDGET}M + £{CUP_RUNNERUP_WAGE * 1000}k wage cap.
+          </div>
+          <div className="flex items-end gap-2 flex-wrap">
+            <Field label="Admin PIN">
+              <TextInput type="password" value={pin} onChange={(e) => setPin(e.target.value)} style={{ width: 130 }} />
+            </Field>
+            <Btn onClick={() => runAction(openCup, "Cup opened — groups drawn.")}>Open Cup</Btn>
+          </div>
+          {msg && <div style={{ color: msg.tone === "green" ? C.green : C.red, fontSize: 12, marginTop: 8 }}>{msg.text}</div>}
+        </div>
+      )}
+
+      {cupState.status === "groups" && cupState.groups && (
+        <div>
+          <div className="grid gap-4" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", marginBottom: 16 }}>
+            {["A", "B"].map((groupName) => {
+              const table = cupGroupTable(cupState.groups[groupName], groupFixtures.filter((f) => f.group === groupName));
+              return (
+                <div key={groupName}>
+                  <div style={{ color: C.gold, fontWeight: 700, fontSize: 13, marginBottom: 6 }}>Group {groupName}</div>
+                  <Table dense head={["Pos", "Team", "P", "W", "D", "L", "GD", "Pts"]}
+                    rows={table.map((r) => [
+                      r.position <= 2 ? <b style={{ color: C.green }}>{r.position}</b> : r.position,
+                      teamName(r.id), r.played, r.w, r.d, r.l, r.gd, <b>{r.points}</b>,
+                    ])} />
+                </div>
+              );
+            })}
+          </div>
+          <div style={{ color: C.muted, fontSize: 11.5, marginBottom: 14 }}>Top 2 in green qualify for the semi-finals.</div>
+          <div className="flex items-end gap-2 flex-wrap">
+            <Field label="Admin PIN">
+              <TextInput type="password" value={pin} onChange={(e) => setPin(e.target.value)} style={{ width: 130 }} />
+            </Field>
+            <Btn onClick={() => runAction(resolveCupGroupStage, "Group stage resolved — semi-finals generated.")}>Resolve Group Stage</Btn>
+          </div>
+          {msg && <div style={{ color: msg.tone === "green" ? C.green : C.red, fontSize: 12, marginTop: 8 }}>{msg.text}</div>}
+        </div>
+      )}
+
+      {cupState.status === "knockouts" && (
+        <div>
+          {renderTie("semi1", "Semi-Final 1")}
+          {renderTie("semi2", "Semi-Final 2")}
+          <div className="flex items-end gap-2 flex-wrap" style={{ marginTop: 8 }}>
+            <Field label="Admin PIN">
+              <TextInput type="password" value={pin} onChange={(e) => setPin(e.target.value)} style={{ width: 130 }} />
+            </Field>
+            <Btn onClick={() => runAction(resolveCupSemis, "Semi-finals resolved — the final is set.")}>Resolve Semi-Finals</Btn>
+          </div>
+          {msg && <div style={{ color: msg.tone === "green" ? C.green : C.red, fontSize: 12, marginTop: 8 }}>{msg.text}</div>}
+        </div>
+      )}
+
+      {cupState.status === "final" && finalFixture && (
+        <div>
+          <div style={{ color: C.gold, fontWeight: 700, fontSize: 13, marginBottom: 6 }}>Final</div>
+          {renderScoreLine(finalFixture)}
+          <div className="flex items-end gap-2 flex-wrap" style={{ marginTop: 14 }}>
+            <Field label="Admin PIN">
+              <TextInput type="password" value={pin} onChange={(e) => setPin(e.target.value)} style={{ width: 130 }} />
+            </Field>
+            <Btn onClick={() => runAction(resolveCupFinal, "Final resolved — prizes awarded.")}>Resolve Final</Btn>
+          </div>
+          {msg && <div style={{ color: msg.tone === "green" ? C.green : C.red, fontSize: 12, marginTop: 8 }}>{msg.text}</div>}
+        </div>
+      )}
+
+      {cupState.status === "completed" && (
+        <div>
+          <div style={{ textAlign: "center", padding: "24px 0" }}>
+            <Trophy size={40} color={C.gold} style={{ marginBottom: 10 }} />
+            <div style={{ color: C.gold, fontSize: 20, fontWeight: 800 }}>{teamName(cupState.winner)}</div>
+            <div style={{ color: C.muted, fontSize: 12.5 }}>Cup Winner — £{CUP_WINNER_BUDGET}M + £{CUP_WINNER_WAGE * 1000}k wage cap</div>
+            <div style={{ marginTop: 14, color: C.text, fontSize: 13.5 }}>Runner-up: {teamName(cupState.runnerUp)}</div>
+            <div style={{ color: C.muted, fontSize: 12.5 }}>£{CUP_RUNNERUP_BUDGET}M + £{CUP_RUNNERUP_WAGE * 1000}k wage cap</div>
+          </div>
+          <div className="flex items-end gap-2 flex-wrap">
+            <Field label="Admin PIN">
+              <TextInput type="password" value={pin} onChange={(e) => setPin(e.target.value)} style={{ width: 130 }} />
+            </Field>
+            <Btn onClick={() => runAction(openCup, "New cup opened — groups drawn.")}>Start a New Cup</Btn>
+          </div>
+          {msg && <div style={{ color: msg.tone === "green" ? C.green : C.red, fontSize: 12, marginTop: 8 }}>{msg.text}</div>}
+        </div>
+      )}
+    </Panel>
+  );
+}
+
+function StandingsTab({ teams, standings, fixtures, sponsorships }) {
   const teamById = useMemo(() => Object.fromEntries(teams.map((t) => [t.id, t])), [teams]);
 
   // Last 5 completed results per team, oldest to newest (left to right), ordered by matchday since
@@ -6349,6 +6779,29 @@ function StandingsTab({ teams, standings, fixtures }) {
           })}
         />
       </Panel>
+
+      {Object.keys(sponsorships || {}).length > 0 && (
+        <Panel style={{ padding: 18 }}>
+          <SectionTitle icon={Coins}>Sponsorship Deals</SectionTitle>
+          <div style={{ color: C.muted, fontSize: 12.5, marginBottom: 12 }}>
+            Beat your assigned expected position by the end of the season for a sponsorship bonus.
+          </div>
+          <Table
+            head={["Team", "Sponsor", "Expected Position", "Current Position", "On Track"]}
+            rows={teams.map((t) => {
+              const s = sponsorships[t.id];
+              if (!s) return [t.name, "—", "—", "—", "—"];
+              const row = standings.find((r) => r.id === t.id);
+              const onTrack = row && (s.expectedPosition === 1 ? row.position === 1 : row.position < s.expectedPosition);
+              return [
+                t.name, s.company, `${s.expectedPosition}${s.expectedPosition === 1 ? "st" : s.expectedPosition === 2 ? "nd" : s.expectedPosition === 3 ? "rd" : "th"}`,
+                row ? row.position : "—",
+                <Pill tone={onTrack ? "green" : "red"}>{onTrack ? "Yes" : "No"}</Pill>,
+              ];
+            })}
+          />
+        </Panel>
+      )}
 
       <Panel style={{ padding: 18 }}>
         <SectionTitle icon={Trophy}>Player of the Season</SectionTitle>
@@ -7053,12 +7506,16 @@ function RulesTab({ teams, standings }) {
       </Panel>
 
       <Panel style={{ padding: 18 }}>
-        <SectionTitle icon={Trophy}>Season 2+ Wage Cap by Finishing Position</SectionTitle>
+        <SectionTitle icon={Trophy}>Season 2+ Wage Cap Bonus by Finishing Position</SectionTitle>
+        <div style={{ color: C.muted, fontSize: 12.5, marginBottom: 10 }}>
+          Added on top of each team's own current wage cap at season end — it compounds season over season, rather
+          than resetting to a fixed amount by position.
+        </div>
         <Table
-          head={["Position", "Wage Cap"]}
+          head={["Position", "Wage Cap Bonus"]}
           rows={Array.from({ length: n }, (_, i) => [
             `${i + 1}${i === 0 ? "st" : i === 1 ? "nd" : i === 2 ? "rd" : "th"} of ${n}`,
-            money(nextSeasonCap(i + 1, n)),
+            `+${money(seasonWageBonus(i + 1, n))}`,
           ])}
         />
       </Panel>
@@ -7241,7 +7698,7 @@ function AddPrizeTools({ teams, addPrize }) {
   );
 }
 
-function AdminTab({ teams, squads, myTeamId, playerDatabase, adminPin, logAdminReward, resetAll, changeAdminPin, addFundsToTeam, addEarned86Slot, exportBackup, restoreBackup, restoreFromNightlyBackup, endSeason, season, seasonHistory, standings, importPlayerDatabase, clearPlayerDatabase, teamLockOverride, toggleTeamLockOverride, clearChat, resetTeamPassword, squadStats, transferWindow, setTransferWindowDates, clearTransferWindow, addPrize, exportPlayerDatabaseCSV, adminRemoveCaptain, draftPicks, draftSubmitted, clearSquadsAndTransfers, applyNewBudgetAndWageCap, resetTeamDraft, reopenDraftKeepPicks, clearBlindBids, blindBids }) {
+function AdminTab({ teams, squads, myTeamId, playerDatabase, adminPin, logAdminReward, resetAll, changeAdminPin, addFundsToTeam, addEarned86Slot, exportBackup, restoreBackup, restoreFromNightlyBackup, endSeason, season, seasonHistory, standings, importPlayerDatabase, clearPlayerDatabase, teamLockOverride, toggleTeamLockOverride, clearChat, resetTeamPassword, squadStats, transferWindow, setTransferWindowDates, clearTransferWindow, addPrize, exportPlayerDatabaseCSV, adminRemoveCaptain, draftPicks, draftSubmitted, clearSquadsAndTransfers, applyNewBudgetAndWageCap, resetTeamDraft, reopenDraftKeepPicks, clearBlindBids, blindBids, assignSponsorships }) {
   const [unlocked, setUnlocked] = useState(false);
   const [pinInput, setPinInput] = useState("");
   const [err, setErr] = useState("");
@@ -7282,7 +7739,7 @@ function AdminTab({ teams, squads, myTeamId, playerDatabase, adminPin, logAdminR
       <PlayerDatabaseTools playerDatabase={playerDatabase} importPlayerDatabase={importPlayerDatabase}
         clearPlayerDatabase={clearPlayerDatabase} exportPlayerDatabaseCSV={exportPlayerDatabaseCSV} />
 
-      <EndSeasonTools endSeason={endSeason} season={season} seasonHistory={seasonHistory} standings={standings} teams={teams} />
+      <EndSeasonTools endSeason={endSeason} season={season} seasonHistory={seasonHistory} standings={standings} teams={teams} assignSponsorships={assignSponsorships} />
 
       <AdminTools teams={teams} squads={squads} resetAll={resetAll} changeAdminPin={changeAdminPin}
         addFundsToTeam={addFundsToTeam} addEarned86Slot={addEarned86Slot}
@@ -7897,7 +8354,43 @@ function PlayerDatabaseTools({ playerDatabase, importPlayerDatabase, clearPlayer
   );
 }
 
-function EndSeasonTools({ endSeason, season, seasonHistory, standings, teams }) {
+function SponsorshipTools({ assignSponsorships, season }) {
+  const [pin, setPin] = useState("");
+  const [msg, setMsg] = useState(null);
+
+  const doAssign = () => {
+    const err = assignSponsorships(pin);
+    setPin("");
+    if (err) setMsg({ text: err, tone: "red" });
+    else setMsg({ text: "Sponsorship deals assigned — visible now on the Standings tab.", tone: "green" });
+  };
+
+  return (
+    <div style={{ marginTop: 18, paddingTop: 14, borderTop: `1px solid ${C.border}` }}>
+      <div style={{ color: C.text, fontWeight: 700, fontSize: 13, marginBottom: 6 }}>Sponsorship Deals</div>
+      <div style={{ color: C.muted, fontSize: 11.5, marginBottom: 10 }}>
+        Meant for the halfway point of the season (after 7 games) — assigns each team a random real-brand sponsor
+        and an expected finishing position (a blend of current league position, weighted more heavily, and squad
+        quality). Beat it by the end of the season (any improvement counts) for a £{SPONSOR_BONUS_BUDGET}M budget
+        bonus and +£{SPONSOR_BONUS_WAGE * 1000}k on the wage cap, compounding just like other season rewards.
+        Nothing here checks the game count for you — it's your call on when the halfway point has arrived.
+      </div>
+      <div className="flex items-end gap-2 flex-wrap">
+        <Field label="Admin PIN">
+          <TextInput type="password" value={pin} onChange={(e) => setPin(e.target.value)} style={{ width: 140 }} />
+        </Field>
+        <Btn onClick={doAssign}>Assign Sponsorship Deals (Season {season})</Btn>
+      </div>
+      {msg && (
+        <div className="flex items-center gap-2" style={{ marginTop: 8, color: msg.tone === "green" ? C.green : C.red, fontSize: 12.5 }}>
+          {msg.tone === "green" ? <CheckCircle2 size={14} /> : <AlertTriangle size={14} />} {msg.text}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function EndSeasonTools({ endSeason, season, seasonHistory, standings, teams, assignSponsorships }) {
   const [pin, setPin] = useState("");
   const [msg, setMsg] = useState(null);
   const top3 = standings.slice(0, 3);
@@ -7915,7 +8408,9 @@ function EndSeasonTools({ endSeason, season, seasonHistory, standings, teams }) 
       <SectionTitle icon={CalendarClock}>End of Season</SectionTitle>
       <div style={{ color: C.muted, fontSize: 12.5, marginBottom: 14, lineHeight: 1.6 }}>
         Currently <b style={{ color: C.gold }}>Season {season}</b>. When the fixtures are done, ending the season
-        locks in final standings, gives every team their new wage cap based on where they finished, and tops up each
+        locks in final standings, adds a wage cap bonus on top of each team's own current cap based on where they
+        finished — <b style={{ color: C.gold }}>+£{SEASON_WAGE_BONUS_MAX * 1000}k for 1st</b> down to
+        <b style={{ color: C.gold }}> +£{SEASON_WAGE_BONUS_MIN * 1000}k for last</b> — and tops up each
         team's leftover budget by position — <b style={{ color: C.gold }}>£{SEASON_BOOST_MAX}M for 1st</b> down to
         <b style={{ color: C.gold }}> £{SEASON_BOOST_MIN}M for last</b> — added on top of whatever they didn't spend
         this season, not a flat reset. This season's fixtures/transfers/prizes get archived for the record. Squads
@@ -7947,6 +8442,8 @@ function EndSeasonTools({ endSeason, season, seasonHistory, standings, teams }) 
           {msg.tone === "green" ? <CheckCircle2 size={14} /> : <AlertTriangle size={14} />} {msg.text}
         </div>
       )}
+
+      <SponsorshipTools assignSponsorships={assignSponsorships} season={season} />
 
       {seasonHistory.length > 0 && (
         <div style={{ marginTop: 18, paddingTop: 14, borderTop: `1px solid ${C.border}` }}>
