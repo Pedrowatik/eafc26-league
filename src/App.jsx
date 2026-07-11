@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo, useCallback, useRef, Fragment } from "react";
+import { createPortal } from "react-dom";
 import {
   Home, Users, Wallet, Repeat, Trophy, Swords, Coins, BookOpen,
   Plus, Trash2, Save, RotateCcw, AlertTriangle, CheckCircle2, X, ChevronRight, ChevronUp, ChevronDown, Lock, Unlock, KeyRound,
@@ -334,9 +335,9 @@ function PlayerAutocomplete({ value, onChange, onSelect, playerDatabase, placeho
         onChange={(e) => { onChange(e.target.value); setOpen(true); updateDropdownPosition(); }}
         onFocus={() => { setOpen(true); updateDropdownPosition(); }}
       />
-      {open && matches.length > 0 && dropdownRect && (
+      {open && matches.length > 0 && dropdownRect && createPortal(
         <div style={{
-          position: "fixed", top: dropdownRect.top, left: dropdownRect.left, width: dropdownRect.width, zIndex: 1000,
+          position: "fixed", top: dropdownRect.top, left: dropdownRect.left, width: dropdownRect.width, zIndex: 10000,
           background: C.panel, border: `1px solid ${C.border}`, borderRadius: 8,
           maxHeight: 220, overflowY: "auto", boxShadow: "0 8px 20px rgba(0,0,0,0.4)",
         }}>
@@ -348,7 +349,8 @@ function PlayerAutocomplete({ value, onChange, onSelect, playerDatabase, placeho
               <span style={{ color: C.muted, fontSize: 11 }}>{p.position} · {p.rating} OVR{p.club ? ` · ${p.club}` : ""}</span>
             </button>
           ))}
-        </div>
+        </div>,
+        document.body
       )}
     </div>
   );
@@ -3275,7 +3277,39 @@ export default function EafcLeagueApp() {
     return null;
   };
 
-  const MAX_EARNED_86_SLOTS = 2; // lifetime cap — stops a team's 86+ ceiling growing forever, season after season
+  // Places a player directly into a team's squad (first available slot) - built for recovering
+  // from cases where a signing (e.g. a blind bid win) never actually persisted due to a sync
+  // issue, even though the money/record side of it went through correctly. Deliberately uses the
+  // value/wage from the matching transfer record if one exists (what was actually paid at the
+  // time), not whatever the player database currently shows - the database could have been
+  // re-imported/corrected since, and the team's budget was already charged based on the original
+  // figure, so the squad entry needs to match that, not today's value.
+  const addPlayerToSquad = (pinAttempt, teamId, player) => {
+    if (pinAttempt !== adminPin) return "Incorrect PIN.";
+    if (!teamId) return "Choose a team.";
+    if (!player) return "Choose a player.";
+    const squad = squads[teamId];
+    if (!squad) return "Team not found.";
+    const slot = firstFreeSlot(squad);
+    if (!slot) return "That team's squad is full — no free slot to place them in.";
+
+    const matchingTransfer = activeTransfers.find((tx) => tx.player === player.name && tx.to === teamId && !tx.cancelled);
+    const value = matchingTransfer ? Number(matchingTransfer.price) || 0 : roundUpTo250k(Number(player.value) || 0);
+    const wage = matchingTransfer ? Number(matchingTransfer.wage) || 0 : Number(player.wage) || 0;
+
+    const playerObj = {
+      name: player.name, position: player.position, rating: Number(player.rating) || 0,
+      club: player.club, age: Number(player.age) || 0, value, wage,
+    };
+    setSquads((all) => {
+      const next = { ...all[teamId], [slot.group]: [...all[teamId][slot.group]] };
+      next[slot.group][slot.idx] = playerObj;
+      return { ...all, [teamId]: next };
+    });
+    logActivity(`Admin manually placed ${player.name} into ${teamById[teamId]?.name || teamId}'s squad (recovery from a sync issue)${matchingTransfer ? ", using the value/wage already on record from their transfer" : ""}.`, "transfer");
+    return null;
+  };
+
 
   const addEarned86Slot = (pinAttempt, teamId, amount) => {
     if (pinAttempt !== adminPin) return "Incorrect PIN.";
@@ -4120,7 +4154,7 @@ export default function EafcLeagueApp() {
             applyNewBudgetAndWageCap={applyNewBudgetAndWageCap} resetTeamDraft={resetTeamDraft}
             reopenDraftKeepPicks={reopenDraftKeepPicks} clearBlindBids={clearBlindBids} blindBids={blindBids}
             assignSponsorships={assignSponsorships} transfers={activeTransfers} removePlayerFromSquad={removePlayerFromSquad} deleteTransfer={deleteTransfer} forceMarkBlindBidResolved={forceMarkBlindBidResolved}
-            archiveDraft={archiveDraft} draftArchives={draftArchives} />
+            archiveDraft={archiveDraft} draftArchives={draftArchives} addPlayerToSquad={addPlayerToSquad} />
         )}
 
         {tab === "scouting" && (
@@ -8162,7 +8196,7 @@ function AddPrizeTools({ teams, addPrize }) {
   );
 }
 
-function AdminTab({ teams, squads, myTeamId, playerDatabase, adminPin, logAdminReward, resetAll, changeAdminPin, addFundsToTeam, addEarned86Slot, exportBackup, restoreBackup, restoreFromNightlyBackup, endSeason, season, seasonHistory, standings, importPlayerDatabase, clearPlayerDatabase, teamLockOverride, toggleTeamLockOverride, clearChat, resetTeamPassword, squadStats, transferWindow, setTransferWindowDates, clearTransferWindow, addPrize, exportPlayerDatabaseCSV, adminRemoveCaptain, draftPicks, draftSubmitted, clearSquadsAndTransfers, applyNewBudgetAndWageCap, resetTeamDraft, reopenDraftKeepPicks, clearBlindBids, blindBids, assignSponsorships, transfers, removePlayerFromSquad, deleteTransfer, forceMarkBlindBidResolved, archiveDraft, draftArchives }) {
+function AdminTab({ teams, squads, myTeamId, playerDatabase, adminPin, logAdminReward, resetAll, changeAdminPin, addFundsToTeam, addEarned86Slot, exportBackup, restoreBackup, restoreFromNightlyBackup, endSeason, season, seasonHistory, standings, importPlayerDatabase, clearPlayerDatabase, teamLockOverride, toggleTeamLockOverride, clearChat, resetTeamPassword, squadStats, transferWindow, setTransferWindowDates, clearTransferWindow, addPrize, exportPlayerDatabaseCSV, adminRemoveCaptain, draftPicks, draftSubmitted, clearSquadsAndTransfers, applyNewBudgetAndWageCap, resetTeamDraft, reopenDraftKeepPicks, clearBlindBids, blindBids, assignSponsorships, transfers, removePlayerFromSquad, deleteTransfer, forceMarkBlindBidResolved, archiveDraft, draftArchives, addPlayerToSquad }) {
   const [unlocked, setUnlocked] = useState(false);
   const [pinInput, setPinInput] = useState("");
   const [err, setErr] = useState("");
@@ -8205,7 +8239,7 @@ function AdminTab({ teams, squads, myTeamId, playerDatabase, adminPin, logAdminR
 
       <EndSeasonTools endSeason={endSeason} season={season} seasonHistory={seasonHistory} standings={standings} teams={teams} assignSponsorships={assignSponsorships} />
 
-      <BlindBidDamageDiagnostic teams={teams} squads={squads} transfers={transfers} adminPin={adminPin} removePlayerFromSquad={removePlayerFromSquad} deleteTransfer={deleteTransfer} />
+      <BlindBidDamageDiagnostic teams={teams} squads={squads} transfers={transfers} adminPin={adminPin} removePlayerFromSquad={removePlayerFromSquad} deleteTransfer={deleteTransfer} addPlayerToSquad={addPlayerToSquad} playerDatabase={playerDatabase} />
 
       <AdminTools teams={teams} squads={squads} resetAll={resetAll} changeAdminPin={changeAdminPin}
         addFundsToTeam={addFundsToTeam} addEarned86Slot={addEarned86Slot}
@@ -9136,10 +9170,32 @@ function EndSeasonTools({ endSeason, season, seasonHistory, standings, teams, as
   );
 }
 
-function BlindBidDamageDiagnostic({ teams, squads, transfers, adminPin, removePlayerFromSquad, deleteTransfer }) {
+function BlindBidDamageDiagnostic({ teams, squads, transfers, adminPin, removePlayerFromSquad, deleteTransfer, addPlayerToSquad, playerDatabase }) {
   const teamById = useMemo(() => Object.fromEntries(teams.map((t) => [t.id, t])), [teams]);
   const [pin, setPin] = useState("");
   const [msg, setMsg] = useState(null);
+  const [addTeamId, setAddTeamId] = useState(teams[0]?.id || "");
+  const [addPlayerQuery, setAddPlayerQuery] = useState("");
+  const [addPlayerSelected, setAddPlayerSelected] = useState(null);
+  const [addMsg, setAddMsg] = useState(null);
+
+  // Preview of exactly what value/wage will actually be used, shown before confirming - same
+  // lookup logic addPlayerToSquad itself uses, so there's no surprise after the fact.
+  const matchingTransferPreview = useMemo(() => {
+    if (!addPlayerSelected || !addTeamId) return null;
+    return transfers.find((tx) => tx.player === addPlayerSelected.name && tx.to === addTeamId && !tx.cancelled) || null;
+  }, [addPlayerSelected, addTeamId, transfers]);
+
+  const doAddPlayer = () => {
+    const err = addPlayerToSquad(pin, addTeamId, addPlayerSelected);
+    setPin("");
+    if (err) setAddMsg({ text: err, tone: "red" });
+    else {
+      setAddMsg({ text: `${addPlayerSelected.name} placed into ${teamById[addTeamId]?.name || addTeamId}'s squad.`, tone: "green" });
+      setAddPlayerSelected(null);
+      setAddPlayerQuery("");
+    }
+  };
 
   // Duplicate blind-bid transfer records: the same player won via blind bid more than once for
   // the same team is the direct fingerprint of the double-resolution bug — each extra occurrence
@@ -9189,22 +9245,52 @@ function BlindBidDamageDiagnostic({ teams, squads, transfers, adminPin, removePl
     setMsg(err ? { text: err, tone: "red" } : { text: "Duplicate record deleted.", tone: "green" });
   };
 
-  if (duplicateTransfers.length === 0 && duplicateSquadSlots.length === 0) return null;
-
   return (
     <Panel style={{ padding: 18, border: `1px solid ${C.red}55` }}>
-      <SectionTitle icon={AlertTriangle}>Blind Bid Bug — Possible Damage Found</SectionTitle>
+      <SectionTitle icon={AlertTriangle}>Squad & Blind Bid Recovery Tools</SectionTitle>
       <div style={{ color: C.muted, fontSize: 12.5, marginBottom: 14, lineHeight: 1.6 }}>
-        Found automatically by looking for the exact fingerprints the double-resolution bug leaves behind — a player
-        won via blind bid more than once for the same team, or the same player sitting in more than one squad slot
-        for one team. Nothing here is fixed automatically; review each one and decide.
+        Duplicate charges/squad slots below are found automatically by looking for the exact fingerprints the
+        double-resolution bug leaves behind. Nothing here is fixed automatically; review each one and decide.
       </div>
 
-      <div className="flex items-end gap-2 flex-wrap" style={{ marginBottom: 14 }}>
-        <Field label="Admin PIN">
-          <TextInput type="password" value={pin} onChange={(e) => setPin(e.target.value)} style={{ width: 140 }} />
-        </Field>
+      <div style={{ background: C.panelAlt, borderRadius: 8, padding: 12, marginBottom: 18 }}>
+        <div style={{ color: C.text, fontWeight: 700, fontSize: 13, marginBottom: 6 }}>Add Player to Squad</div>
+        <div style={{ color: C.muted, fontSize: 11.5, marginBottom: 10 }}>
+          For a signing (e.g. a blind bid win) that never actually made it into a team's squad due to a sync issue,
+          even though the money/record side went through — places the player directly, no budget change.
+        </div>
+        <div className="flex items-end gap-2 flex-wrap">
+          <Field label="Team">
+            <Select value={addTeamId} onChange={(e) => setAddTeamId(e.target.value)}>
+              {teams.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+            </Select>
+          </Field>
+          <Field label="Player">
+            <PlayerAutocomplete
+              value={addPlayerQuery}
+              onChange={setAddPlayerQuery}
+              playerDatabase={playerDatabase}
+              onSelect={(p) => { setAddPlayerSelected(p); setAddPlayerQuery(p.name); }}
+            />
+          </Field>
+          <Field label="Admin PIN">
+            <TextInput type="password" value={pin} onChange={(e) => setPin(e.target.value)} style={{ width: 130 }} />
+          </Field>
+          <Btn onClick={doAddPlayer} disabled={!addPlayerSelected}>Add to Squad</Btn>
+        </div>
+        {addPlayerSelected && addTeamId && (
+          <div style={{ fontSize: 11.5, marginTop: 8, color: matchingTransferPreview ? C.green : C.muted }}>
+            {matchingTransferPreview
+              ? `Will use the value/wage already on record from their transfer: ${money(matchingTransferPreview.price)} · ${moneyK(matchingTransferPreview.wage)}/wk (no budget change either way)`
+              : `No matching transfer record found for ${addPlayerSelected.name} → ${teamById[addTeamId]?.name || addTeamId} — will use the current player database value instead: ${money(addPlayerSelected.value)} · ${moneyK(addPlayerSelected.wage)}/wk`}
+          </div>
+        )}
+        {addMsg && <div style={{ color: addMsg.tone === "green" ? C.green : C.red, fontSize: 12, marginTop: 8 }}>{addMsg.text}</div>}
       </div>
+
+      {duplicateTransfers.length === 0 && duplicateSquadSlots.length === 0 && (
+        <div style={{ color: C.muted, fontSize: 12 }}>No duplicate charges or squad slots currently detected.</div>
+      )}
 
       {duplicateTransfers.length > 0 && (
         <div style={{ marginBottom: 18 }}>
