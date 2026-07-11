@@ -4184,12 +4184,18 @@ function Dashboard({ teams, squads, standings, budgetStats, prizeTotal, taxColle
         <Panel>
           <SectionTitle>Budget Snapshot</SectionTitle>
           <Table
-            head={["Team", "Manager", "Current Budget", "Wages", "Compliance"]}
-            rows={teams.map((t) => {
-              const b = budgetStats[t.id];
-              return [t.name, t.manager, money(b.current), money(b.wages),
-                <Pill tone={b.compliant ? "green" : "red"}>{b.compliant ? "OK" : "Over"}</Pill>];
-            })}
+            head={["Team", "Manager", "Current Budget", "Wages Used", "Wages Remaining", "Compliance"]}
+            rows={[...teams]
+              .sort((a, b) => (a.wageCap - budgetStats[a.id].wagesWithCommitted) - (b.wageCap - budgetStats[b.id].wagesWithCommitted))
+              .map((t) => {
+                const b = budgetStats[t.id];
+                const remainingWage = t.wageCap - b.wagesWithCommitted;
+                return [
+                  t.name, t.manager, money(b.current), money(b.wages),
+                  <b style={{ color: remainingWage <= 0.1 ? C.red : C.text }}>{money(remainingWage)}</b>,
+                  <Pill tone={b.compliant ? "green" : "red"}>{b.compliant ? "OK" : "Over"}</Pill>,
+                ];
+              })}
           />
         </Panel>
     </div>
