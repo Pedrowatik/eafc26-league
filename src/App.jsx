@@ -863,10 +863,10 @@ export default function EafcLeagueApp() {
           const loadedBlindBids = bbData.blindBids || [];
           setBlindBids(loadedBlindBids);
           knownBlindBidsSavedAtRef.current = bbData.savedAt || Date.now();
-          loadedBlindBids.forEach((bb) => lastSyncedBlindBidsRef.current.set(bb.id, JSON.stringify(bb.bids || {})));
+          loadedBlindBids.forEach((bb) => lastSyncedBlindBidsRef.current.set(bb.id, JSON.stringify(bb)));
         } else if (legacyBlindBidsForMigration) {
           setBlindBids(legacyBlindBidsForMigration);
-          legacyBlindBidsForMigration.forEach((bb) => lastSyncedBlindBidsRef.current.set(bb.id, JSON.stringify(bb.bids || {})));
+          legacyBlindBidsForMigration.forEach((bb) => lastSyncedBlindBidsRef.current.set(bb.id, JSON.stringify(bb)));
         }
       } catch (e) {
         if (legacyBlindBidsForMigration) setBlindBids(legacyBlindBidsForMigration);
@@ -1381,13 +1381,13 @@ export default function EafcLeagueApp() {
         // was actually causing cleared blind bids to never persist and reappear on the next sync.
         // A straight count mismatch against what's tracked catches that case too.
         const countChanged = blindBids.length !== lastSyncedBlindBidsRef.current.size;
-        const anyRecordDirty = blindBids.some((bb) => lastSyncedBlindBidsRef.current.get(bb.id) !== JSON.stringify(bb.bids || {}));
+        const anyRecordDirty = blindBids.some((bb) => lastSyncedBlindBidsRef.current.get(bb.id) !== JSON.stringify(bb));
         const anyDirty = countChanged || anyRecordDirty;
         if (anyDirty) {
           const savedAt = Date.now();
           await storage.set(BLINDBIDS_STORAGE_KEY, JSON.stringify({ blindBids, savedAt }), true);
           knownBlindBidsSavedAtRef.current = savedAt;
-          lastSyncedBlindBidsRef.current = new Map(blindBids.map((bb) => [bb.id, JSON.stringify(bb.bids || {})]));
+          lastSyncedBlindBidsRef.current = new Map(blindBids.map((bb) => [bb.id, JSON.stringify(bb)]));
         }
       } catch (e) {
         // best effort
@@ -1411,7 +1411,7 @@ export default function EafcLeagueApp() {
           knownBlindBidsSavedAtRef.current = remoteSavedAt;
           // Full replace, not .forEach() append — forEach on an empty incoming array does nothing
           // at all, leaving stale entries behind that make a genuine clear look "dirty" again.
-          lastSyncedBlindBidsRef.current = new Map(incoming.map((bb) => [bb.id, JSON.stringify(bb.bids || {})]));
+          lastSyncedBlindBidsRef.current = new Map(incoming.map((bb) => [bb.id, JSON.stringify(bb)]));
         }
       }
     } catch (e) {
@@ -1436,7 +1436,7 @@ export default function EafcLeagueApp() {
           const incoming = data.blindBids || [];
           setBlindBids(incoming);
           knownBlindBidsSavedAtRef.current = remoteSavedAt;
-          lastSyncedBlindBidsRef.current = new Map(incoming.map((bb) => [bb.id, JSON.stringify(bb.bids || {})]));
+          lastSyncedBlindBidsRef.current = new Map(incoming.map((bb) => [bb.id, JSON.stringify(bb)]));
         }
       } catch (e) {
         // ignore malformed payloads
@@ -3195,6 +3195,23 @@ export default function EafcLeagueApp() {
     return null;
   };
 
+  // Clears one specific squad slot outright - built for cleaning up the duplicate players left
+  // behind by the blind bid double-resolution bug. Takes the exact slot rather than matching by
+  // name, so it can never accidentally clear the wrong copy of a duplicated player.
+  const removePlayerFromSquad = (pinAttempt, teamId, group, slotIndex) => {
+    if (pinAttempt !== adminPin) return "Incorrect PIN.";
+    const squad = squads[teamId];
+    if (!squad || !squad[group] || !squad[group][slotIndex]) return "That slot is already empty.";
+    const removedName = squad[group][slotIndex].name;
+    setSquads((all) => {
+      const next = { ...all[teamId], [group]: [...all[teamId][group]] };
+      next[group][slotIndex] = null;
+      return { ...all, [teamId]: next };
+    });
+    logActivity(`Admin removed ${removedName} from ${teamById[teamId]?.name || teamId}'s squad (duplicate cleanup).`, "transfer");
+    return null;
+  };
+
   const MAX_EARNED_86_SLOTS = 2; // lifetime cap — stops a team's 86+ ceiling growing forever, season after season
 
   const addEarned86Slot = (pinAttempt, teamId, amount) => {
@@ -3499,7 +3516,7 @@ export default function EafcLeagueApp() {
       try {
         await storage.set(BLINDBIDS_STORAGE_KEY, JSON.stringify({ blindBids: mergedBlindBids, savedAt }), true);
         knownBlindBidsSavedAtRef.current = savedAt;
-        mergedBlindBids.forEach((b) => lastSyncedBlindBidsRef.current.set(b.id, JSON.stringify(b.bids || {})));
+        mergedBlindBids.forEach((b) => lastSyncedBlindBidsRef.current.set(b.id, JSON.stringify(b)));
       } catch (e) {
         // best effort — fall through to verification, which will retry if needed
       }
@@ -3523,16 +3540,31 @@ export default function EafcLeagueApp() {
     }
 
     if (allIn) {
-      resolveBlindBidInternal(blindBidId, updatedBids);
+      await resolveBlindBidInternal(blindBidId, updatedBids);
     }
     return null;
   };
 
   // Shared resolution logic — called automatically the instant the last eligible team submits,
   // or manually by admin (for stragglers once the deadline's passed).
-  const resolveBlindBidInternal = (blindBidId, bidsOverride) => {
+  const resolveBlindBidInternal = async (blindBidId, bidsOverride) => {
     const bb = blindBids.find((b) => b.id === blindBidId);
     if (!bb || bb.resolved) return;
+
+    // Re-check directly against the server right before proceeding — this is what actually stops
+    // a blind bid from being resolved twice (and money/players duplicated) if this browser's local
+    // view was stale and didn't yet know it had already been resolved elsewhere.
+    try {
+      const fresh = await storage.get(BLINDBIDS_STORAGE_KEY, true);
+      if (fresh && fresh.value) {
+        const freshData = JSON.parse(fresh.value);
+        const freshBb = (freshData.blindBids || []).find((b) => b.id === blindBidId);
+        if (freshBb && freshBb.resolved) return; // already resolved elsewhere - nothing to do
+      }
+    } catch (e) {
+      // if the recheck itself fails, fall through rather than blocking a genuine resolution
+    }
+
     const bids = bidsOverride || bb.bids;
     const entries = Object.entries(bids);
     if (entries.length === 0) return; // nobody bid at all — leave it open for the admin to sort out manually
@@ -3573,13 +3605,13 @@ export default function EafcLeagueApp() {
 
   // Admin override for stragglers — resolves using whichever bids are actually in, once the
   // deadline's passed and not everyone submitted.
-  const resolveBlindBidNow = (pinAttempt, blindBidId) => {
+  const resolveBlindBidNow = async (pinAttempt, blindBidId) => {
     if (pinAttempt !== adminPin) return "Incorrect PIN.";
     const bb = blindBids.find((b) => b.id === blindBidId);
     if (!bb) return "Blind bid not found.";
     if (bb.resolved) return "This has already been resolved.";
     if (Object.keys(bb.bids).length === 0) return "Nobody's submitted a bid yet.";
-    resolveBlindBidInternal(blindBidId);
+    await resolveBlindBidInternal(blindBidId);
     return null;
   };
 
@@ -3958,7 +3990,7 @@ export default function EafcLeagueApp() {
             draftPicks={draftPicks} draftSubmitted={draftSubmitted} clearSquadsAndTransfers={clearSquadsAndTransfers}
             applyNewBudgetAndWageCap={applyNewBudgetAndWageCap} resetTeamDraft={resetTeamDraft}
             reopenDraftKeepPicks={reopenDraftKeepPicks} clearBlindBids={clearBlindBids} blindBids={blindBids}
-            assignSponsorships={assignSponsorships} />
+            assignSponsorships={assignSponsorships} transfers={transfers} removePlayerFromSquad={removePlayerFromSquad} />
         )}
       </div>
 
@@ -5895,9 +5927,9 @@ function DraftTab({ teams, squads, squadStats, myTeamId, playerDatabase, draftSt
       setSubmittingBid(null);
     }
   };
-  const doForceResolve = (bbId) => {
+  const doForceResolve = async (bbId) => {
     if (!window.confirm("Resolve this blind bid now using whichever bids have come in? Anyone who hasn't bid yet is simply left out.")) return;
-    const err = resolveBlindBidNow(bbPin[bbId], bbId);
+    const err = await resolveBlindBidNow(bbPin[bbId], bbId);
     setBbPin((all) => ({ ...all, [bbId]: "" }));
     setMsg(err ? { text: err, tone: "red" } : { text: "Blind bid resolved.", tone: "green" });
   };
@@ -7781,7 +7813,7 @@ function AddPrizeTools({ teams, addPrize }) {
   );
 }
 
-function AdminTab({ teams, squads, myTeamId, playerDatabase, adminPin, logAdminReward, resetAll, changeAdminPin, addFundsToTeam, addEarned86Slot, exportBackup, restoreBackup, restoreFromNightlyBackup, endSeason, season, seasonHistory, standings, importPlayerDatabase, clearPlayerDatabase, teamLockOverride, toggleTeamLockOverride, clearChat, resetTeamPassword, squadStats, transferWindow, setTransferWindowDates, clearTransferWindow, addPrize, exportPlayerDatabaseCSV, adminRemoveCaptain, draftPicks, draftSubmitted, clearSquadsAndTransfers, applyNewBudgetAndWageCap, resetTeamDraft, reopenDraftKeepPicks, clearBlindBids, blindBids, assignSponsorships }) {
+function AdminTab({ teams, squads, myTeamId, playerDatabase, adminPin, logAdminReward, resetAll, changeAdminPin, addFundsToTeam, addEarned86Slot, exportBackup, restoreBackup, restoreFromNightlyBackup, endSeason, season, seasonHistory, standings, importPlayerDatabase, clearPlayerDatabase, teamLockOverride, toggleTeamLockOverride, clearChat, resetTeamPassword, squadStats, transferWindow, setTransferWindowDates, clearTransferWindow, addPrize, exportPlayerDatabaseCSV, adminRemoveCaptain, draftPicks, draftSubmitted, clearSquadsAndTransfers, applyNewBudgetAndWageCap, resetTeamDraft, reopenDraftKeepPicks, clearBlindBids, blindBids, assignSponsorships, transfers, removePlayerFromSquad }) {
   const [unlocked, setUnlocked] = useState(false);
   const [pinInput, setPinInput] = useState("");
   const [err, setErr] = useState("");
@@ -7823,6 +7855,8 @@ function AdminTab({ teams, squads, myTeamId, playerDatabase, adminPin, logAdminR
         clearPlayerDatabase={clearPlayerDatabase} exportPlayerDatabaseCSV={exportPlayerDatabaseCSV} />
 
       <EndSeasonTools endSeason={endSeason} season={season} seasonHistory={seasonHistory} standings={standings} teams={teams} assignSponsorships={assignSponsorships} />
+
+      <BlindBidDamageDiagnostic teams={teams} squads={squads} transfers={transfers} adminPin={adminPin} removePlayerFromSquad={removePlayerFromSquad} />
 
       <AdminTools teams={teams} squads={squads} resetAll={resetAll} changeAdminPin={changeAdminPin}
         addFundsToTeam={addFundsToTeam} addEarned86Slot={addEarned86Slot}
@@ -8539,6 +8573,115 @@ function EndSeasonTools({ endSeason, season, seasonHistory, standings, teams, as
               return [h.season, champ?.teamName || "—", champ?.points ?? "—", new Date(h.endedAt).toLocaleDateString()];
             })}
           />
+        </div>
+      )}
+    </Panel>
+  );
+}
+
+function BlindBidDamageDiagnostic({ teams, squads, transfers, adminPin, removePlayerFromSquad }) {
+  const teamById = useMemo(() => Object.fromEntries(teams.map((t) => [t.id, t])), [teams]);
+  const [pin, setPin] = useState("");
+  const [msg, setMsg] = useState(null);
+
+  // Duplicate blind-bid transfer records: the same player won via blind bid more than once for
+  // the same team is the direct fingerprint of the double-resolution bug — each extra occurrence
+  // represents a real, duplicate budget deduction that should be refunded via Add Funds below.
+  const duplicateTransfers = useMemo(() => {
+    const groups = {};
+    transfers.filter((tx) => tx.notes === "Won blind bid").forEach((tx) => {
+      const key = `${tx.player}::${tx.to}`;
+      if (!groups[key]) groups[key] = [];
+      groups[key].push(tx);
+    });
+    return Object.values(groups).filter((g) => g.length > 1);
+  }, [transfers]);
+
+  // Duplicate squad slots: the same player appearing more than once within one team's own squad
+  // should never happen legitimately - this is the other direct fingerprint of the bug.
+  const duplicateSquadSlots = useMemo(() => {
+    const findings = [];
+    teams.forEach((t) => {
+      const squad = squads[t.id];
+      if (!squad) return;
+      const seen = {};
+      ["starters", "reserves"].forEach((group) => {
+        (squad[group] || []).forEach((p, idx) => {
+          if (!p) return;
+          const key = p.name;
+          if (!seen[key]) seen[key] = [];
+          seen[key].push({ group, idx, player: p });
+        });
+      });
+      Object.entries(seen).forEach(([name, occurrences]) => {
+        if (occurrences.length > 1) findings.push({ teamId: t.id, name, occurrences });
+      });
+    });
+    return findings;
+  }, [teams, squads]);
+
+  const doRemove = (teamId, group, idx) => {
+    if (!window.confirm("Remove this specific copy of the player from the squad? This can't be undone.")) return;
+    const err = removePlayerFromSquad(pin, teamId, group, idx);
+    setMsg(err ? { text: err, tone: "red" } : { text: "Removed.", tone: "green" });
+  };
+
+  if (duplicateTransfers.length === 0 && duplicateSquadSlots.length === 0) return null;
+
+  return (
+    <Panel style={{ padding: 18, border: `1px solid ${C.red}55` }}>
+      <SectionTitle icon={AlertTriangle}>Blind Bid Bug — Possible Damage Found</SectionTitle>
+      <div style={{ color: C.muted, fontSize: 12.5, marginBottom: 14, lineHeight: 1.6 }}>
+        Found automatically by looking for the exact fingerprints the double-resolution bug leaves behind — a player
+        won via blind bid more than once for the same team, or the same player sitting in more than one squad slot
+        for one team. Nothing here is fixed automatically; review each one and decide.
+      </div>
+
+      {duplicateTransfers.length > 0 && (
+        <div style={{ marginBottom: 18 }}>
+          <div style={{ color: C.red, fontWeight: 700, fontSize: 13, marginBottom: 8 }}>Duplicate Charges ({duplicateTransfers.length})</div>
+          {duplicateTransfers.map((group, gi) => {
+            const extra = group.slice(1); // everything past the first occurrence is the duplicate charge
+            const refundTotal = extra.reduce((s, tx) => s + Number(tx.finalCost || 0), 0);
+            return (
+              <div key={gi} style={{ fontSize: 12.5, marginBottom: 10, padding: 10, background: C.panelAlt, borderRadius: 8 }}>
+                <div style={{ color: C.text, fontWeight: 600 }}>
+                  {group[0].player} — {teamById[group[0].to]?.name || group[0].to} — charged {group.length} times
+                </div>
+                <div style={{ color: C.muted, marginTop: 3 }}>
+                  Likely over-charged by <b style={{ color: C.red }}>{money(refundTotal)}</b> ({extra.length} extra
+                  charge{extra.length === 1 ? "" : "s"} of {group.map((tx) => money(tx.finalCost)).join(", ")}) — use
+                  Add Funds below to refund this team {money(refundTotal)}.
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {duplicateSquadSlots.length > 0 && (
+        <div>
+          <div style={{ color: C.red, fontWeight: 700, fontSize: 13, marginBottom: 8 }}>Duplicate Squad Slots ({duplicateSquadSlots.length})</div>
+          <div className="flex items-end gap-2 flex-wrap" style={{ marginBottom: 10 }}>
+            <Field label="Admin PIN">
+              <TextInput type="password" value={pin} onChange={(e) => setPin(e.target.value)} style={{ width: 140 }} />
+            </Field>
+          </div>
+          {duplicateSquadSlots.map((f, fi) => (
+            <div key={fi} style={{ fontSize: 12.5, marginBottom: 10, padding: 10, background: C.panelAlt, borderRadius: 8 }}>
+              <div style={{ color: C.text, fontWeight: 600, marginBottom: 6 }}>
+                {f.name} — {teamById[f.teamId]?.name || f.teamId} — appears {f.occurrences.length} times
+              </div>
+              <div className="flex items-center gap-2 flex-wrap">
+                {f.occurrences.map((occ, oi) => (
+                  <Btn key={oi} size="sm" variant="danger" onClick={() => doRemove(f.teamId, occ.group, occ.idx)}>
+                    Remove copy in {occ.group} slot {occ.idx + 1}
+                  </Btn>
+                ))}
+              </div>
+            </div>
+          ))}
+          {msg && <div style={{ color: msg.tone === "green" ? C.green : C.red, fontSize: 12, marginTop: 8 }}>{msg.text}</div>}
         </div>
       )}
     </Panel>
