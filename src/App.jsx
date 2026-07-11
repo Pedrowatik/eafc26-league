@@ -2177,7 +2177,7 @@ export default function EafcLeagueApp() {
         committedSpend, committedTax, committedWage, wagesWithCommitted,
         committedBlindBidSpend, committedBlindBidWage,
         spentAllSources, taxAllSources,
-        compliant: wagesWithCommitted <= t.wageCap,
+        compliant: wagesWithCommitted <= t.wageCap && current >= 0,
       };
     }
     return out;
@@ -2505,6 +2505,12 @@ export default function EafcLeagueApp() {
       if (teamId === a.currentBidder) { err = "That team already holds the highest bid."; return a; }
       const required = a.currentBid > 0 ? a.currentBid + 0.25 : Math.max(a.minBid, 0.25);
       if (!amt || amt < required - 0.001) { err = `Bid must be at least ${money(required)} (£250k above the current bid).`; return a; }
+      const bidTax = Math.max(amt * 0.1, 0.25);
+      const available = budgetStats[teamId]?.current ?? 0;
+      if (amt + bidTax > available) {
+        err = `Insufficient budget — that bid (plus ${money(bidTax)} tax) is more than your ${money(available)} available.`;
+        return a;
+      }
       const bidsByTeam = { ...a.bidsByTeam, [teamId]: Math.max(a.bidsByTeam[teamId] || 0, amt) };
 
       // Once a SECOND distinct team bids on a real team's player, the sale is clearly happening —
@@ -3249,8 +3255,21 @@ export default function EafcLeagueApp() {
   const updateDraftPick = (teamId, slotIndex, player) => {
     if (draftState.status !== "open") return "The draft isn't currently open.";
     if (draftSubmitted[teamId]) return "You've already submitted your draft.";
+    const team = teams.find((t) => t.id === teamId);
+    const current = draftPicks[teamId] || Array(DRAFT_SLOTS).fill(null);
+    // Running total including this new pick (replacing whatever was in this slot before), same
+    // 10% (min £250k) tax as any other signing - checked against budget before allowing the pick
+    // at all, not just at final submission.
+    const picksAfterThis = current.map((p, i) => (i === slotIndex ? player : p)).filter(Boolean);
+    const totalCost = picksAfterThis.reduce((s, p) => {
+      const value = roundUpTo250k(Number(p.value) || 0);
+      const tax = value > 0 ? Math.max(value * 0.1, 0.25) : 0;
+      return s + value + tax;
+    }, 0);
+    if (team && totalCost > team.budget) {
+      return `Insufficient budget — that pick would bring your total to ${money(totalCost)} (incl. tax), more than your ${money(team.budget)} budget.`;
+    }
     setDraftPicks((all) => {
-      const current = all[teamId] || Array(DRAFT_SLOTS).fill(null);
       const next = [...current];
       next[slotIndex] = player;
       return { ...all, [teamId]: next };
@@ -3433,7 +3452,7 @@ export default function EafcLeagueApp() {
     const amt = Number(amount);
     if (!amt || amt < bb.minBid) return `Bid must be at least ${money(bb.minBid)}.`;
     const available = budgetStats[teamId]?.current ?? 0;
-    if (amt > available) return `You only have ${money(available)} left — that bid is more than your remaining budget.`;
+    if (amt > available) return `Insufficient budget — you only have ${money(available)} left, less than that bid.`;
 
     // Re-read, merge, write, then VERIFY the write actually landed — since every blind bid shares
     // one combined array, a different team writing a completely different record at nearly the same
@@ -5802,15 +5821,22 @@ function DraftTab({ teams, squads, squadStats, myTeamId, playerDatabase, draftSt
   }, [draftState.opensAt, myTeamId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const setSlotText = (i, text) => setQueryTexts((all) => { const next = [...all]; next[i] = text; return next; });
+  const [pickErrors, setPickErrors] = useState({}); // slot index -> error message, shown right at that slot
   const pickSlot = (i, player) => {
-    setQueryTexts((all) => { const next = [...all]; next[i] = player.name; return next; });
-    updateDraftPick(myTeamId, i, {
+    const err = updateDraftPick(myTeamId, i, {
       name: player.name, position: player.position, rating: Number(player.rating) || 0,
       club: player.club, age: Number(player.age) || 0, value: player.value, wage: player.wage,
     });
+    if (err) {
+      setPickErrors((all) => ({ ...all, [i]: err }));
+      return; // don't touch the search text - the pick was rejected, nothing changed
+    }
+    setPickErrors((all) => ({ ...all, [i]: null }));
+    setQueryTexts((all) => { const next = [...all]; next[i] = player.name; return next; });
   };
   const clearSlot = (i) => {
     setSlotText(i, "");
+    setPickErrors((all) => ({ ...all, [i]: null }));
     updateDraftPick(myTeamId, i, null);
   };
 
@@ -5932,6 +5958,9 @@ function DraftTab({ teams, squads, squadStats, myTeamId, playerDatabase, draftSt
                         playerDatabase={playerDatabase}
                         onSelect={(picked) => pickSlot(i, picked)}
                       />
+                    )}
+                    {pickErrors[i] && (
+                      <div style={{ color: C.red, fontSize: 11, marginTop: 3 }}>{pickErrors[i]}</div>
                     )}
                     {p && (
                       <div className="flex items-center gap-1.5" style={{ marginTop: 3 }}>
