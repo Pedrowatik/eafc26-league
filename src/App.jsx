@@ -204,6 +204,9 @@ const PLAYERDB_STORAGE_KEY = "eafc26-player-database-v1";
 // The admin PIN gets its own dedicated key — it's the "keys to the kingdom," and it's exactly what
 // just got wiped when a stale browser overwrote the whole shared blob back to defaults.
 const ADMIN_PIN_STORAGE_KEY = "eafc26-admin-pin-v1";
+// A separate access code for the hidden scouting tool - deliberately isolated from adminPin, so
+// it can be shared with one other person without giving them any admin capability at all.
+const SCOUTING_CODE_STORAGE_KEY = "eafc26-scouting-code-v1";
 // Blind bids need extra care beyond simple isolation — multiple teams submit bids to the SAME
 // record around the same time, which is exactly the "several people editing the same shared thing
 // at once" pattern that's caused every previous sync bug in this app.
@@ -613,6 +616,7 @@ export default function EafcLeagueApp() {
   const [events, setEvents] = useState([]);
   const [auctions, setAuctions] = useState([]);
   const [adminPin, setAdminPin] = useState("2026");
+  const [scoutingCode, setScoutingCode] = useState("SCOUT2026"); // separate access code for the hidden scouting tool
   const [season, setSeason] = useState(1);
   const [seasonHistory, setSeasonHistory] = useState([]);
   const [activity, setActivity] = useState([]);
@@ -652,7 +656,9 @@ export default function EafcLeagueApp() {
   }, [playerDatabase]);
 
   const [myTeamId, setMyTeamId] = useState(null); // personal — which team is "me" on this device
-  const [tab, setTab] = useState("dashboard");
+  const [tab, setTab] = useState(() => (
+    typeof window !== "undefined" && new URLSearchParams(window.location.search).get("scout") === "1" ? "scouting" : "dashboard"
+  ));
   const [loaded, setLoaded] = useState(false);
   const [saveState, setSaveState] = useState("idle"); // idle | saving | saved
   const [syncState, setSyncState] = useState("idle"); // idle | checking | updated
@@ -686,6 +692,7 @@ export default function EafcLeagueApp() {
   const knownTeamSavedAtRef = useRef(new Map()); // per-team: teamId -> savedAt
   const knownPlayerDbSavedAtRef = useRef(0);
   const knownAdminPinSavedAtRef = useRef(0);
+  const knownScoutingCodeSavedAtRef = useRef(0);
   const knownBlindBidsSavedAtRef = useRef(0);
   const knownTransfersSavedAtRef = useRef(0);
   // Snapshot of each blind bid's bids object as last synced, keyed by blind bid id — lets the
@@ -706,6 +713,7 @@ export default function EafcLeagueApp() {
   const teamSavingRef = useRef(false);
   const playerDbSavingRef = useRef(false);
   const adminPinSavingRef = useRef(false);
+  const scoutingCodeSavingRef = useRef(false);
   const blindBidsSavingRef = useRef(false);
   const transfersSavingRef = useRef(false);
   // Guards against resolveDraft running twice in overlapping succession (e.g. a double-click, or
@@ -853,6 +861,17 @@ export default function EafcLeagueApp() {
         }
       } catch (e) {
         if (legacyAdminPinForMigration) setAdminPin(legacyAdminPinForMigration);
+      }
+      // Scouting code — its own separate key too, same reasoning as the admin PIN.
+      try {
+        const scoutRes = await storage.get(SCOUTING_CODE_STORAGE_KEY, true);
+        if (scoutRes && scoutRes.value) {
+          const scoutData = JSON.parse(scoutRes.value);
+          if (scoutData.code) setScoutingCode(scoutData.code);
+          knownScoutingCodeSavedAtRef.current = scoutData.savedAt || Date.now();
+        }
+      } catch (e) {
+        // best effort — keeps the default if nothing's been saved yet
       }
       // Blind bids — its own key, with a per-record snapshot so the autosave can tell which
       // specific records this browser actually touched (several teams bid on the same record).
@@ -1375,12 +1394,65 @@ export default function EafcLeagueApp() {
     return unsubscribe;
   }, [loaded]);
 
-  // Blind bids save to their own key too. Dirty-tracking works per-record here (comparing each
-  // blind bid's bids object against what was last synced), same principle as squads/teams — only
-  // writes the whole array when at least one record actually changed locally, and submitBlindBid
-  // itself (below) does a direct read-merge-write for the moment of submission specifically, since
-  // that's the highest-risk instant — two teams bidding on the same record within moments of each
-  // other is exactly the scenario a periodic debounced save can't fully protect against.
+  useEffect(() => {
+    if (!loaded) return;
+    scoutingCodeSavingRef.current = true;
+    const t = setTimeout(async () => {
+      try {
+        const savedAt = Date.now();
+        await storage.set(SCOUTING_CODE_STORAGE_KEY, JSON.stringify({ code: scoutingCode, savedAt }), true);
+        knownScoutingCodeSavedAtRef.current = savedAt;
+      } catch (e) {
+        // best effort
+      } finally {
+        scoutingCodeSavingRef.current = false;
+      }
+    }, 300);
+    return () => clearTimeout(t);
+  }, [scoutingCode, loaded]);
+
+  const pullLatestScoutingCode = useCallback(async () => {
+    if (scoutingCodeSavingRef.current) return;
+    try {
+      const res = await storage.get(SCOUTING_CODE_STORAGE_KEY, true);
+      if (res && res.value) {
+        const data = JSON.parse(res.value);
+        const remoteSavedAt = data.savedAt || 0;
+        if (remoteSavedAt > knownScoutingCodeSavedAtRef.current && data.code) {
+          setScoutingCode(data.code);
+          knownScoutingCodeSavedAtRef.current = remoteSavedAt;
+        }
+      }
+    } catch (e) {
+      // best effort
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!loaded) return;
+    const t = setInterval(() => pullLatestScoutingCode(), SYNC_POLL_MS);
+    return () => clearInterval(t);
+  }, [loaded, pullLatestScoutingCode]);
+
+  useEffect(() => {
+    if (!loaded) return;
+    const unsubscribe = subscribeToKey(SCOUTING_CODE_STORAGE_KEY, (row) => {
+      if (!row || !row.value) return;
+      try {
+        const data = JSON.parse(row.value);
+        const remoteSavedAt = data.savedAt || 0;
+        if (remoteSavedAt > knownScoutingCodeSavedAtRef.current && !scoutingCodeSavingRef.current && data.code) {
+          setScoutingCode(data.code);
+          knownScoutingCodeSavedAtRef.current = remoteSavedAt;
+        }
+      } catch (e) {
+        // ignore malformed payloads
+      }
+    });
+    return unsubscribe;
+  }, [loaded]);
+
+
   useEffect(() => {
     if (!loaded) return;
     blindBidsSavingRef.current = true;
@@ -3063,6 +3135,15 @@ export default function EafcLeagueApp() {
     return null;
   };
 
+  // Admin-only - sets the separate scouting access code, shareable with one other person without
+  // giving them any admin capability at all.
+  const changeScoutingCode = (pinAttempt, newCode) => {
+    if (pinAttempt !== adminPin) return "Incorrect PIN.";
+    if (!newCode || newCode.trim().length < 4) return "New code must be at least 4 characters.";
+    setScoutingCode(newCode.trim());
+    return null;
+  };
+
   // Downloads everything (squads, budgets, transfers, fixtures, prizes, auctions) as a JSON file
   // the admin can keep somewhere safe — a real backup outside the app's own storage.
   const exportBackup = () => {
@@ -4071,7 +4152,11 @@ export default function EafcLeagueApp() {
             draftPicks={draftPicks} draftSubmitted={draftSubmitted} clearSquadsAndTransfers={clearSquadsAndTransfers}
             applyNewBudgetAndWageCap={applyNewBudgetAndWageCap} resetTeamDraft={resetTeamDraft}
             reopenDraftKeepPicks={reopenDraftKeepPicks} clearBlindBids={clearBlindBids} blindBids={blindBids}
-            assignSponsorships={assignSponsorships} transfers={activeTransfers} removePlayerFromSquad={removePlayerFromSquad} deleteTransfer={deleteTransfer} forceMarkBlindBidResolved={forceMarkBlindBidResolved} />
+            assignSponsorships={assignSponsorships} transfers={activeTransfers} removePlayerFromSquad={removePlayerFromSquad} deleteTransfer={deleteTransfer} forceMarkBlindBidResolved={forceMarkBlindBidResolved} changeScoutingCode={changeScoutingCode} />
+        )}
+
+        {tab === "scouting" && (
+          <ScoutingTab playerDatabase={playerDatabase} scoutingCode={scoutingCode} openPlayerStats={openPlayerStats} />
         )}
       </div>
 
@@ -7289,6 +7374,121 @@ function ChatTab({ chat, setChat, teams, myTeamId, markChatSeen }) {
 }
 
 /* --------------------------------- Rules ---------------------------------- */
+function ScoutingTab({ playerDatabase, scoutingCode, openPlayerStats }) {
+  const [unlocked, setUnlocked] = useState(false);
+  const [codeInput, setCodeInput] = useState("");
+  const [codeError, setCodeError] = useState(null);
+  const [refQuery, setRefQuery] = useState("");
+  const [refPlayer, setRefPlayer] = useState(null);
+
+  const doUnlock = () => {
+    if (codeInput.trim().toUpperCase() !== String(scoutingCode || "").trim().toUpperCase()) {
+      setCodeError("Incorrect code.");
+      return;
+    }
+    setUnlocked(true);
+    setCodeError(null);
+    setCodeInput("");
+  };
+
+  const results = useMemo(() => {
+    if (!refPlayer) return null;
+    return findScoutingMatches(refPlayer, playerDatabase, 12);
+  }, [refPlayer, playerDatabase]);
+
+  if (!unlocked) {
+    return (
+      <Panel style={{ padding: 18, maxWidth: 420, margin: "40px auto" }}>
+        <SectionTitle icon={Search}>Scouting</SectionTitle>
+        <div style={{ color: C.muted, fontSize: 12.5, marginBottom: 14 }}>
+          Enter the scouting access code to continue.
+        </div>
+        <div className="flex items-end gap-2 flex-wrap">
+          <Field label="Access Code">
+            <TextInput type="password" value={codeInput} onChange={(e) => setCodeInput(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && doUnlock()} style={{ width: 180 }} />
+          </Field>
+          <Btn onClick={doUnlock}>Unlock</Btn>
+        </div>
+        {codeError && <div style={{ color: C.red, fontSize: 12, marginTop: 8 }}>{codeError}</div>}
+      </Panel>
+    );
+  }
+
+  const renderMatchRow = (match) => {
+    const p = match.player;
+    return (
+      <div key={p.name + p.club} style={{ background: C.panelAlt, borderRadius: 8, padding: 10, marginBottom: 8 }}>
+        <div className="flex items-center justify-between flex-wrap gap-2">
+          <button onClick={() => openPlayerStats && openPlayerStats(p)}
+            style={{ background: "transparent", border: "none", padding: 0, cursor: "pointer", color: C.text, fontWeight: 700, fontSize: 13, textDecoration: "underline", textDecorationColor: `${C.gold}66` }}>
+            {p.name}
+          </button>
+          <Pill tone="gold">{Math.round(match.score * 100)}% match</Pill>
+        </div>
+        <div style={{ color: C.muted, fontSize: 11.5, marginTop: 3 }}>
+          {p.position} · {p.rating} OVR · {p.club} · Age {p.age} · {money(p.value)} · {moneyK(p.wage)}/wk
+        </div>
+        {p.playStyles && p.playStyles.length > 0 && (
+          <div style={{ color: C.muted, fontSize: 11, marginTop: 3 }}>
+            {p.playStyles.slice(0, 5).join(" · ")}
+          </div>
+        )}
+        <div style={{ display: "flex", gap: 10, marginTop: 6, fontSize: 10.5, color: C.muted }}>
+          {["pac", "sho", "pas", "dri", "def", "phy"].map((k) => (
+            <span key={k}>{k.toUpperCase()} <b style={{ color: C.text }}>{p[k]}</b></span>
+          ))}
+        </div>
+      </div>
+    );
+  };
+
+  return (
+    <Panel style={{ padding: 18 }}>
+      <SectionTitle icon={Search}>Scouting</SectionTitle>
+      <div style={{ color: C.muted, fontSize: 12.5, marginBottom: 14, lineHeight: 1.6 }}>
+        Pick a player who's working well for you, and this finds statistically similar alternatives — same
+        approximate role, stat profile, playstyles, and movement type — prioritizing hidden gems (notably lower
+        rated but still a close match) alongside more established similarly-rated names.
+      </div>
+      <Field label="Reference player">
+        <PlayerAutocomplete
+          value={refQuery}
+          onChange={setRefQuery}
+          playerDatabase={playerDatabase}
+          onSelect={(p) => { setRefPlayer(p); setRefQuery(p.name); }}
+        />
+      </Field>
+
+      {refPlayer && results && (
+        <div style={{ marginTop: 18 }}>
+          <div style={{ color: C.text, fontSize: 12.5, marginBottom: 14 }}>
+            Scouting alternatives to <b style={{ color: C.gold }}>{refPlayer.name}</b> ({refPlayer.position}, {refPlayer.rating} OVR)
+          </div>
+
+          <div style={{ color: C.gold, fontWeight: 700, fontSize: 13, marginBottom: 8 }}>
+            Hidden Gems ({results.hiddenGems.length})
+          </div>
+          {results.hiddenGems.length === 0 ? (
+            <div style={{ color: C.muted, fontSize: 12, marginBottom: 16 }}>No notably lower-rated close matches found.</div>
+          ) : (
+            <div style={{ marginBottom: 20 }}>{results.hiddenGems.map(renderMatchRow)}</div>
+          )}
+
+          <div style={{ color: C.text, fontWeight: 700, fontSize: 13, marginBottom: 8 }}>
+            Similarly Established ({results.established.length})
+          </div>
+          {results.established.length === 0 ? (
+            <div style={{ color: C.muted, fontSize: 12 }}>No close matches found at a similar rating.</div>
+          ) : (
+            <div>{results.established.map(renderMatchRow)}</div>
+          )}
+        </div>
+      )}
+    </Panel>
+  );
+}
+
 function PlayerDatabaseTab({ teams, squads, playerDatabase, openPlayerStats, refreshPlayerDatabase, adminPin, importPlayerDatabase, deletePlayerFromDatabase, deleteMultiplePlayersFromDatabase }) {
   const [query, setQuery] = useState("");
   const [sortKey, setSortKey] = useState("rating");
@@ -7947,7 +8147,7 @@ function AddPrizeTools({ teams, addPrize }) {
   );
 }
 
-function AdminTab({ teams, squads, myTeamId, playerDatabase, adminPin, logAdminReward, resetAll, changeAdminPin, addFundsToTeam, addEarned86Slot, exportBackup, restoreBackup, restoreFromNightlyBackup, endSeason, season, seasonHistory, standings, importPlayerDatabase, clearPlayerDatabase, teamLockOverride, toggleTeamLockOverride, clearChat, resetTeamPassword, squadStats, transferWindow, setTransferWindowDates, clearTransferWindow, addPrize, exportPlayerDatabaseCSV, adminRemoveCaptain, draftPicks, draftSubmitted, clearSquadsAndTransfers, applyNewBudgetAndWageCap, resetTeamDraft, reopenDraftKeepPicks, clearBlindBids, blindBids, assignSponsorships, transfers, removePlayerFromSquad, deleteTransfer, forceMarkBlindBidResolved }) {
+function AdminTab({ teams, squads, myTeamId, playerDatabase, adminPin, logAdminReward, resetAll, changeAdminPin, addFundsToTeam, addEarned86Slot, exportBackup, restoreBackup, restoreFromNightlyBackup, endSeason, season, seasonHistory, standings, importPlayerDatabase, clearPlayerDatabase, teamLockOverride, toggleTeamLockOverride, clearChat, resetTeamPassword, squadStats, transferWindow, setTransferWindowDates, clearTransferWindow, addPrize, exportPlayerDatabaseCSV, adminRemoveCaptain, draftPicks, draftSubmitted, clearSquadsAndTransfers, applyNewBudgetAndWageCap, resetTeamDraft, reopenDraftKeepPicks, clearBlindBids, blindBids, assignSponsorships, transfers, removePlayerFromSquad, deleteTransfer, forceMarkBlindBidResolved, changeScoutingCode }) {
   const [unlocked, setUnlocked] = useState(false);
   const [pinInput, setPinInput] = useState("");
   const [err, setErr] = useState("");
@@ -7998,7 +8198,7 @@ function AdminTab({ teams, squads, myTeamId, playerDatabase, adminPin, logAdminR
         resetTeamPassword={resetTeamPassword}
         transferWindow={transferWindow} setTransferWindowDates={setTransferWindowDates} clearTransferWindow={clearTransferWindow}
         adminRemoveCaptain={adminRemoveCaptain} clearSquadsAndTransfers={clearSquadsAndTransfers}
-        applyNewBudgetAndWageCap={applyNewBudgetAndWageCap} />
+        applyNewBudgetAndWageCap={applyNewBudgetAndWageCap} changeScoutingCode={changeScoutingCode} />
     </div>
   );
 }
@@ -8151,6 +8351,80 @@ async function sofifaFetch(path) {
 // over time; this is a reasonable current approximation, not something that needs to track live
 // rates to the penny for a fantasy league.
 const EUR_TO_GBP = 0.855;
+
+// Scouting: finds players statistically similar to a given reference player, prioritizing
+// "hidden gems" (notably lower-rated but still a close match) over the obvious high-rated names.
+// Everything here works off what Sofifa actually gives us — there's no raw height/weight, but
+// accelerationType (Explosive/Controlled/Lengthy etc.) is a solid stand-in for body type/movement
+// profile, since it's directly derived from those attributes in modern FIFA/EAFC anyway.
+const GK_STAT_KEYS = ["gkDiving", "gkHandling", "gkKicking", "gkPositioning", "gkReflexes"];
+const OUTFIELD_STAT_KEYS = ["pac", "sho", "pas", "dri", "def", "phy"];
+
+function statSimilarity(ref, cand) {
+  const isGk = ref.position === "GK";
+  if (isGk !== (cand.position === "GK")) return 0; // a keeper and an outfielder are never a stat match
+  const keys = isGk ? GK_STAT_KEYS : OUTFIELD_STAT_KEYS;
+  const refVals = isGk ? (ref.detailedStats || {}) : ref;
+  const candVals = isGk ? (cand.detailedStats || {}) : cand;
+  let sumSquaredDiff = 0;
+  keys.forEach((k) => {
+    const diff = (Number(refVals[k]) || 0) - (Number(candVals[k]) || 0);
+    sumSquaredDiff += diff * diff;
+  });
+  const distance = Math.sqrt(sumSquaredDiff / keys.length);
+  return Math.max(0, 1 - distance / 40); // 40-point average gap ≈ no similarity left
+}
+
+function playStyleSimilarity(ref, cand) {
+  const refStyles = new Set(ref.playStyles || []);
+  const candStyles = new Set(cand.playStyles || []);
+  if (refStyles.size === 0 && candStyles.size === 0) return 0.5; // neither has any data - neutral, not a penalty
+  const intersection = [...refStyles].filter((s) => candStyles.has(s)).length;
+  const union = new Set([...refStyles, ...candStyles]).size;
+  return union === 0 ? 0 : intersection / union;
+}
+
+function positionMatch(ref, cand) {
+  if (ref.position === cand.position) return 1;
+  const refPositions = new Set(ref.positions || [ref.position]);
+  const candPositions = new Set(cand.positions || [cand.position]);
+  const overlap = [...refPositions].some((p) => candPositions.has(p));
+  return overlap ? 0.6 : 0;
+}
+
+function bodyTypeMatch(ref, cand) {
+  if (!ref.accelerationType || !cand.accelerationType) return 0.5; // no data either side - neutral
+  if (ref.accelerationType === cand.accelerationType) return 1;
+  // "Mostly Explosive" and "Explosive" etc. share a root - partial credit for that overlap
+  const refRoot = ref.accelerationType.replace(/^Mostly /, "");
+  const candRoot = cand.accelerationType.replace(/^Mostly /, "");
+  return refRoot === candRoot ? 0.6 : 0;
+}
+
+function scoutingSimilarity(ref, cand) {
+  return (
+    statSimilarity(ref, cand) * 0.6 +
+    playStyleSimilarity(ref, cand) * 0.2 +
+    positionMatch(ref, cand) * 0.1 +
+    bodyTypeMatch(ref, cand) * 0.1
+  );
+}
+
+// Returns the best matches split into "hidden gems" (rated meaningfully lower than the reference,
+// but still a close statistical match) and "similarly established" players, each sorted by
+// similarity. The reference player itself is always excluded from its own results.
+function findScoutingMatches(refPlayer, playerDatabase, limit = 12) {
+  const HIDDEN_GEM_RATING_GAP = 3; // at least this many points below the reference to count as a "gem"
+  const scored = playerDatabase
+    .filter((p) => p.name !== refPlayer.name || p.club !== refPlayer.club)
+    .map((p) => ({ player: p, score: scoutingSimilarity(refPlayer, p) }))
+    .filter((s) => s.score > 0.15) // filters out clear non-matches (wrong position outfield/GK etc.)
+    .sort((a, b) => b.score - a.score);
+
+  const hiddenGems = scored.filter((s) => Number(s.player.rating) <= Number(refPlayer.rating) - HIDDEN_GEM_RATING_GAP).slice(0, limit);
+  const established = scored.filter((s) => Number(s.player.rating) > Number(refPlayer.rating) - HIDDEN_GEM_RATING_GAP).slice(0, limit);
+  return { hiddenGems, established };
+}
 
 function mapSofifaPlayer(p, clubName) {
   const positions = [p.position1, p.position2, p.position3, p.position4, p.position5, p.position6, p.position7]
@@ -8836,11 +9110,13 @@ function BlindBidDamageDiagnostic({ teams, squads, transfers, adminPin, removePl
   );
 }
 
-function AdminTools({ teams, squads, resetAll, changeAdminPin, addFundsToTeam, addEarned86Slot, teamLockOverride, toggleTeamLockOverride, clearChat, resetTeamPassword, transferWindow, setTransferWindowDates, clearTransferWindow, adminRemoveCaptain, clearSquadsAndTransfers, applyNewBudgetAndWageCap }) {
+function AdminTools({ teams, squads, resetAll, changeAdminPin, addFundsToTeam, addEarned86Slot, teamLockOverride, toggleTeamLockOverride, clearChat, resetTeamPassword, transferWindow, setTransferWindowDates, clearTransferWindow, adminRemoveCaptain, clearSquadsAndTransfers, applyNewBudgetAndWageCap, changeScoutingCode }) {
   const [pin, setPin] = useState("");
   const [msg, setMsg] = useState(null); // { text, tone }
   const [showChangePin, setShowChangePin] = useState(false);
   const [newPinInput, setNewPinInput] = useState("");
+  const [showChangeScoutingCode, setShowChangeScoutingCode] = useState(false);
+  const [newScoutingCodeInput, setNewScoutingCodeInput] = useState("");
 
   const [fundsTeam, setFundsTeam] = useState(teams[0]?.id || "");
   const [fundsAmount, setFundsAmount] = useState("");
@@ -8932,6 +9208,17 @@ function AdminTools({ teams, squads, resetAll, changeAdminPin, addFundsToTeam, a
       show("Admin PIN updated.", "green");
       setNewPinInput("");
       setShowChangePin(false);
+    }
+  };
+
+  const doChangeScoutingCode = () => {
+    const err = changeScoutingCode(pin, newScoutingCodeInput);
+    setPin("");
+    if (err) show(err, "red");
+    else {
+      show("Scouting code updated.", "green");
+      setNewScoutingCodeInput("");
+      setShowChangeScoutingCode(false);
     }
   };
 
@@ -9027,6 +9314,29 @@ function AdminTools({ teams, squads, resetAll, changeAdminPin, addFundsToTeam, a
               <TextInput type="password" value={newPinInput} onChange={(e) => setNewPinInput(e.target.value)} />
             </Field>
             <Btn icon={Unlock} onClick={doChangePin}>Save new PIN</Btn>
+          </div>
+        )}
+      </div>
+
+      {/* Scouting access code */}
+      <div style={{ paddingTop: 18, marginTop: 18, borderTop: `1px solid ${C.border}` }}>
+        <div style={{ color: C.text, fontWeight: 700, fontSize: 13, marginBottom: 6 }}>Scouting Tool Access Code</div>
+        <div style={{ color: C.muted, fontSize: 11.5, marginBottom: 10 }}>
+          A separate code (not your admin PIN) for the hidden scouting tool — share it with anyone you want to have
+          access, without giving them any admin capability. Access it at your site's URL with{" "}
+          <code style={{ color: C.gold }}>?scout=1</code> added to the end.
+        </div>
+        <div className="flex items-center gap-2 flex-wrap">
+          <Btn variant="outline" icon={KeyRound} onClick={() => setShowChangeScoutingCode((s) => !s)}>
+            {showChangeScoutingCode ? "Cancel" : "Change Scouting Code"}
+          </Btn>
+        </div>
+        {showChangeScoutingCode && (
+          <div className="grid gap-3" style={{ gridTemplateColumns: "1fr auto", alignItems: "end", marginTop: 12, maxWidth: 420 }}>
+            <Field label="New scouting code (min 4 characters, uses admin PIN above to confirm)">
+              <TextInput value={newScoutingCodeInput} onChange={(e) => setNewScoutingCodeInput(e.target.value)} />
+            </Field>
+            <Btn icon={Unlock} onClick={doChangeScoutingCode}>Save new code</Btn>
           </div>
         )}
       </div>
