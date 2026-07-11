@@ -8871,11 +8871,20 @@ function AdminTools({ teams, squads, resetAll, changeAdminPin, addFundsToTeam, a
     else show("Transfer window set.", "green");
   };
 
-  const doClearWindow = () => {
+  // Simple immediate toggle, for when you just want it closed/open right now rather than
+  // scheduling specific dates - reuses the same underlying mechanism either way.
+  const doCloseWindowNow = () => {
+    const err = setTransferWindowDates(pin, Date.now() - 100000000, Date.now() - 1);
+    setPin("");
+    if (err) show(err, "red");
+    else show("Transfer window closed — the market is shut until reopened.", "green");
+  };
+
+  const doOpenWindowNow = () => {
     const err = clearTransferWindow(pin);
     setPin("");
     if (err) show(err, "red");
-    else show("Transfer window cleared — the market is open with no restriction.", "green");
+    else show("Transfer window open — the market is unrestricted.", "green");
   };
 
   const doReset = async () => {
@@ -9087,6 +9096,10 @@ function AdminTools({ teams, squads, resetAll, changeAdminPin, addFundsToTeam, a
               : "No window set — always open"}
           </b>
         </div>
+        <div className="flex items-center gap-2 flex-wrap" style={{ marginBottom: 14 }}>
+          <Btn variant="danger" onClick={doCloseWindowNow}>Close Window Now</Btn>
+          <Btn onClick={doOpenWindowNow}>Open Window Now</Btn>
+        </div>
         <div className="flex items-end gap-2 flex-wrap">
           <Field label="Opens">
             <TextInput type="datetime-local" value={windowOpens} onChange={(e) => setWindowOpens(e.target.value)} />
@@ -9094,8 +9107,7 @@ function AdminTools({ teams, squads, resetAll, changeAdminPin, addFundsToTeam, a
           <Field label="Closes">
             <TextInput type="datetime-local" value={windowCloses} onChange={(e) => setWindowCloses(e.target.value)} />
           </Field>
-          <Btn onClick={doSetWindow}>Set Window</Btn>
-          <Btn variant="outline" onClick={doClearWindow}>Clear (Always Open)</Btn>
+          <Btn variant="outline" onClick={doSetWindow}>Schedule Specific Dates</Btn>
         </div>
       </div>
 
