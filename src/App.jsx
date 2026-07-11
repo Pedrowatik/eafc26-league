@@ -204,9 +204,6 @@ const PLAYERDB_STORAGE_KEY = "eafc26-player-database-v1";
 // The admin PIN gets its own dedicated key — it's the "keys to the kingdom," and it's exactly what
 // just got wiped when a stale browser overwrote the whole shared blob back to defaults.
 const ADMIN_PIN_STORAGE_KEY = "eafc26-admin-pin-v1";
-// A separate access code for the hidden scouting tool - deliberately isolated from adminPin, so
-// it can be shared with one other person without giving them any admin capability at all.
-const SCOUTING_CODE_STORAGE_KEY = "eafc26-scouting-code-v1";
 // Blind bids need extra care beyond simple isolation — multiple teams submit bids to the SAME
 // record around the same time, which is exactly the "several people editing the same shared thing
 // at once" pattern that's caused every previous sync bug in this app.
@@ -612,11 +609,14 @@ export default function EafcLeagueApp() {
   // { teamId: { company, expectedPosition, season, bonusAwarded } }. Visible to everyone the
   // moment it's assigned — not hidden until season end.
   const [sponsorships, setSponsorships] = useState({});
+  // Snapshots of draft picks/submissions the admin has chosen to archive, each with a custom label
+  // (e.g. "Season 1", "Season 3") - a way to keep a historical record without needing to touch
+  // seasonHistory, since a draft doesn't necessarily line up 1:1 with a season boundary.
+  const [draftArchives, setDraftArchives] = useState([]);
   const [prizes, setPrizes] = useState([]);
   const [events, setEvents] = useState([]);
   const [auctions, setAuctions] = useState([]);
   const [adminPin, setAdminPin] = useState("2026");
-  const [scoutingCode, setScoutingCode] = useState("SCOUT2026"); // separate access code for the hidden scouting tool
   const [season, setSeason] = useState(1);
   const [seasonHistory, setSeasonHistory] = useState([]);
   const [activity, setActivity] = useState([]);
@@ -656,9 +656,7 @@ export default function EafcLeagueApp() {
   }, [playerDatabase]);
 
   const [myTeamId, setMyTeamId] = useState(null); // personal — which team is "me" on this device
-  const [tab, setTab] = useState(() => (
-    typeof window !== "undefined" && new URLSearchParams(window.location.search).get("scout") === "1" ? "scouting" : "dashboard"
-  ));
+  const [tab, setTab] = useState("dashboard");
   const [loaded, setLoaded] = useState(false);
   const [saveState, setSaveState] = useState("idle"); // idle | saving | saved
   const [syncState, setSyncState] = useState("idle"); // idle | checking | updated
@@ -692,7 +690,6 @@ export default function EafcLeagueApp() {
   const knownTeamSavedAtRef = useRef(new Map()); // per-team: teamId -> savedAt
   const knownPlayerDbSavedAtRef = useRef(0);
   const knownAdminPinSavedAtRef = useRef(0);
-  const knownScoutingCodeSavedAtRef = useRef(0);
   const knownBlindBidsSavedAtRef = useRef(0);
   const knownTransfersSavedAtRef = useRef(0);
   // Snapshot of each blind bid's bids object as last synced, keyed by blind bid id — lets the
@@ -713,7 +710,6 @@ export default function EafcLeagueApp() {
   const teamSavingRef = useRef(false);
   const playerDbSavingRef = useRef(false);
   const adminPinSavingRef = useRef(false);
-  const scoutingCodeSavingRef = useRef(false);
   const blindBidsSavingRef = useRef(false);
   const transfersSavingRef = useRef(false);
   // Guards against resolveDraft running twice in overlapping succession (e.g. a double-click, or
@@ -735,6 +731,7 @@ export default function EafcLeagueApp() {
     if (data.draftState) setDraftState(data.draftState);
     if (data.cupState) setCupState(data.cupState);
     if (data.sponsorships) setSponsorships(data.sponsorships);
+    if (data.draftArchives) setDraftArchives(data.draftArchives);
     if (data.transferWindow) setTransferWindow(data.transferWindow);
     if (data.swapsUsed) setSwapsUsed(data.swapsUsed);
     if (data.swapOffers) setSwapOffers(data.swapOffers);
@@ -861,17 +858,6 @@ export default function EafcLeagueApp() {
         }
       } catch (e) {
         if (legacyAdminPinForMigration) setAdminPin(legacyAdminPinForMigration);
-      }
-      // Scouting code — its own separate key too, same reasoning as the admin PIN.
-      try {
-        const scoutRes = await storage.get(SCOUTING_CODE_STORAGE_KEY, true);
-        if (scoutRes && scoutRes.value) {
-          const scoutData = JSON.parse(scoutRes.value);
-          if (scoutData.code) setScoutingCode(scoutData.code);
-          knownScoutingCodeSavedAtRef.current = scoutData.savedAt || Date.now();
-        }
-      } catch (e) {
-        // best effort — keeps the default if nothing's been saved yet
       }
       // Blind bids — its own key, with a per-record snapshot so the autosave can tell which
       // specific records this browser actually touched (several teams bid on the same record).
@@ -1034,7 +1020,7 @@ export default function EafcLeagueApp() {
         const savedAt = Date.now();
         await storage.set(
           STORAGE_KEY,
-          JSON.stringify({ fixtures, prizes, events, season, seasonHistory, activity, injuries, teamLockOverride, draftState, cupState, sponsorships, cardTally, suspensions, transferWindow, swapsUsed, swapOffers, savedAt }),
+          JSON.stringify({ fixtures, prizes, events, season, seasonHistory, activity, injuries, teamLockOverride, draftState, cupState, sponsorships, draftArchives, cardTally, suspensions, transferWindow, swapsUsed, swapOffers, savedAt }),
           true
         );
         knownSavedAtRef.current = savedAt;
@@ -1047,7 +1033,7 @@ export default function EafcLeagueApp() {
       }
     }, 300);
     return () => clearTimeout(t);
-  }, [fixtures, prizes, events, season, seasonHistory, activity, injuries, teamLockOverride, draftState, cupState, sponsorships, cardTally, suspensions, transferWindow, swapsUsed, swapOffers, loaded]);
+  }, [fixtures, prizes, events, season, seasonHistory, activity, injuries, teamLockOverride, draftState, cupState, sponsorships, draftArchives, cardTally, suspensions, transferWindow, swapsUsed, swapOffers, loaded]);
 
   // Private messages save to their own separate key, on their own quick timer — this is what
   // actually stops a message from getting silently erased if someone else's browser (with a
@@ -1386,64 +1372,6 @@ export default function EafcLeagueApp() {
         if (remoteSavedAt > knownAdminPinSavedAtRef.current && !adminPinSavingRef.current && data.pin) {
           setAdminPin(data.pin);
           knownAdminPinSavedAtRef.current = remoteSavedAt;
-        }
-      } catch (e) {
-        // ignore malformed payloads
-      }
-    });
-    return unsubscribe;
-  }, [loaded]);
-
-  useEffect(() => {
-    if (!loaded) return;
-    scoutingCodeSavingRef.current = true;
-    const t = setTimeout(async () => {
-      try {
-        const savedAt = Date.now();
-        await storage.set(SCOUTING_CODE_STORAGE_KEY, JSON.stringify({ code: scoutingCode, savedAt }), true);
-        knownScoutingCodeSavedAtRef.current = savedAt;
-      } catch (e) {
-        // best effort
-      } finally {
-        scoutingCodeSavingRef.current = false;
-      }
-    }, 300);
-    return () => clearTimeout(t);
-  }, [scoutingCode, loaded]);
-
-  const pullLatestScoutingCode = useCallback(async () => {
-    if (scoutingCodeSavingRef.current) return;
-    try {
-      const res = await storage.get(SCOUTING_CODE_STORAGE_KEY, true);
-      if (res && res.value) {
-        const data = JSON.parse(res.value);
-        const remoteSavedAt = data.savedAt || 0;
-        if (remoteSavedAt > knownScoutingCodeSavedAtRef.current && data.code) {
-          setScoutingCode(data.code);
-          knownScoutingCodeSavedAtRef.current = remoteSavedAt;
-        }
-      }
-    } catch (e) {
-      // best effort
-    }
-  }, []);
-
-  useEffect(() => {
-    if (!loaded) return;
-    const t = setInterval(() => pullLatestScoutingCode(), SYNC_POLL_MS);
-    return () => clearInterval(t);
-  }, [loaded, pullLatestScoutingCode]);
-
-  useEffect(() => {
-    if (!loaded) return;
-    const unsubscribe = subscribeToKey(SCOUTING_CODE_STORAGE_KEY, (row) => {
-      if (!row || !row.value) return;
-      try {
-        const data = JSON.parse(row.value);
-        const remoteSavedAt = data.savedAt || 0;
-        if (remoteSavedAt > knownScoutingCodeSavedAtRef.current && !scoutingCodeSavingRef.current && data.code) {
-          setScoutingCode(data.code);
-          knownScoutingCodeSavedAtRef.current = remoteSavedAt;
         }
       } catch (e) {
         // ignore malformed payloads
@@ -3128,19 +3056,23 @@ export default function EafcLeagueApp() {
     return null;
   };
 
+  // Saves a snapshot of the current draft picks/submissions under a custom label - a historical
+  // record independent of season boundaries, since a draft doesn't necessarily line up with them.
+  const archiveDraft = (pinAttempt, label) => {
+    if (pinAttempt !== adminPin) return "Incorrect PIN.";
+    if (!label || !label.trim()) return "Enter a label for this archive (e.g. \"Season 1\").";
+    setDraftArchives((all) => [{
+      id: uid(), label: label.trim(), archivedAt: Date.now(),
+      picks: draftPicks, submitted: draftSubmitted,
+    }, ...all]);
+    logActivity(`Admin archived the current draft as "${label.trim()}".`, "transfer");
+    return null;
+  };
+
   const changeAdminPin = (currentPin, newPin) => {
     if (currentPin !== adminPin) return "Current PIN is incorrect.";
     if (!newPin || newPin.trim().length < 4) return "New PIN must be at least 4 characters.";
     setAdminPin(newPin.trim());
-    return null;
-  };
-
-  // Admin-only - sets the separate scouting access code, shareable with one other person without
-  // giving them any admin capability at all.
-  const changeScoutingCode = (pinAttempt, newCode) => {
-    if (pinAttempt !== adminPin) return "Incorrect PIN.";
-    if (!newCode || newCode.trim().length < 4) return "New code must be at least 4 characters.";
-    setScoutingCode(newCode.trim());
     return null;
   };
 
@@ -3723,26 +3655,46 @@ export default function EafcLeagueApp() {
     if (entries.length === 0) return; // nobody bid at all — leave it open for the admin to sort out manually
     const [winnerTeamId, winningBid] = entries.reduce((best, cur) => (cur[1] > best[1] ? cur : best), entries[0]);
 
-    // Check for an available slot FIRST, before touching budget or creating any record. Previously
-    // this deducted the budget and logged the win unconditionally, even if the squad had no room —
-    // meaning a full squad could silently lose the player while still being charged for them.
-    const winnerSquad = squads[winnerTeamId];
-    if (!firstFreeSlot(winnerSquad)) {
+    // Read the winner's squad fresh, directly from storage, rather than trusting this browser's
+    // local copy — that local copy could be stale if the winning team signed someone else
+    // concurrently on a different device, which is exactly what was letting a won blind bid
+    // player silently vanish (this browser's stale base got saved right over the real update).
+    let winnerSquad = squads[winnerTeamId];
+    try {
+      const freshSquadRes = await storage.get(squadKeyFor(winnerTeamId), true);
+      if (freshSquadRes && freshSquadRes.value) {
+        const freshSquadData = JSON.parse(freshSquadRes.value);
+        winnerSquad = { starters: freshSquadData.starters || [], reserves: freshSquadData.reserves || [] };
+      }
+    } catch (e) {
+      // fall back to local state if the fresh read fails
+    }
+
+    const slot = firstFreeSlot(winnerSquad);
+    if (!slot) {
       logActivity(`Couldn't resolve the blind bid for ${bb.player.name} — ${teamById[winnerTeamId]?.name || winnerTeamId}'s squad is full. Make room and resolve this one manually.`, "transfer");
       return; // leave it unresolved rather than charge for a player who never actually gets placed
     }
 
-    setSquads((all) => {
-      const slot = firstFreeSlot(all[winnerTeamId]);
-      if (!slot) return all;
-      const playerObj = {
-        name: bb.player.name, position: bb.player.position, rating: bb.player.rating,
-        club: bb.player.club, age: bb.player.age, value: roundUpTo250k(winningBid), wage: bb.player.wage,
-      };
-      const next = { ...all, [winnerTeamId]: { ...all[winnerTeamId], [slot.group]: [...all[winnerTeamId][slot.group]] } };
-      next[winnerTeamId][slot.group][slot.idx] = playerObj;
-      return next;
-    });
+    const playerObj = {
+      name: bb.player.name, position: bb.player.position, rating: bb.player.rating,
+      club: bb.player.club, age: bb.player.age, value: roundUpTo250k(winningBid), wage: bb.player.wage,
+    };
+    const updatedSquad = { ...winnerSquad, [slot.group]: [...winnerSquad[slot.group]] };
+    updatedSquad[slot.group][slot.idx] = playerObj;
+
+    setSquads((all) => ({ ...all, [winnerTeamId]: updatedSquad }));
+    // Write immediately and directly, same reasoning as the fresh read above — this is the
+    // highest-stakes moment (a player actually being placed), so it shouldn't wait on the general
+    // debounced autosave, which is exactly what could let a stale save clobber this right after.
+    try {
+      const savedAt = Date.now();
+      await storage.set(squadKeyFor(winnerTeamId), JSON.stringify({ ...updatedSquad, savedAt }), true);
+      knownSquadSavedAtRef.current.set(winnerTeamId, savedAt);
+      lastSyncedSquadDataRef.current.set(winnerTeamId, JSON.stringify({ starters: updatedSquad.starters, reserves: updatedSquad.reserves }));
+    } catch (e) {
+      // best effort — the regular autosave will still pick this up if this direct write fails
+    }
     const blindBidValue = roundUpTo250k(winningBid);
     const blindBidTax = blindBidValue > 0 ? Math.max(blindBidValue * 0.1, 0.25) : 0;
     setTeams((ts) => ts.map((t) => {
@@ -3970,6 +3922,7 @@ export default function EafcLeagueApp() {
     { id: "prizes", label: "Prize Pool", icon: Coins },
     { id: "rules", label: "Rules", icon: BookOpen },
     { id: "admin", label: "Admin", icon: Lock },
+    { id: "scouting", label: "Scouting (Beta)", icon: Search },
   ];
 
   // Overscroll on some trackpads/phones briefly reveals the page behind the app, which defaults to
@@ -4152,11 +4105,12 @@ export default function EafcLeagueApp() {
             draftPicks={draftPicks} draftSubmitted={draftSubmitted} clearSquadsAndTransfers={clearSquadsAndTransfers}
             applyNewBudgetAndWageCap={applyNewBudgetAndWageCap} resetTeamDraft={resetTeamDraft}
             reopenDraftKeepPicks={reopenDraftKeepPicks} clearBlindBids={clearBlindBids} blindBids={blindBids}
-            assignSponsorships={assignSponsorships} transfers={activeTransfers} removePlayerFromSquad={removePlayerFromSquad} deleteTransfer={deleteTransfer} forceMarkBlindBidResolved={forceMarkBlindBidResolved} changeScoutingCode={changeScoutingCode} />
+            assignSponsorships={assignSponsorships} transfers={activeTransfers} removePlayerFromSquad={removePlayerFromSquad} deleteTransfer={deleteTransfer} forceMarkBlindBidResolved={forceMarkBlindBidResolved}
+            archiveDraft={archiveDraft} draftArchives={draftArchives} />
         )}
 
         {tab === "scouting" && (
-          <ScoutingTab playerDatabase={playerDatabase} scoutingCode={scoutingCode} openPlayerStats={openPlayerStats} />
+          <ScoutingTab playerDatabase={playerDatabase} openPlayerStats={openPlayerStats} />
         )}
       </div>
 
@@ -7374,46 +7328,14 @@ function ChatTab({ chat, setChat, teams, myTeamId, markChatSeen }) {
 }
 
 /* --------------------------------- Rules ---------------------------------- */
-function ScoutingTab({ playerDatabase, scoutingCode, openPlayerStats }) {
-  const [unlocked, setUnlocked] = useState(false);
-  const [codeInput, setCodeInput] = useState("");
-  const [codeError, setCodeError] = useState(null);
+function ScoutingTab({ playerDatabase, openPlayerStats }) {
   const [refQuery, setRefQuery] = useState("");
   const [refPlayer, setRefPlayer] = useState(null);
-
-  const doUnlock = () => {
-    if (codeInput.trim().toUpperCase() !== String(scoutingCode || "").trim().toUpperCase()) {
-      setCodeError("Incorrect code.");
-      return;
-    }
-    setUnlocked(true);
-    setCodeError(null);
-    setCodeInput("");
-  };
 
   const results = useMemo(() => {
     if (!refPlayer) return null;
     return findScoutingMatches(refPlayer, playerDatabase, 12);
   }, [refPlayer, playerDatabase]);
-
-  if (!unlocked) {
-    return (
-      <Panel style={{ padding: 18, maxWidth: 420, margin: "40px auto" }}>
-        <SectionTitle icon={Search}>Scouting</SectionTitle>
-        <div style={{ color: C.muted, fontSize: 12.5, marginBottom: 14 }}>
-          Enter the scouting access code to continue.
-        </div>
-        <div className="flex items-end gap-2 flex-wrap">
-          <Field label="Access Code">
-            <TextInput type="password" value={codeInput} onChange={(e) => setCodeInput(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && doUnlock()} style={{ width: 180 }} />
-          </Field>
-          <Btn onClick={doUnlock}>Unlock</Btn>
-        </div>
-        {codeError && <div style={{ color: C.red, fontSize: 12, marginTop: 8 }}>{codeError}</div>}
-      </Panel>
-    );
-  }
 
   const renderMatchRow = (match) => {
     const p = match.player;
@@ -7919,11 +7841,19 @@ function RulesTab({ teams, standings }) {
   );
 }
 
-function DraftSubmissionsTools({ teams, draftPicks, draftSubmitted, adminPin, resetTeamDraft, reopenDraftKeepPicks, clearBlindBids, blindBids, forceMarkBlindBidResolved }) {
+function DraftSubmissionsTools({ teams, draftPicks, draftSubmitted, adminPin, resetTeamDraft, reopenDraftKeepPicks, clearBlindBids, blindBids, forceMarkBlindBidResolved, archiveDraft, draftArchives }) {
   const submittedTeams = teams.filter((t) => draftSubmitted[t.id]);
   const [pin, setPin] = useState("");
   const [resetTeamId, setResetTeamId] = useState(teams[0]?.id || "");
   const [msg, setMsg] = useState(null);
+  const [archiveLabel, setArchiveLabel] = useState("");
+
+  const doArchive = () => {
+    const err = archiveDraft(pin, archiveLabel);
+    setPin("");
+    if (err) setMsg({ text: err, tone: "red" });
+    else { setMsg({ text: `Draft archived as "${archiveLabel.trim()}".`, tone: "green" }); setArchiveLabel(""); }
+  };
 
   const doReset = () => {
     const err = resetTeamDraft(pin, resetTeamId);
@@ -7974,7 +7904,13 @@ function DraftSubmissionsTools({ teams, draftPicks, draftSubmitted, adminPin, re
         <div style={{ color: C.muted, fontSize: 12.5 }}>No teams have submitted a draft yet.</div>
       ) : (
         <>
-          <Btn variant="outline" size="sm" icon={Download} onClick={downloadCsv}>Download as CSV</Btn>
+          <div className="flex items-end gap-2 flex-wrap" style={{ marginBottom: 14 }}>
+            <Btn variant="outline" size="sm" icon={Download} onClick={downloadCsv}>Download as CSV</Btn>
+            <Field label="Archive label (e.g. Season 1, Season 3)">
+              <TextInput value={archiveLabel} onChange={(e) => setArchiveLabel(e.target.value)} style={{ width: 200 }} />
+            </Field>
+            <Btn size="sm" onClick={doArchive}>Archive Current Draft</Btn>
+          </div>
           <div style={{ marginTop: 14, display: "grid", gap: 20 }}>
             {submittedTeams.map((t) => {
               const picks = (draftPicks[t.id] || []).filter(Boolean);
@@ -8103,6 +8039,23 @@ function DraftSubmissionsTools({ teams, draftPicks, draftSubmitted, adminPin, re
           </div>
         </div>
       )}
+
+      {draftArchives && draftArchives.length > 0 && (
+        <div style={{ marginTop: 18, paddingTop: 14, borderTop: `1px solid ${C.border}` }}>
+          <div style={{ color: C.text, fontWeight: 700, fontSize: 13, marginBottom: 8 }}>Past Draft Archives</div>
+          <div style={{ display: "grid", gap: 10 }}>
+            {draftArchives.map((a) => {
+              const pickCount = Object.values(a.picks || {}).reduce((s, picks) => s + (picks || []).filter(Boolean).length, 0);
+              return (
+                <div key={a.id} style={{ fontSize: 12, color: C.muted }}>
+                  <b style={{ color: C.gold }}>{a.label}</b> — archived {new Date(a.archivedAt).toLocaleDateString()},{" "}
+                  {pickCount} total picks across {Object.keys(a.picks || {}).length} teams
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
     </Panel>
   );
 }
@@ -8147,7 +8100,7 @@ function AddPrizeTools({ teams, addPrize }) {
   );
 }
 
-function AdminTab({ teams, squads, myTeamId, playerDatabase, adminPin, logAdminReward, resetAll, changeAdminPin, addFundsToTeam, addEarned86Slot, exportBackup, restoreBackup, restoreFromNightlyBackup, endSeason, season, seasonHistory, standings, importPlayerDatabase, clearPlayerDatabase, teamLockOverride, toggleTeamLockOverride, clearChat, resetTeamPassword, squadStats, transferWindow, setTransferWindowDates, clearTransferWindow, addPrize, exportPlayerDatabaseCSV, adminRemoveCaptain, draftPicks, draftSubmitted, clearSquadsAndTransfers, applyNewBudgetAndWageCap, resetTeamDraft, reopenDraftKeepPicks, clearBlindBids, blindBids, assignSponsorships, transfers, removePlayerFromSquad, deleteTransfer, forceMarkBlindBidResolved, changeScoutingCode }) {
+function AdminTab({ teams, squads, myTeamId, playerDatabase, adminPin, logAdminReward, resetAll, changeAdminPin, addFundsToTeam, addEarned86Slot, exportBackup, restoreBackup, restoreFromNightlyBackup, endSeason, season, seasonHistory, standings, importPlayerDatabase, clearPlayerDatabase, teamLockOverride, toggleTeamLockOverride, clearChat, resetTeamPassword, squadStats, transferWindow, setTransferWindowDates, clearTransferWindow, addPrize, exportPlayerDatabaseCSV, adminRemoveCaptain, draftPicks, draftSubmitted, clearSquadsAndTransfers, applyNewBudgetAndWageCap, resetTeamDraft, reopenDraftKeepPicks, clearBlindBids, blindBids, assignSponsorships, transfers, removePlayerFromSquad, deleteTransfer, forceMarkBlindBidResolved, archiveDraft, draftArchives }) {
   const [unlocked, setUnlocked] = useState(false);
   const [pinInput, setPinInput] = useState("");
   const [err, setErr] = useState("");
@@ -8179,7 +8132,7 @@ function AdminTab({ teams, squads, myTeamId, playerDatabase, adminPin, logAdminR
     <div className="grid gap-4">
       <AdminPlayerRewards teams={teams} squads={squads} logAdminReward={logAdminReward} myTeamId={myTeamId} playerDatabase={playerDatabase} squadStats={squadStats} />
 
-      <DraftSubmissionsTools teams={teams} draftPicks={draftPicks} draftSubmitted={draftSubmitted} adminPin={adminPin} resetTeamDraft={resetTeamDraft} reopenDraftKeepPicks={reopenDraftKeepPicks} clearBlindBids={clearBlindBids} blindBids={blindBids} forceMarkBlindBidResolved={forceMarkBlindBidResolved} />
+      <DraftSubmissionsTools teams={teams} draftPicks={draftPicks} draftSubmitted={draftSubmitted} adminPin={adminPin} resetTeamDraft={resetTeamDraft} reopenDraftKeepPicks={reopenDraftKeepPicks} clearBlindBids={clearBlindBids} blindBids={blindBids} forceMarkBlindBidResolved={forceMarkBlindBidResolved} archiveDraft={archiveDraft} draftArchives={draftArchives} />
 
       <AddPrizeTools teams={teams} addPrize={addPrize} />
 
@@ -8198,7 +8151,7 @@ function AdminTab({ teams, squads, myTeamId, playerDatabase, adminPin, logAdminR
         resetTeamPassword={resetTeamPassword}
         transferWindow={transferWindow} setTransferWindowDates={setTransferWindowDates} clearTransferWindow={clearTransferWindow}
         adminRemoveCaptain={adminRemoveCaptain} clearSquadsAndTransfers={clearSquadsAndTransfers}
-        applyNewBudgetAndWageCap={applyNewBudgetAndWageCap} changeScoutingCode={changeScoutingCode} />
+        applyNewBudgetAndWageCap={applyNewBudgetAndWageCap} />
     </div>
   );
 }
@@ -9110,13 +9063,11 @@ function BlindBidDamageDiagnostic({ teams, squads, transfers, adminPin, removePl
   );
 }
 
-function AdminTools({ teams, squads, resetAll, changeAdminPin, addFundsToTeam, addEarned86Slot, teamLockOverride, toggleTeamLockOverride, clearChat, resetTeamPassword, transferWindow, setTransferWindowDates, clearTransferWindow, adminRemoveCaptain, clearSquadsAndTransfers, applyNewBudgetAndWageCap, changeScoutingCode }) {
+function AdminTools({ teams, squads, resetAll, changeAdminPin, addFundsToTeam, addEarned86Slot, teamLockOverride, toggleTeamLockOverride, clearChat, resetTeamPassword, transferWindow, setTransferWindowDates, clearTransferWindow, adminRemoveCaptain, clearSquadsAndTransfers, applyNewBudgetAndWageCap }) {
   const [pin, setPin] = useState("");
   const [msg, setMsg] = useState(null); // { text, tone }
   const [showChangePin, setShowChangePin] = useState(false);
   const [newPinInput, setNewPinInput] = useState("");
-  const [showChangeScoutingCode, setShowChangeScoutingCode] = useState(false);
-  const [newScoutingCodeInput, setNewScoutingCodeInput] = useState("");
 
   const [fundsTeam, setFundsTeam] = useState(teams[0]?.id || "");
   const [fundsAmount, setFundsAmount] = useState("");
@@ -9208,17 +9159,6 @@ function AdminTools({ teams, squads, resetAll, changeAdminPin, addFundsToTeam, a
       show("Admin PIN updated.", "green");
       setNewPinInput("");
       setShowChangePin(false);
-    }
-  };
-
-  const doChangeScoutingCode = () => {
-    const err = changeScoutingCode(pin, newScoutingCodeInput);
-    setPin("");
-    if (err) show(err, "red");
-    else {
-      show("Scouting code updated.", "green");
-      setNewScoutingCodeInput("");
-      setShowChangeScoutingCode(false);
     }
   };
 
@@ -9314,29 +9254,6 @@ function AdminTools({ teams, squads, resetAll, changeAdminPin, addFundsToTeam, a
               <TextInput type="password" value={newPinInput} onChange={(e) => setNewPinInput(e.target.value)} />
             </Field>
             <Btn icon={Unlock} onClick={doChangePin}>Save new PIN</Btn>
-          </div>
-        )}
-      </div>
-
-      {/* Scouting access code */}
-      <div style={{ paddingTop: 18, marginTop: 18, borderTop: `1px solid ${C.border}` }}>
-        <div style={{ color: C.text, fontWeight: 700, fontSize: 13, marginBottom: 6 }}>Scouting Tool Access Code</div>
-        <div style={{ color: C.muted, fontSize: 11.5, marginBottom: 10 }}>
-          A separate code (not your admin PIN) for the hidden scouting tool — share it with anyone you want to have
-          access, without giving them any admin capability. Access it at your site's URL with{" "}
-          <code style={{ color: C.gold }}>?scout=1</code> added to the end.
-        </div>
-        <div className="flex items-center gap-2 flex-wrap">
-          <Btn variant="outline" icon={KeyRound} onClick={() => setShowChangeScoutingCode((s) => !s)}>
-            {showChangeScoutingCode ? "Cancel" : "Change Scouting Code"}
-          </Btn>
-        </div>
-        {showChangeScoutingCode && (
-          <div className="grid gap-3" style={{ gridTemplateColumns: "1fr auto", alignItems: "end", marginTop: 12, maxWidth: 420 }}>
-            <Field label="New scouting code (min 4 characters, uses admin PIN above to confirm)">
-              <TextInput value={newScoutingCodeInput} onChange={(e) => setNewScoutingCodeInput(e.target.value)} />
-            </Field>
-            <Btn icon={Unlock} onClick={doChangeScoutingCode}>Save new code</Btn>
           </div>
         )}
       </div>
