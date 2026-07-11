@@ -7775,14 +7775,54 @@ function DraftSubmissionsTools({ teams, draftPicks, draftSubmitted, adminPin, re
       ) : (
         <>
           <Btn variant="outline" size="sm" icon={Download} onClick={downloadCsv}>Download as CSV</Btn>
-          <div style={{ marginTop: 14, display: "grid", gap: 14 }}>
+          <div style={{ marginTop: 14, display: "grid", gap: 20 }}>
             {submittedTeams.map((t) => {
               const picks = (draftPicks[t.id] || []).filter(Boolean);
+              // A pick "went to blind bid" if a blind bid record exists for that player, regardless
+              // of whether it's resolved yet or who ultimately won it — either way, it didn't count
+              // as a direct, uncontested signing for this team.
+              const contestedNames = new Set((blindBids || []).map((bb) => bb.player.name));
+              const directPicks = picks.filter((p) => !contestedNames.has(p.name));
+              const directTotal = directPicks.reduce((s, p) => {
+                const value = roundUpTo250k(Number(p.value) || 0);
+                const tax = value > 0 ? Math.max(value * 0.1, 0.25) : 0;
+                return s + value + tax;
+              }, 0);
+
+              const wonBlindBids = (blindBids || []).filter((bb) => bb.resolved && bb.winner === t.id);
+              const blindBidTotal = wonBlindBids.reduce((s, bb) => {
+                const value = roundUpTo250k(Number(bb.winningBid) || 0);
+                const tax = value > 0 ? Math.max(value * 0.1, 0.25) : 0;
+                return s + value + tax;
+              }, 0);
+
               return (
                 <div key={t.id}>
                   <div style={{ color: C.gold, fontWeight: 700, fontSize: 12.5, marginBottom: 6 }}>{t.name} ({picks.length} picks)</div>
-                  <Table dense head={["Player", "Pos", "Rating", "Club", "Age", "Value", "Wage"]}
-                    rows={picks.map((p) => [p.name, p.position, p.rating, p.club, p.age, money(roundUpTo250k(p.value)), moneyK(p.wage)])} />
+                  <Table dense head={["Player", "Pos", "Rating", "Club", "Age", "Value", "Wage", "Value + Tax"]}
+                    rows={[
+                      ...directPicks.map((p) => {
+                        const value = roundUpTo250k(Number(p.value) || 0);
+                        const tax = value > 0 ? Math.max(value * 0.1, 0.25) : 0;
+                        return [p.name, p.position, p.rating, p.club, p.age, money(value), moneyK(p.wage), money(value + tax)];
+                      }),
+                      ["", "", "", "", "", "", <b>Total</b>, <b>{money(directTotal)}</b>],
+                    ]} />
+
+                  {wonBlindBids.length > 0 && (
+                    <div style={{ marginTop: 10 }}>
+                      <div style={{ color: C.muted, fontSize: 11.5, fontWeight: 700, marginBottom: 4 }}>Successful Blind Bids</div>
+                      <Table dense head={["Player", "Cost", "Value + Tax"]}
+                        rows={[
+                          ...wonBlindBids.map((bb) => {
+                            const value = roundUpTo250k(Number(bb.winningBid) || 0);
+                            const tax = value > 0 ? Math.max(value * 0.1, 0.25) : 0;
+                            return [bb.player.name, money(value), money(value + tax)];
+                          }),
+                          ["", <b>Total</b>, <b>{money(blindBidTotal)}</b>],
+                        ]} />
+                    </div>
+                  )}
                 </div>
               );
             })}
