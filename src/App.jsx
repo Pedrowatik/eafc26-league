@@ -7439,7 +7439,7 @@ function ScoutingTab({ playerDatabase, openPlayerStats }) {
           <div style={{ marginTop: 8, paddingTop: 8, borderTop: `1px solid ${C.border}33`, display: "grid", gap: 3 }}>
             {match.breakdown.map((cat) => (
               <div key={cat.label} className="flex items-center justify-between" style={{ fontSize: 11 }}>
-                <span style={{ color: C.muted }}>{cat.label} ({cat.weight}pts, {cat.type === "minThreshold" ? "min. threshold" : cat.type === "optional" ? "optional" : "similarity"})</span>
+                <span style={{ color: C.muted }}>{cat.label} ({cat.weight}pts, {cat.type === "minThreshold" ? "min. threshold" : cat.type === "optional" || cat.type === "optionalBody" ? "bonus" : "similarity"})</span>
                 <span style={{ color: C.text }}>{cat.points.toFixed(1)}/{cat.weight}</span>
               </div>
             ))}
@@ -7482,7 +7482,7 @@ function ScoutingTab({ playerDatabase, openPlayerStats }) {
                   <span style={{ color: C.muted }}>
                     {cat.label}{" "}
                     <span style={{ color: C.muted, fontSize: 10 }}>
-                      ({cat.type === "minThreshold" ? "equal or higher is fine" : cat.type === "optional" ? "small bonus only" : "should stay close"})
+                      ({cat.type === "minThreshold" ? "equal or higher is fine" : (cat.type === "optional" || cat.type === "optionalBody") ? "small bonus only" : "should stay close"})
                     </span>
                   </span>
                   <span style={{ color: C.text }}>{cat.weight} pts</span>
@@ -8440,84 +8440,98 @@ function getStatValue(player, key) {
 // - optional: a small bonus for overlap, never a penalty for missing it
 const SCOUTING_SCORECARDS = {
   ST: [
-    { label: "Finishing & Shot Power", keys: ["finishing", "shotPower", "volleys"], type: "similarity", weight: 25 },
-    { label: "Pace", keys: ["pac"], type: "similarity", weight: 15 },
-    { label: "Positioning & Reactions", keys: ["positioning", "reactions"], type: "minThreshold", weight: 15 },
-    { label: "Dribbling & Ball Control", keys: ["dri", "ballControl"], type: "similarity", weight: 15 },
-    { label: "Physicality & Aerial", keys: ["phy", "strength", "jumping", "heading"], type: "similarity", weight: 15 },
-    { label: "Composure", keys: ["composure"], type: "minThreshold", weight: 10 },
-    { label: "Playstyle & Body Type", keys: [], type: "optional", weight: 5 },
+    { label: "Finishing & Shot Power", keys: ["finishing", "shotPower", "volleys", "longShots"], type: "similarity", weight: 18 },
+    { label: "Pace", keys: ["pac", "acceleration", "sprintSpeed"], type: "similarity", weight: 10 },
+    { label: "Positioning & Reactions", keys: ["positioning", "reactions"], type: "minThreshold", weight: 8 },
+    { label: "Dribbling & Ball Control", keys: ["dri", "ballControl", "dribbling", "agility", "balance"], type: "similarity", weight: 12 },
+    { label: "Physicality & Aerial", keys: ["phy", "strength", "jumping", "heading", "aggression"], type: "similarity", weight: 14 },
+    { label: "Passing", keys: ["pas", "shortPassing"], type: "similarity", weight: 4 },
+    { label: "Composure & Stamina", keys: ["composure", "stamina"], type: "minThreshold", weight: 4 },
+    { label: "Playstyles", keys: [], type: "optional", weight: 25 },
+    { label: "Body Type & Movement", keys: [], type: "optionalBody", weight: 5 },
   ],
   WIDE: [
-    { label: "Pace", keys: ["pac", "acceleration", "sprintSpeed"], type: "similarity", weight: 20 },
-    { label: "Dribbling & Skill", keys: ["dri", "dribbling", "agility", "balance"], type: "similarity", weight: 25 },
-    { label: "Crossing & Final Ball", keys: ["crossing", "curve", "longPassing"], type: "similarity", weight: 15 },
-    { label: "Finishing", keys: ["finishing", "shotPower"], type: "similarity", weight: 15 },
-    { label: "Work Rate & Defensive Effort", keys: ["stamina", "interceptions"], type: "minThreshold", weight: 10 },
-    { label: "Composure & Reactions", keys: ["composure", "reactions"], type: "minThreshold", weight: 10 },
-    { label: "Playstyle & Body Type", keys: [], type: "optional", weight: 5 },
+    { label: "Pace", keys: ["pac", "acceleration", "sprintSpeed"], type: "similarity", weight: 14 },
+    { label: "Dribbling & Skill", keys: ["dri", "dribbling", "agility", "balance", "ballControl"], type: "similarity", weight: 16 },
+    { label: "Crossing & Final Ball", keys: ["crossing", "curve", "longPassing", "shortPassing"], type: "similarity", weight: 10 },
+    { label: "Finishing", keys: ["finishing", "shotPower", "volleys"], type: "similarity", weight: 10 },
+    { label: "Work Rate & Defensive Effort", keys: ["stamina", "interceptions"], type: "minThreshold", weight: 6 },
+    { label: "Composure & Reactions", keys: ["composure", "reactions"], type: "minThreshold", weight: 8 },
+    { label: "Physicality", keys: ["phy", "strength"], type: "similarity", weight: 6 },
+    { label: "Playstyles", keys: [], type: "optional", weight: 25 },
+    { label: "Body Type & Movement", keys: [], type: "optionalBody", weight: 5 },
   ],
   AM: [
-    { label: "Vision & Passing", keys: ["vision", "shortPassing", "longPassing"], type: "similarity", weight: 25 },
-    { label: "Dribbling & Ball Control", keys: ["dri", "dribbling", "ballControl", "agility"], type: "similarity", weight: 20 },
-    { label: "Finishing", keys: ["finishing", "shotPower", "volleys"], type: "similarity", weight: 15 },
-    { label: "Pace", keys: ["pac", "acceleration"], type: "similarity", weight: 10 },
-    { label: "Composure & Reactions", keys: ["composure", "reactions"], type: "minThreshold", weight: 15 },
-    { label: "Stamina & Work Rate", keys: ["stamina"], type: "minThreshold", weight: 10 },
-    { label: "Playstyle & Body Type", keys: [], type: "optional", weight: 5 },
+    { label: "Vision & Passing", keys: ["vision", "shortPassing", "longPassing"], type: "similarity", weight: 16 },
+    { label: "Dribbling & Ball Control", keys: ["dri", "dribbling", "ballControl", "agility", "balance"], type: "similarity", weight: 14 },
+    { label: "Finishing", keys: ["finishing", "shotPower", "volleys", "longShots"], type: "similarity", weight: 10 },
+    { label: "Pace", keys: ["pac", "acceleration"], type: "similarity", weight: 8 },
+    { label: "Composure & Reactions", keys: ["composure", "reactions"], type: "minThreshold", weight: 10 },
+    { label: "Stamina & Work Rate", keys: ["stamina"], type: "minThreshold", weight: 6 },
+    { label: "Physicality", keys: ["phy", "strength"], type: "similarity", weight: 6 },
+    { label: "Playstyles", keys: [], type: "optional", weight: 25 },
+    { label: "Body Type & Movement", keys: [], type: "optionalBody", weight: 5 },
   ],
   CM: [
-    { label: "Passing & Vision", keys: ["pas", "shortPassing", "longPassing", "vision"], type: "similarity", weight: 25 },
-    { label: "Stamina & Work Rate", keys: ["stamina", "aggression"], type: "minThreshold", weight: 20 },
-    { label: "Ball Control & Dribbling", keys: ["dri", "ballControl"], type: "similarity", weight: 15 },
-    { label: "Defensive Contribution", keys: ["interceptions", "standingTackle"], type: "similarity", weight: 15 },
+    { label: "Passing & Vision", keys: ["pas", "shortPassing", "longPassing", "vision"], type: "similarity", weight: 18 },
+    { label: "Stamina & Work Rate", keys: ["stamina", "aggression"], type: "minThreshold", weight: 10 },
+    { label: "Ball Control & Dribbling", keys: ["dri", "ballControl", "dribbling"], type: "similarity", weight: 10 },
+    { label: "Defensive Contribution", keys: ["interceptions", "standingTackle", "def"], type: "similarity", weight: 12 },
     { label: "Physicality", keys: ["phy", "strength"], type: "similarity", weight: 10 },
     { label: "Composure", keys: ["composure"], type: "minThreshold", weight: 10 },
-    { label: "Playstyle & Body Type", keys: [], type: "optional", weight: 5 },
+    { label: "Playstyles", keys: [], type: "optional", weight: 25 },
+    { label: "Body Type & Movement", keys: [], type: "optionalBody", weight: 5 },
   ],
   DM: [
-    { label: "Defending", keys: ["def", "standingTackle", "slidingTackle", "interceptions"], type: "similarity", weight: 30 },
-    { label: "Physicality", keys: ["phy", "strength", "aggression"], type: "similarity", weight: 20 },
-    { label: "Passing", keys: ["pas", "shortPassing", "longPassing"], type: "similarity", weight: 20 },
-    { label: "Positioning & Awareness", keys: ["positioning", "reactions"], type: "minThreshold", weight: 15 },
-    { label: "Stamina", keys: ["stamina"], type: "minThreshold", weight: 10 },
-    { label: "Playstyle & Body Type", keys: [], type: "optional", weight: 5 },
+    { label: "Defending", keys: ["def", "standingTackle", "slidingTackle", "interceptions", "marking"], type: "similarity", weight: 22 },
+    { label: "Physicality", keys: ["phy", "strength", "aggression"], type: "similarity", weight: 16 },
+    { label: "Passing", keys: ["pas", "shortPassing", "longPassing"], type: "similarity", weight: 14 },
+    { label: "Positioning & Awareness", keys: ["positioning", "reactions"], type: "minThreshold", weight: 10 },
+    { label: "Stamina", keys: ["stamina"], type: "minThreshold", weight: 8 },
+    { label: "Playstyles", keys: [], type: "optional", weight: 25 },
+    { label: "Body Type & Movement", keys: [], type: "optionalBody", weight: 5 },
   ],
   FB: [
-    { label: "Pace", keys: ["pac", "sprintSpeed", "acceleration"], type: "similarity", weight: 20 },
-    { label: "Defending", keys: ["def", "standingTackle", "slidingTackle", "interceptions"], type: "similarity", weight: 25 },
-    { label: "Crossing & Attacking Threat", keys: ["crossing", "dri"], type: "similarity", weight: 20 },
-    { label: "Stamina", keys: ["stamina"], type: "minThreshold", weight: 15 },
-    { label: "Physicality", keys: ["phy", "strength"], type: "similarity", weight: 10 },
-    { label: "Composure", keys: ["composure"], type: "minThreshold", weight: 5 },
-    { label: "Playstyle & Body Type", keys: [], type: "optional", weight: 5 },
+    { label: "Pace", keys: ["pac", "sprintSpeed", "acceleration"], type: "similarity", weight: 14 },
+    { label: "Defending", keys: ["def", "standingTackle", "slidingTackle", "interceptions"], type: "similarity", weight: 18 },
+    { label: "Crossing & Attacking Threat", keys: ["crossing", "dri", "shortPassing"], type: "similarity", weight: 14 },
+    { label: "Stamina", keys: ["stamina"], type: "minThreshold", weight: 10 },
+    { label: "Physicality", keys: ["phy", "strength"], type: "similarity", weight: 8 },
+    { label: "Composure", keys: ["composure"], type: "minThreshold", weight: 6 },
+    { label: "Playstyles", keys: [], type: "optional", weight: 25 },
+    { label: "Body Type & Movement", keys: [], type: "optionalBody", weight: 5 },
   ],
   CB: [
-    { label: "Defending", keys: ["def", "standingTackle", "slidingTackle", "marking", "interceptions"], type: "similarity", weight: 30 },
-    { label: "Physicality & Aerial", keys: ["phy", "strength", "jumping", "heading"], type: "minThreshold", weight: 25 },
-    { label: "Positioning & Awareness", keys: ["positioning", "reactions"], type: "minThreshold", weight: 20 },
-    { label: "Pace", keys: ["pac", "sprintSpeed"], type: "similarity", weight: 10 },
-    { label: "Passing", keys: ["pas", "shortPassing", "longPassing"], type: "similarity", weight: 10 },
-    { label: "Playstyle & Body Type", keys: [], type: "optional", weight: 5 },
+    { label: "Defending", keys: ["def", "standingTackle", "slidingTackle", "marking", "interceptions"], type: "similarity", weight: 24 },
+    { label: "Physicality & Aerial", keys: ["phy", "strength", "jumping", "heading"], type: "minThreshold", weight: 18 },
+    { label: "Positioning & Awareness", keys: ["positioning", "reactions"], type: "minThreshold", weight: 14 },
+    { label: "Pace", keys: ["pac", "sprintSpeed"], type: "similarity", weight: 8 },
+    { label: "Passing", keys: ["pas", "shortPassing", "longPassing"], type: "similarity", weight: 6 },
+    { label: "Playstyles", keys: [], type: "optional", weight: 25 },
+    { label: "Body Type & Movement", keys: [], type: "optionalBody", weight: 5 },
   ],
   GK: [
-    { label: "Shot Stopping", keys: ["gkReflexes", "gkDiving"], type: "similarity", weight: 30 },
-    { label: "Handling", keys: ["gkHandling"], type: "similarity", weight: 20 },
-    { label: "Positioning", keys: ["gkPositioning"], type: "minThreshold", weight: 20 },
-    { label: "Kicking & Distribution", keys: ["gkKicking"], type: "similarity", weight: 15 },
-    { label: "Composure", keys: ["composure"], type: "minThreshold", weight: 10 },
-    { label: "Playstyle & Body Type", keys: [], type: "optional", weight: 5 },
+    { label: "Shot Stopping", keys: ["gkReflexes", "gkDiving"], type: "similarity", weight: 24 },
+    { label: "Handling", keys: ["gkHandling"], type: "similarity", weight: 16 },
+    { label: "Positioning", keys: ["gkPositioning"], type: "minThreshold", weight: 14 },
+    { label: "Kicking & Distribution", keys: ["gkKicking"], type: "similarity", weight: 10 },
+    { label: "Composure", keys: ["composure"], type: "minThreshold", weight: 6 },
+    { label: "Playstyles", keys: [], type: "optional", weight: 25 },
+    { label: "Body Type & Movement", keys: [], type: "optionalBody", weight: 5 },
   ],
 };
 
-function scoreSimilarity(refVal, candVal, maxDiff = 30) {
+// Tightened from the original 30-point tolerance - a 30-point gap between two players' key stats
+// is enormous, and treating that as "still worth something" was exactly what let genuinely
+// different profiles (a target man vs a pacy technical forward) end up scored as near-identical.
+function scoreSimilarity(refVal, candVal, maxDiff = 18) {
   const diff = Math.abs((Number(refVal) || 0) - (Number(candVal) || 0));
   return Math.max(0, 1 - diff / maxDiff);
 }
 function scoreMinThreshold(refVal, candVal) {
   const r = Number(refVal) || 0, c = Number(candVal) || 0;
   if (c >= r) return 1;
-  return Math.max(0, 1 - (r - c) / 30);
+  return Math.max(0, 1 - (r - c) / 20);
 }
 
 function playStyleOverlap(ref, cand) {
@@ -8544,7 +8558,9 @@ function computeScorecardBreakdown(ref, cand) {
   const breakdown = template.map((entry) => {
     let rawScore;
     if (entry.type === "optional") {
-      rawScore = (playStyleOverlap(ref, cand) + bodyTypeOverlap(ref, cand)) / 2;
+      rawScore = playStyleOverlap(ref, cand);
+    } else if (entry.type === "optionalBody") {
+      rawScore = bodyTypeOverlap(ref, cand);
     } else {
       const scores = entry.keys.map((k) => {
         const refVal = getStatValue(ref, k);
@@ -8573,10 +8589,11 @@ function generateTacticalRoleName(player) {
   return `${descriptor}${roleBase}`.trim();
 }
 
-// Picks out the single strongest-matching and weakest-matching (non-optional) category, to
-// generate a one-line "this is why it's a good fit / this is the compromise" explanation.
+// Picks out the single strongest-matching and weakest-matching (stat-based, not playstyle/body
+// type) category, to generate a one-line "this is why it's a good fit / this is the compromise"
+// explanation.
 function strongestAndWeakestCategory(breakdown) {
-  const graded = breakdown.filter((b) => b.type !== "optional");
+  const graded = breakdown.filter((b) => b.type !== "optional" && b.type !== "optionalBody");
   const sorted = [...graded].sort((a, b) => b.rawScore - a.rawScore);
   return { strongest: sorted[0], weakest: sorted[sorted.length - 1] };
 }
