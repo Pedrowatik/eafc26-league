@@ -3081,6 +3081,8 @@ export default function EafcLeagueApp() {
 
   // Saves a snapshot of the current draft picks/submissions under a custom label - a historical
   // record independent of season boundaries, since a draft doesn't necessarily line up with them.
+  // Clears the live draft picks/submissions afterward, so the main Draft Submissions view resets
+  // and is ready for a fresh draft - the data isn't gone, it's just moved into the archive.
   const archiveDraft = (pinAttempt, label) => {
     if (pinAttempt !== adminPin) return "Incorrect PIN.";
     if (!label || !label.trim()) return "Enter a label for this archive (e.g. \"Season 1\").";
@@ -3088,7 +3090,9 @@ export default function EafcLeagueApp() {
       id: uid(), label: label.trim(), archivedAt: Date.now(),
       picks: draftPicks, submitted: draftSubmitted,
     }, ...all]);
-    logActivity(`Admin archived the current draft as "${label.trim()}".`, "transfer");
+    setDraftPicks({});
+    setDraftSubmitted({});
+    logActivity(`Admin archived the current draft as "${label.trim()}" and cleared it for a fresh draft.`, "transfer");
     return null;
   };
 
@@ -8007,12 +8011,16 @@ function DraftSubmissionsTools({ teams, draftPicks, draftSubmitted, adminPin, re
   const [resetTeamId, setResetTeamId] = useState(teams[0]?.id || "");
   const [msg, setMsg] = useState(null);
   const [archiveLabel, setArchiveLabel] = useState("");
+  const [expandedArchives, setExpandedArchives] = useState({}); // archive id -> bool
+  const toggleArchive = (id) => setExpandedArchives((all) => ({ ...all, [id]: !all[id] }));
 
   const doArchive = () => {
+    if (!archiveLabel.trim()) { setMsg({ text: "Enter a label for this archive first.", tone: "red" }); return; }
+    if (!window.confirm(`Archive the current draft as "${archiveLabel.trim()}" and clear it for a fresh draft? The picks will be saved and viewable under Past Draft Archives, but every team's current draft will be reset.`)) return;
     const err = archiveDraft(pin, archiveLabel);
     setPin("");
     if (err) setMsg({ text: err, tone: "red" });
-    else { setMsg({ text: `Draft archived as "${archiveLabel.trim()}".`, tone: "green" }); setArchiveLabel(""); }
+    else { setMsg({ text: `Draft archived as "${archiveLabel.trim()}" and cleared — ready for a fresh draft. View it any time under Past Draft Archives below.`, tone: "green" }); setArchiveLabel(""); }
   };
 
   const doReset = () => {
@@ -8206,10 +8214,33 @@ function DraftSubmissionsTools({ teams, draftPicks, draftSubmitted, adminPin, re
           <div style={{ display: "grid", gap: 10 }}>
             {draftArchives.map((a) => {
               const pickCount = Object.values(a.picks || {}).reduce((s, picks) => s + (picks || []).filter(Boolean).length, 0);
+              const isOpen = !!expandedArchives[a.id];
               return (
-                <div key={a.id} style={{ fontSize: 12, color: C.muted }}>
-                  <b style={{ color: C.gold }}>{a.label}</b> — archived {new Date(a.archivedAt).toLocaleDateString()},{" "}
-                  {pickCount} total picks across {Object.keys(a.picks || {}).length} teams
+                <div key={a.id}>
+                  <div className="flex items-center justify-between flex-wrap gap-2" style={{ fontSize: 12, color: C.muted }}>
+                    <div>
+                      <b style={{ color: C.gold }}>{a.label}</b> — archived {new Date(a.archivedAt).toLocaleDateString()},{" "}
+                      {pickCount} total picks across {Object.keys(a.picks || {}).length} teams
+                    </div>
+                    <button onClick={() => toggleArchive(a.id)}
+                      style={{ background: "transparent", border: "none", padding: 0, cursor: "pointer", color: C.gold, fontSize: 11, textDecoration: "underline" }}>
+                      {isOpen ? "Hide" : "View"}
+                    </button>
+                  </div>
+                  {isOpen && (
+                    <div style={{ marginTop: 10, display: "grid", gap: 14 }}>
+                      {teams.filter((t) => (a.picks[t.id] || []).some(Boolean)).map((t) => {
+                        const picks = (a.picks[t.id] || []).filter(Boolean);
+                        return (
+                          <div key={t.id}>
+                            <div style={{ color: C.gold, fontWeight: 700, fontSize: 12, marginBottom: 6 }}>{t.name} ({picks.length} picks)</div>
+                            <Table dense head={["Player", "Pos", "Rating", "Club", "Age", "Value", "Wage"]}
+                              rows={picks.map((p) => [p.name, p.position, p.rating, p.club, p.age, money(roundUpTo250k(p.value)), moneyK(p.wage)])} />
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>
               );
             })}
