@@ -674,6 +674,11 @@ export default function EafcLeagueApp() {
   const knownDmSavedAtRef = useRef(0); // same idea, but for the separate private-messages store
   const knownChatSavedAtRef = useRef(0); // same idea, but for the separate league chat store
   const knownSquadSavedAtRef = useRef(new Map()); // per-team: teamId -> savedAt
+  // Same reasoning as teams: tracks each team's squad as last saved/received, so the autosave only
+  // ever writes a team whose squad THIS browser actually changed locally - not every team just
+  // because the object reference changed for an unrelated reason (like signing a player for a
+  // completely different team).
+  const lastSyncedSquadDataRef = useRef(new Map());
   const knownAuctionsSavedAtRef = useRef(0);
   const knownTransferListingsSavedAtRef = useRef(0);
   const knownWantedListingsSavedAtRef = useRef(0);
@@ -778,6 +783,7 @@ export default function EafcLeagueApp() {
               const sdata = JSON.parse(sres.value);
               loadedSquads[teamId] = { starters: sdata.starters || fallback[teamId]?.starters || [], reserves: sdata.reserves || fallback[teamId]?.reserves || [] };
               knownSquadSavedAtRef.current.set(teamId, sdata.savedAt || Date.now());
+              lastSyncedSquadDataRef.current.set(teamId, JSON.stringify(loadedSquads[teamId]));
               return;
             }
           } catch (e) {
@@ -785,6 +791,7 @@ export default function EafcLeagueApp() {
           }
           loadedSquads[teamId] = (legacySquadsForMigration && legacySquadsForMigration[teamId]) || fallback[teamId] || { starters: Array(STARTER_SLOTS).fill(null), reserves: Array(RESERVE_SLOTS).fill(null) };
           knownSquadSavedAtRef.current.set(teamId, 0); // hasn't been saved under the new per-team key yet
+          lastSyncedSquadDataRef.current.set(teamId, JSON.stringify(loadedSquads[teamId]));
         }));
         setSquads(loadedSquads);
       } catch (e) {
@@ -1060,20 +1067,29 @@ export default function EafcLeagueApp() {
     return () => clearTimeout(t);
   }, [chat, loaded]);
 
-  // Squads save per-team to their own keys. Any change writes every team's current slice (simple,
-  // safe), but crucially, incoming updates only ever overwrite the ONE team they belong to — so
-  // someone else signing/reordering their squad can never touch yours, whatever they were doing.
+  // Squads save per-team to their own keys. Critically: only writes teams whose squad ACTUALLY
+  // changed locally since we last synced them — the same blanket-overwrite flaw fixed for teams,
+  // draft picks, and transfers earlier was quietly still here too. Any browser with a slightly
+  // stale copy of another team's squad would silently revert them the moment its OWN squad
+  // changed for any reason at all (signing a player, a blind bid resolving, anything).
   useEffect(() => {
     if (!loaded) return;
     squadSavingRef.current = true;
     const t = setTimeout(async () => {
       try {
         const savedAt = Date.now();
-        await Promise.all(teams.map((team) =>
+        const dirtyTeams = teams.filter((team) => {
+          const current = JSON.stringify({ starters: squads[team.id]?.starters || [], reserves: squads[team.id]?.reserves || [] });
+          return lastSyncedSquadDataRef.current.get(team.id) !== current;
+        });
+        await Promise.all(dirtyTeams.map((team) =>
           storage.set(squadKeyFor(team.id), JSON.stringify({
             starters: squads[team.id]?.starters || [], reserves: squads[team.id]?.reserves || [], savedAt,
           }), true)
-            .then(() => knownSquadSavedAtRef.current.set(team.id, savedAt))
+            .then(() => {
+              knownSquadSavedAtRef.current.set(team.id, savedAt);
+              lastSyncedSquadDataRef.current.set(team.id, JSON.stringify({ starters: squads[team.id]?.starters || [], reserves: squads[team.id]?.reserves || [] }));
+            })
             .catch(() => { /* best effort per team — next cycle reconciles */ })
         ));
       } finally {
@@ -1093,8 +1109,10 @@ export default function EafcLeagueApp() {
           const remoteSavedAt = data.savedAt || 0;
           const known = knownSquadSavedAtRef.current.get(team.id) || 0;
           if (remoteSavedAt > known) {
-            setSquads((all) => ({ ...all, [team.id]: { starters: data.starters || [], reserves: data.reserves || [] } }));
+            const incoming = { starters: data.starters || [], reserves: data.reserves || [] };
+            setSquads((all) => ({ ...all, [team.id]: incoming }));
             knownSquadSavedAtRef.current.set(team.id, remoteSavedAt);
+            lastSyncedSquadDataRef.current.set(team.id, JSON.stringify(incoming));
           }
         }
       } catch (e) {
@@ -1119,8 +1137,10 @@ export default function EafcLeagueApp() {
           const remoteSavedAt = data.savedAt || 0;
           const known = knownSquadSavedAtRef.current.get(team.id) || 0;
           if (remoteSavedAt > known && !squadSavingRef.current) {
-            setSquads((all) => ({ ...all, [team.id]: { starters: data.starters || [], reserves: data.reserves || [] } }));
+            const incoming = { starters: data.starters || [], reserves: data.reserves || [] };
+            setSquads((all) => ({ ...all, [team.id]: incoming }));
             knownSquadSavedAtRef.current.set(team.id, remoteSavedAt);
+            lastSyncedSquadDataRef.current.set(team.id, JSON.stringify(incoming));
           }
         } catch (e) {
           // ignore malformed payloads
