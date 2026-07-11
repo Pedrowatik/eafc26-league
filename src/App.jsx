@@ -63,6 +63,7 @@ const SELLER_CREDIT_MS = 12 * 60 * 60 * 1000;
 const BUYER_RATIFY_MS = 24 * 60 * 60 * 1000;
 
 function transferStatus(tx, nowMs) {
+  if (tx.cancelled) return { label: "Cancelled", tone: "red" };
   const created = tx.createdAt || 0;
   const sellerDone = tx.sellerProcessed || nowMs - created >= SELLER_CREDIT_MS;
   const buyerDone = tx.buyerProcessed || nowMs - created >= BUYER_RATIFY_MS;
@@ -2565,14 +2566,29 @@ export default function EafcLeagueApp() {
   // winning from whatever bids remain.
   // Cancels an auction outright — different from deleteBid, which only removes one bid and leaves
   // the auction open for fresh ones. This actually takes the player off the board.
-  const cancelAuction = (auctionId, pinAttempt) => {
+  const cancelAuction = (auctionId, pinAttempt, reason) => {
     if (pinAttempt !== adminPin) return "Incorrect PIN.";
     let err = null;
+    let cancelledAuction = null;
     setAuctions((all) => all.map((a) => {
       if (a.id !== auctionId) return a;
       if (a.status !== "open" && a.status !== "pending") { err = "This auction's already closed."; return a; }
-      return { ...a, status: "cancelled" };
+      cancelledAuction = a;
+      return { ...a, status: "cancelled", cancelReason: (reason || "").trim() };
     }));
+    if (cancelledAuction) {
+      const trimmedReason = (reason || "").trim();
+      setTransfers((tx) => [{
+        id: uid(), date: todayISO(), player: cancelledAuction.player.name, position: cancelledAuction.player.position,
+        rating: Number(cancelledAuction.player.rating) || 0, club: cancelledAuction.player.club, age: Number(cancelledAuction.player.age) || 0,
+        wage: Number(cancelledAuction.player.wage) || 0,
+        from: cancelledAuction.seller, to: cancelledAuction.currentBidder || "FA",
+        price: 0, tax: 0, finalCost: 0,
+        notes: trimmedReason ? `Auction cancelled by admin — ${trimmedReason}` : "Auction cancelled by admin",
+        createdAt: Date.now(), cancelled: true, cancelReason: trimmedReason,
+        sellerProcessed: true, buyerProcessed: true, instant: true, buyerAlreadyPaidDirectly: true,
+      }, ...tx]);
+    }
     return err;
   };
 
@@ -5162,7 +5178,11 @@ function AuctionsPanel({ teams, squads, auctions, createAuction, placeBid, final
             rows={closed.map((a) => [
               a.player.name,
               a.seller === "FA" ? "Non OCM" : teams.find((t) => t.id === a.seller)?.name || a.seller,
-              a.status === "declined" ? "Declined by owner" : a.status === "cancelled" ? "Cancelled by admin" : a.winner ? (teams.find((t) => t.id === a.winner)?.name || a.winner) : "No bids",
+              a.status === "declined" ? "Declined by owner" : a.status === "cancelled" ? (
+                <span style={{ color: C.red, cursor: a.cancelReason ? "help" : "default" }} title={a.cancelReason || "No reason given"}>
+                  Cancelled by admin
+                </span>
+              ) : a.winner ? (teams.find((t) => t.id === a.winner)?.name || a.winner) : "No bids",
               (a.status === "declined" || a.status === "cancelled") ? "—" : a.winningBid ? money(a.winningBid) : "—",
             ])}
           />
@@ -5241,6 +5261,7 @@ function AuctionCard({ auction, teams, now, placeBid, finalizeAuction, deleteBid
   const [deleteErr, setDeleteErr] = useState("");
   const [cancelling, setCancelling] = useState(false);
   const [cancelPin, setCancelPin] = useState("");
+  const [cancelReason, setCancelReason] = useState("");
   const [cancelErr, setCancelErr] = useState("");
 
   const remaining = auction.deadline - now;
@@ -5266,10 +5287,10 @@ function AuctionCard({ auction, teams, now, placeBid, finalizeAuction, deleteBid
   };
 
   const confirmCancel = () => {
-    const e = cancelAuction(auction.id, cancelPin);
+    const e = cancelAuction(auction.id, cancelPin, cancelReason);
     setCancelPin("");
     if (e) setCancelErr(e);
-    else { setCancelling(false); setCancelErr(""); }
+    else { setCancelling(false); setCancelErr(""); setCancelReason(""); }
   };
 
   return (
@@ -5344,9 +5365,10 @@ function AuctionCard({ auction, teams, now, placeBid, finalizeAuction, deleteBid
           </button>
         ) : (
           <div className="flex items-center gap-2 flex-wrap">
+            <TextInput placeholder="Reason (optional)" value={cancelReason} onChange={(e) => setCancelReason(e.target.value)} style={{ width: 180 }} />
             <TextInput type="password" placeholder="Admin PIN" value={cancelPin} onChange={(e) => setCancelPin(e.target.value)} style={{ width: 120 }} />
             <Btn size="sm" variant="danger" onClick={confirmCancel}>Confirm cancel</Btn>
-            <Btn size="sm" variant="outline" onClick={() => { setCancelling(false); setCancelPin(""); setCancelErr(""); }}>Back</Btn>
+            <Btn size="sm" variant="outline" onClick={() => { setCancelling(false); setCancelPin(""); setCancelReason(""); setCancelErr(""); }}>Back</Btn>
             {cancelErr && <span style={{ color: C.red, fontSize: 11.5 }}>{cancelErr}</span>}
           </div>
         )}
@@ -6101,7 +6123,13 @@ function TransfersTab({ teams, squads, transfers, logTransfer, logAdminReward, s
               tx.from === "FA" ? "Non OCM" : tx.from === "AUCTION_LOSS" ? "— (losing bid)" : teams.find((t) => t.id === tx.from)?.name || tx.from,
               tx.to === "FA" ? "Non OCM" : teams.find((t) => t.id === tx.to)?.name || tx.to,
               money(tx.price), money(tx.tax), money(tx.finalCost),
-              <Pill tone={st.tone}>{st.label}</Pill>,
+              tx.cancelled ? (
+                <span title={tx.cancelReason || "No reason given"} style={{ cursor: tx.cancelReason ? "help" : "default" }}>
+                  <Pill tone={st.tone}>{st.label}</Pill>
+                </span>
+              ) : (
+                <Pill tone={st.tone}>{st.label}</Pill>
+              ),
               <button onClick={() => { setDeletingId(tx.id); setDeletePin(""); setDeleteErr(""); }} style={{ background: "transparent", border: "none", cursor: "pointer", color: C.red }}>
                 <Trash2 size={14} />
               </button>,
