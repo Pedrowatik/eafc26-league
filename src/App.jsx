@@ -7472,6 +7472,9 @@ function ScoutingTab({ playerDatabase, openPlayerStats }) {
         </div>
         <div style={{ color: C.muted, fontSize: 11.5, marginTop: 3 }}>
           {p.position} · {p.rating} OVR · {p.club} · Age {p.age} · {moneyK(p.wage)}/wk
+          {match.viaSecondaryPosition && (
+            <span style={{ color: C.gold }}> · plays this role as a secondary position</span>
+          )}
         </div>
         <div style={{ color: C.muted, fontSize: 11.5, marginTop: 2 }}>
           Sofifa value {money(p.value)} — estimated realistic range {money(low)}–{money(high)}
@@ -8700,14 +8703,19 @@ function findScoutingMatches(refPlayer, playerDatabase, limit = 10) {
   const refGroup = positionGroupOf(refPlayer.position);
   const candidates = playerDatabase.filter((p) => {
     if (p.name === refPlayer.name && p.club === refPlayer.club) return false;
-    return positionGroupOf(p.position) === refGroup;
+    // Considers every position a candidate can actually play, not just their primary one - a
+    // player listed primarily as LW who's also capable at ST is a legitimate candidate for an ST
+    // reference, not just someone whose main position happens to match.
+    const candPositions = (p.positions && p.positions.length > 0) ? p.positions : [p.position];
+    return candPositions.some((pos) => positionGroupOf(pos) === refGroup);
   });
 
   const scored = candidates
     .map((p) => {
       const { breakdown, totalPoints } = computeScorecardBreakdown(refPlayer, p);
       const { strongest, weakest } = strongestAndWeakestCategory(breakdown);
-      return { player: p, score: totalPoints, breakdown, strongest, weakest };
+      const viaSecondaryPosition = positionGroupOf(p.position) !== refGroup; // primary itself doesn't match - only a listed secondary does
+      return { player: p, score: totalPoints, breakdown, strongest, weakest, viaSecondaryPosition };
     })
     .filter((s) => !isEliteOrMeta(s.player))
     .sort((a, b) => b.score - a.score);
