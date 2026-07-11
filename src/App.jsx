@@ -296,6 +296,7 @@ function Select(props) {
 // auto-fill position/rating/club/age/wage/value on whatever form it's plugged into.
 function PlayerAutocomplete({ value, onChange, onSelect, playerDatabase, placeholder }) {
   const [open, setOpen] = useState(false);
+  const [dropdownRect, setDropdownRect] = useState(null);
   const boxRef = useRef(null);
 
   const matches = useMemo(() => {
@@ -304,12 +305,25 @@ function PlayerAutocomplete({ value, onChange, onSelect, playerDatabase, placeho
     return playerDatabase.filter((p) => p.name.toLowerCase().includes(q)).slice(0, 8);
   }, [value, playerDatabase]);
 
+  const updateDropdownPosition = () => {
+    if (boxRef.current) {
+      const rect = boxRef.current.getBoundingClientRect();
+      setDropdownRect({ top: rect.bottom + 4, left: rect.left, width: rect.width });
+    }
+  };
+
   useEffect(() => {
     const onClickOutside = (e) => {
       if (boxRef.current && !boxRef.current.contains(e.target)) setOpen(false);
     };
     document.addEventListener("mousedown", onClickOutside);
-    return () => document.removeEventListener("mousedown", onClickOutside);
+    window.addEventListener("scroll", updateDropdownPosition, true);
+    window.addEventListener("resize", updateDropdownPosition);
+    return () => {
+      document.removeEventListener("mousedown", onClickOutside);
+      window.removeEventListener("scroll", updateDropdownPosition, true);
+      window.removeEventListener("resize", updateDropdownPosition);
+    };
   }, []);
 
   return (
@@ -317,12 +331,12 @@ function PlayerAutocomplete({ value, onChange, onSelect, playerDatabase, placeho
       <TextInput
         placeholder={placeholder || "Start typing a player name…"}
         value={value}
-        onChange={(e) => { onChange(e.target.value); setOpen(true); }}
-        onFocus={() => setOpen(true)}
+        onChange={(e) => { onChange(e.target.value); setOpen(true); updateDropdownPosition(); }}
+        onFocus={() => { setOpen(true); updateDropdownPosition(); }}
       />
-      {open && matches.length > 0 && (
+      {open && matches.length > 0 && dropdownRect && (
         <div style={{
-          position: "absolute", top: "calc(100% + 4px)", left: 0, right: 0, zIndex: 20,
+          position: "fixed", top: dropdownRect.top, left: dropdownRect.left, width: dropdownRect.width, zIndex: 1000,
           background: C.panel, border: `1px solid ${C.border}`, borderRadius: 8,
           maxHeight: 220, overflowY: "auto", boxShadow: "0 8px 20px rgba(0,0,0,0.4)",
         }}>
@@ -7331,36 +7345,65 @@ function ChatTab({ chat, setChat, teams, myTeamId, markChatSeen }) {
 function ScoutingTab({ playerDatabase, openPlayerStats }) {
   const [refQuery, setRefQuery] = useState("");
   const [refPlayer, setRefPlayer] = useState(null);
+  const [expanded, setExpanded] = useState({}); // playerKey -> bool, full breakdown toggle
 
   const results = useMemo(() => {
     if (!refPlayer) return null;
-    return findScoutingMatches(refPlayer, playerDatabase, 12);
+    return findScoutingMatches(refPlayer, playerDatabase, 10);
   }, [refPlayer, playerDatabase]);
+
+  const toggleExpanded = (key) => setExpanded((all) => ({ ...all, [key]: !all[key] }));
 
   const renderMatchRow = (match) => {
     const p = match.player;
+    const key = p.name + p.club;
+    const isOpen = !!expanded[key];
+    const low = p.value * 0.85, high = p.value * 1.15;
     return (
-      <div key={p.name + p.club} style={{ background: C.panelAlt, borderRadius: 8, padding: 10, marginBottom: 8 }}>
+      <div key={key} style={{ background: C.panelAlt, borderRadius: 8, padding: 10, marginBottom: 8 }}>
         <div className="flex items-center justify-between flex-wrap gap-2">
           <button onClick={() => openPlayerStats && openPlayerStats(p)}
             style={{ background: "transparent", border: "none", padding: 0, cursor: "pointer", color: C.text, fontWeight: 700, fontSize: 13, textDecoration: "underline", textDecorationColor: `${C.gold}66` }}>
             {p.name}
           </button>
-          <Pill tone="gold">{Math.round(match.score * 100)}% match</Pill>
+          <Pill tone="gold">{Math.round(match.score)}/100</Pill>
         </div>
         <div style={{ color: C.muted, fontSize: 11.5, marginTop: 3 }}>
-          {p.position} · {p.rating} OVR · {p.club} · Age {p.age} · {money(p.value)} · {moneyK(p.wage)}/wk
+          {p.position} · {p.rating} OVR · {p.club} · Age {p.age} · {moneyK(p.wage)}/wk
+        </div>
+        <div style={{ color: C.muted, fontSize: 11.5, marginTop: 2 }}>
+          Sofifa value {money(p.value)} — estimated realistic range {money(low)}–{money(high)}
         </div>
         {p.playStyles && p.playStyles.length > 0 && (
           <div style={{ color: C.muted, fontSize: 11, marginTop: 3 }}>
             {p.playStyles.slice(0, 5).join(" · ")}
           </div>
         )}
-        <div style={{ display: "flex", gap: 10, marginTop: 6, fontSize: 10.5, color: C.muted }}>
-          {["pac", "sho", "pas", "dri", "def", "phy"].map((k) => (
-            <span key={k}>{k.toUpperCase()} <b style={{ color: C.text }}>{p[k]}</b></span>
-          ))}
+
+        <div style={{ marginTop: 8, fontSize: 11.5 }}>
+          <div style={{ color: C.green }}>
+            Strongest similarity: <b>{match.strongest.label}</b> ({Math.round(match.strongest.rawScore * 100)}% close)
+          </div>
+          <div style={{ color: C.red }}>
+            Largest compromise: <b>{match.weakest.label}</b> ({Math.round(match.weakest.rawScore * 100)}% close)
+          </div>
         </div>
+
+        <button onClick={() => toggleExpanded(key)}
+          style={{ background: "transparent", border: "none", padding: 0, marginTop: 8, cursor: "pointer", color: C.gold, fontSize: 11, textDecoration: "underline" }}>
+          {isOpen ? "Hide full breakdown" : "Show full breakdown"}
+        </button>
+
+        {isOpen && (
+          <div style={{ marginTop: 8, paddingTop: 8, borderTop: `1px solid ${C.border}33`, display: "grid", gap: 3 }}>
+            {match.breakdown.map((cat) => (
+              <div key={cat.label} className="flex items-center justify-between" style={{ fontSize: 11 }}>
+                <span style={{ color: C.muted }}>{cat.label} ({cat.weight}pts, {cat.type === "minThreshold" ? "min. threshold" : cat.type === "optional" ? "optional" : "similarity"})</span>
+                <span style={{ color: C.text }}>{cat.points.toFixed(1)}/{cat.weight}</span>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     );
   };
@@ -7369,9 +7412,9 @@ function ScoutingTab({ playerDatabase, openPlayerStats }) {
     <Panel style={{ padding: 18 }}>
       <SectionTitle icon={Search}>Scouting</SectionTitle>
       <div style={{ color: C.muted, fontSize: 12.5, marginBottom: 14, lineHeight: 1.6 }}>
-        Pick a player who's working well for you, and this finds statistically similar alternatives — same
-        approximate role, stat profile, playstyles, and movement type — prioritizing hidden gems (notably lower
-        rated but still a close match) alongside more established similarly-rated names.
+        Pick a player who's working well for you — this scores every player who can actually play their position
+        against a weighted, position-specific scorecard (always 100 points total), ranks by fit rather than raw
+        rating, and prioritizes realistic hidden gems and alternatives over the obvious elite/meta names.
       </div>
       <Field label="Reference player">
         <PlayerAutocomplete
@@ -7384,8 +7427,27 @@ function ScoutingTab({ playerDatabase, openPlayerStats }) {
 
       {refPlayer && results && (
         <div style={{ marginTop: 18 }}>
-          <div style={{ color: C.text, fontSize: 12.5, marginBottom: 14 }}>
-            Scouting alternatives to <b style={{ color: C.gold }}>{refPlayer.name}</b> ({refPlayer.position}, {refPlayer.rating} OVR)
+          <div style={{ background: C.panelAlt, borderRadius: 8, padding: 12, marginBottom: 18 }}>
+            <div style={{ color: C.text, fontSize: 13, marginBottom: 4 }}>
+              Reference: <b style={{ color: C.gold }}>{refPlayer.name}</b> — {refPlayer.position}, {refPlayer.rating} OVR, {refPlayer.club}
+            </div>
+            <div style={{ color: C.gold, fontWeight: 700, fontSize: 14, marginBottom: 10 }}>{results.roleName}</div>
+            <div style={{ color: C.muted, fontSize: 10.5, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 6 }}>
+              Scorecard for this role (100 points total)
+            </div>
+            <div style={{ display: "grid", gap: 3 }}>
+              {results.scorecardTemplate.map((cat) => (
+                <div key={cat.label} className="flex items-center justify-between" style={{ fontSize: 11.5 }}>
+                  <span style={{ color: C.muted }}>
+                    {cat.label}{" "}
+                    <span style={{ color: C.muted, fontSize: 10 }}>
+                      ({cat.type === "minThreshold" ? "equal or higher is fine" : cat.type === "optional" ? "small bonus only" : "should stay close"})
+                    </span>
+                  </span>
+                  <span style={{ color: C.text }}>{cat.weight} pts</span>
+                </div>
+              ))}
+            </div>
           </div>
 
           <div style={{ color: C.gold, fontWeight: 700, fontSize: 13, marginBottom: 8 }}>
@@ -8305,78 +8367,212 @@ async function sofifaFetch(path) {
 // rates to the penny for a fantasy league.
 const EUR_TO_GBP = 0.855;
 
-// Scouting: finds players statistically similar to a given reference player, prioritizing
-// "hidden gems" (notably lower-rated but still a close match) over the obvious high-rated names.
-// Everything here works off what Sofifa actually gives us — there's no raw height/weight, but
-// accelerationType (Explosive/Controlled/Lengthy etc.) is a solid stand-in for body type/movement
-// profile, since it's directly derived from those attributes in modern FIFA/EAFC anyway.
-const GK_STAT_KEYS = ["gkDiving", "gkHandling", "gkKicking", "gkPositioning", "gkReflexes"];
-const OUTFIELD_STAT_KEYS = ["pac", "sho", "pas", "dri", "def", "phy"];
+// Scouting: finds players who match a reference player's actual tactical profile, using a
+// position-specific weighted scorecard (always summing to 100 points) rather than one generic
+// formula for every position. Prioritizes hidden gems and realistic alternatives over obvious
+// elite/meta names, and explains exactly why each suggestion scored what it did.
 
-function statSimilarity(ref, cand) {
-  const isGk = ref.position === "GK";
-  if (isGk !== (cand.position === "GK")) return 0; // a keeper and an outfielder are never a stat match
-  const keys = isGk ? GK_STAT_KEYS : OUTFIELD_STAT_KEYS;
-  const refVals = isGk ? (ref.detailedStats || {}) : ref;
-  const candVals = isGk ? (cand.detailedStats || {}) : cand;
-  let sumSquaredDiff = 0;
-  keys.forEach((k) => {
-    const diff = (Number(refVals[k]) || 0) - (Number(candVals[k]) || 0);
-    sumSquaredDiff += diff * diff;
-  });
-  const distance = Math.sqrt(sumSquaredDiff / keys.length);
-  return Math.max(0, 1 - distance / 40); // 40-point average gap ≈ no similarity left
+function positionGroupOf(position) {
+  if (position === "GK") return "GK";
+  if (position === "CB") return "CB";
+  if (["LB", "RB", "LWB", "RWB"].includes(position)) return "FB";
+  if (position === "CDM") return "DM";
+  if (position === "CM") return "CM";
+  if (position === "CAM") return "AM";
+  if (["LM", "RM", "LW", "RW"].includes(position)) return "WIDE";
+  if (["ST", "CF"].includes(position)) return "ST";
+  return "CM";
 }
 
-function playStyleSimilarity(ref, cand) {
+// Pulls a stat wherever it actually lives - the 6 headline stats sit directly on the player,
+// everything else (finishing, standingTackle, etc.) is in detailedStats.
+function getStatValue(player, key) {
+  if (player[key] !== undefined && player[key] !== null) return player[key];
+  if (player.detailedStats && player.detailedStats[key] !== undefined) return player.detailedStats[key];
+  return 0;
+}
+
+// Each position group's scorecard, always summing to exactly 100 points. Every category is
+// classified by how it should actually be scored:
+// - similarity: candidate should stay close to the reference either way (e.g. pace style)
+// - minThreshold: equal or higher than the reference is fine and shouldn't be penalized
+// - optional: a small bonus for overlap, never a penalty for missing it
+const SCOUTING_SCORECARDS = {
+  ST: [
+    { label: "Finishing & Shot Power", keys: ["finishing", "shotPower", "volleys"], type: "similarity", weight: 25 },
+    { label: "Pace", keys: ["pac"], type: "similarity", weight: 15 },
+    { label: "Positioning & Reactions", keys: ["positioning", "reactions"], type: "minThreshold", weight: 15 },
+    { label: "Dribbling & Ball Control", keys: ["dri", "ballControl"], type: "similarity", weight: 15 },
+    { label: "Physicality & Aerial", keys: ["phy", "strength", "jumping", "heading"], type: "similarity", weight: 15 },
+    { label: "Composure", keys: ["composure"], type: "minThreshold", weight: 10 },
+    { label: "Playstyle & Body Type", keys: [], type: "optional", weight: 5 },
+  ],
+  WIDE: [
+    { label: "Pace", keys: ["pac", "acceleration", "sprintSpeed"], type: "similarity", weight: 20 },
+    { label: "Dribbling & Skill", keys: ["dri", "dribbling", "agility", "balance"], type: "similarity", weight: 25 },
+    { label: "Crossing & Final Ball", keys: ["crossing", "curve", "longPassing"], type: "similarity", weight: 15 },
+    { label: "Finishing", keys: ["finishing", "shotPower"], type: "similarity", weight: 15 },
+    { label: "Work Rate & Defensive Effort", keys: ["stamina", "interceptions"], type: "minThreshold", weight: 10 },
+    { label: "Composure & Reactions", keys: ["composure", "reactions"], type: "minThreshold", weight: 10 },
+    { label: "Playstyle & Body Type", keys: [], type: "optional", weight: 5 },
+  ],
+  AM: [
+    { label: "Vision & Passing", keys: ["vision", "shortPassing", "longPassing"], type: "similarity", weight: 25 },
+    { label: "Dribbling & Ball Control", keys: ["dri", "dribbling", "ballControl", "agility"], type: "similarity", weight: 20 },
+    { label: "Finishing", keys: ["finishing", "shotPower", "volleys"], type: "similarity", weight: 15 },
+    { label: "Pace", keys: ["pac", "acceleration"], type: "similarity", weight: 10 },
+    { label: "Composure & Reactions", keys: ["composure", "reactions"], type: "minThreshold", weight: 15 },
+    { label: "Stamina & Work Rate", keys: ["stamina"], type: "minThreshold", weight: 10 },
+    { label: "Playstyle & Body Type", keys: [], type: "optional", weight: 5 },
+  ],
+  CM: [
+    { label: "Passing & Vision", keys: ["pas", "shortPassing", "longPassing", "vision"], type: "similarity", weight: 25 },
+    { label: "Stamina & Work Rate", keys: ["stamina", "aggression"], type: "minThreshold", weight: 20 },
+    { label: "Ball Control & Dribbling", keys: ["dri", "ballControl"], type: "similarity", weight: 15 },
+    { label: "Defensive Contribution", keys: ["interceptions", "standingTackle"], type: "similarity", weight: 15 },
+    { label: "Physicality", keys: ["phy", "strength"], type: "similarity", weight: 10 },
+    { label: "Composure", keys: ["composure"], type: "minThreshold", weight: 10 },
+    { label: "Playstyle & Body Type", keys: [], type: "optional", weight: 5 },
+  ],
+  DM: [
+    { label: "Defending", keys: ["def", "standingTackle", "slidingTackle", "interceptions"], type: "similarity", weight: 30 },
+    { label: "Physicality", keys: ["phy", "strength", "aggression"], type: "similarity", weight: 20 },
+    { label: "Passing", keys: ["pas", "shortPassing", "longPassing"], type: "similarity", weight: 20 },
+    { label: "Positioning & Awareness", keys: ["positioning", "reactions"], type: "minThreshold", weight: 15 },
+    { label: "Stamina", keys: ["stamina"], type: "minThreshold", weight: 10 },
+    { label: "Playstyle & Body Type", keys: [], type: "optional", weight: 5 },
+  ],
+  FB: [
+    { label: "Pace", keys: ["pac", "sprintSpeed", "acceleration"], type: "similarity", weight: 20 },
+    { label: "Defending", keys: ["def", "standingTackle", "slidingTackle", "interceptions"], type: "similarity", weight: 25 },
+    { label: "Crossing & Attacking Threat", keys: ["crossing", "dri"], type: "similarity", weight: 20 },
+    { label: "Stamina", keys: ["stamina"], type: "minThreshold", weight: 15 },
+    { label: "Physicality", keys: ["phy", "strength"], type: "similarity", weight: 10 },
+    { label: "Composure", keys: ["composure"], type: "minThreshold", weight: 5 },
+    { label: "Playstyle & Body Type", keys: [], type: "optional", weight: 5 },
+  ],
+  CB: [
+    { label: "Defending", keys: ["def", "standingTackle", "slidingTackle", "marking", "interceptions"], type: "similarity", weight: 30 },
+    { label: "Physicality & Aerial", keys: ["phy", "strength", "jumping", "heading"], type: "minThreshold", weight: 25 },
+    { label: "Positioning & Awareness", keys: ["positioning", "reactions"], type: "minThreshold", weight: 20 },
+    { label: "Pace", keys: ["pac", "sprintSpeed"], type: "similarity", weight: 10 },
+    { label: "Passing", keys: ["pas", "shortPassing", "longPassing"], type: "similarity", weight: 10 },
+    { label: "Playstyle & Body Type", keys: [], type: "optional", weight: 5 },
+  ],
+  GK: [
+    { label: "Shot Stopping", keys: ["gkReflexes", "gkDiving"], type: "similarity", weight: 30 },
+    { label: "Handling", keys: ["gkHandling"], type: "similarity", weight: 20 },
+    { label: "Positioning", keys: ["gkPositioning"], type: "minThreshold", weight: 20 },
+    { label: "Kicking & Distribution", keys: ["gkKicking"], type: "similarity", weight: 15 },
+    { label: "Composure", keys: ["composure"], type: "minThreshold", weight: 10 },
+    { label: "Playstyle & Body Type", keys: [], type: "optional", weight: 5 },
+  ],
+};
+
+function scoreSimilarity(refVal, candVal, maxDiff = 30) {
+  const diff = Math.abs((Number(refVal) || 0) - (Number(candVal) || 0));
+  return Math.max(0, 1 - diff / maxDiff);
+}
+function scoreMinThreshold(refVal, candVal) {
+  const r = Number(refVal) || 0, c = Number(candVal) || 0;
+  if (c >= r) return 1;
+  return Math.max(0, 1 - (r - c) / 30);
+}
+
+function playStyleOverlap(ref, cand) {
   const refStyles = new Set(ref.playStyles || []);
   const candStyles = new Set(cand.playStyles || []);
-  if (refStyles.size === 0 && candStyles.size === 0) return 0.5; // neither has any data - neutral, not a penalty
+  if (refStyles.size === 0 && candStyles.size === 0) return 0.5;
   const intersection = [...refStyles].filter((s) => candStyles.has(s)).length;
   const union = new Set([...refStyles, ...candStyles]).size;
   return union === 0 ? 0 : intersection / union;
 }
-
-function positionMatch(ref, cand) {
-  if (ref.position === cand.position) return 1;
-  const refPositions = new Set(ref.positions || [ref.position]);
-  const candPositions = new Set(cand.positions || [cand.position]);
-  const overlap = [...refPositions].some((p) => candPositions.has(p));
-  return overlap ? 0.6 : 0;
-}
-
-function bodyTypeMatch(ref, cand) {
-  if (!ref.accelerationType || !cand.accelerationType) return 0.5; // no data either side - neutral
+function bodyTypeOverlap(ref, cand) {
+  if (!ref.accelerationType || !cand.accelerationType) return 0.5;
   if (ref.accelerationType === cand.accelerationType) return 1;
-  // "Mostly Explosive" and "Explosive" etc. share a root - partial credit for that overlap
   const refRoot = ref.accelerationType.replace(/^Mostly /, "");
   const candRoot = cand.accelerationType.replace(/^Mostly /, "");
   return refRoot === candRoot ? 0.6 : 0;
 }
 
-function scoutingSimilarity(ref, cand) {
-  return (
-    statSimilarity(ref, cand) * 0.6 +
-    playStyleSimilarity(ref, cand) * 0.2 +
-    positionMatch(ref, cand) * 0.1 +
-    bodyTypeMatch(ref, cand) * 0.1
-  );
+// Runs the reference player's own position-group scorecard against a candidate, category by
+// category, returning both the per-category breakdown and the total out of 100.
+function computeScorecardBreakdown(ref, cand) {
+  const group = positionGroupOf(ref.position);
+  const template = SCOUTING_SCORECARDS[group] || SCOUTING_SCORECARDS.CM;
+  const breakdown = template.map((entry) => {
+    let rawScore;
+    if (entry.type === "optional") {
+      rawScore = (playStyleOverlap(ref, cand) + bodyTypeOverlap(ref, cand)) / 2;
+    } else {
+      const scores = entry.keys.map((k) => {
+        const refVal = getStatValue(ref, k);
+        const candVal = getStatValue(cand, k);
+        return entry.type === "minThreshold" ? scoreMinThreshold(refVal, candVal) : scoreSimilarity(refVal, candVal);
+      });
+      rawScore = scores.length ? scores.reduce((s, v) => s + v, 0) / scores.length : 0.5;
+    }
+    return { ...entry, rawScore, points: rawScore * entry.weight };
+  });
+  const totalPoints = breakdown.reduce((s, b) => s + b.points, 0); // out of 100
+  return { group, breakdown, totalPoints };
 }
 
-// Returns the best matches split into "hidden gems" (rated meaningfully lower than the reference,
-// but still a close statistical match) and "similarly established" players, each sorted by
-// similarity. The reference player itself is always excluded from its own results.
-function findScoutingMatches(refPlayer, playerDatabase, limit = 12) {
-  const HIDDEN_GEM_RATING_GAP = 3; // at least this many points below the reference to count as a "gem"
-  const scored = playerDatabase
-    .filter((p) => p.name !== refPlayer.name || p.club !== refPlayer.club)
-    .map((p) => ({ player: p, score: scoutingSimilarity(refPlayer, p) }))
-    .filter((s) => s.score > 0.15) // filters out clear non-matches (wrong position outfield/GK etc.)
+// A short, readable tactical-role label for the reference player, combining their position group
+// with a descriptor drawn from accelerationType (the closest thing to a body-type/movement
+// profile available in the data).
+function generateTacticalRoleName(player) {
+  const group = positionGroupOf(player.position);
+  const roleBase = {
+    ST: "Striker", WIDE: "Wide Forward", AM: "Attacking Midfielder", CM: "Central Midfielder",
+    DM: "Defensive Midfielder", FB: "Full-Back", CB: "Centre-Back", GK: "Goalkeeper",
+  }[group] || player.position;
+  const accel = (player.accelerationType || "").replace(/^Mostly /, "");
+  const descriptor = accel === "Explosive" ? "Explosive " : accel === "Lengthy" ? "Powerful " : accel === "Controlled" ? "Balanced " : "";
+  return `${descriptor}${roleBase}`.trim();
+}
+
+// Picks out the single strongest-matching and weakest-matching (non-optional) category, to
+// generate a one-line "this is why it's a good fit / this is the compromise" explanation.
+function strongestAndWeakestCategory(breakdown) {
+  const graded = breakdown.filter((b) => b.type !== "optional");
+  const sorted = [...graded].sort((a, b) => b.rawScore - a.rawScore);
+  return { strongest: sorted[0], weakest: sorted[sorted.length - 1] };
+}
+
+// Elite/meta names are deliberately excluded even from the "established" list, not just kept out
+// of hidden gems - the whole point is realistic, less-obvious alternatives.
+function isEliteOrMeta(player) {
+  return Number(player.rating) >= 85 && Number(player.value) >= 50;
+}
+
+// Returns candidates who can actually play the reference's position (same position group is a
+// hard requirement, not just a scoring factor), split into hidden gems (rated meaningfully lower
+// but still a close scorecard match) and realistic similarly-rated alternatives - both excluding
+// obvious elite/meta names, and both ranked by scorecard total, never by raw rating.
+function findScoutingMatches(refPlayer, playerDatabase, limit = 10) {
+  const refGroup = positionGroupOf(refPlayer.position);
+  const candidates = playerDatabase.filter((p) => {
+    if (p.name === refPlayer.name && p.club === refPlayer.club) return false;
+    return positionGroupOf(p.position) === refGroup;
+  });
+
+  const scored = candidates
+    .map((p) => {
+      const { breakdown, totalPoints } = computeScorecardBreakdown(refPlayer, p);
+      const { strongest, weakest } = strongestAndWeakestCategory(breakdown);
+      return { player: p, score: totalPoints, breakdown, strongest, weakest };
+    })
+    .filter((s) => !isEliteOrMeta(s.player))
     .sort((a, b) => b.score - a.score);
 
-  const hiddenGems = scored.filter((s) => Number(s.player.rating) <= Number(refPlayer.rating) - HIDDEN_GEM_RATING_GAP).slice(0, limit);
-  const established = scored.filter((s) => Number(s.player.rating) > Number(refPlayer.rating) - HIDDEN_GEM_RATING_GAP).slice(0, limit);
-  return { hiddenGems, established };
+  const hiddenGems = scored.filter((s) => Number(s.player.rating) <= Number(refPlayer.rating) - 3).slice(0, limit);
+  const established = scored.filter((s) => Number(s.player.rating) > Number(refPlayer.rating) - 3).slice(0, limit);
+  return {
+    hiddenGems, established,
+    roleName: generateTacticalRoleName(refPlayer),
+    scorecardTemplate: SCOUTING_SCORECARDS[refGroup] || SCOUTING_SCORECARDS.CM,
+  };
 }
 
 function mapSofifaPlayer(p, clubName) {
