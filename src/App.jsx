@@ -3192,21 +3192,58 @@ export default function EafcLeagueApp() {
 
   // Replaces or merges the imported player reference database (from Sofifa or a pasted table)
   // used to power autocomplete/autofill on player-name fields throughout the app.
-  const importPlayerDatabase = (pinAttempt, players, mode) => {
+  const importPlayerDatabase = (pinAttempt, players, mode, preserveValueWage) => {
     if (pinAttempt !== adminPin) return "Incorrect PIN.";
     if (!Array.isArray(players) || players.length === 0) return "No players to import.";
+    // Preserves every field the source data actually provides - previously this only kept 7 basic
+    // fields (name/position/rating/club/age/value/wage) and silently dropped everything else, which
+    // meant even a full Sofifa import (with all its detailed stats, playstyles, and movement data)
+    // ended up stripped down to almost nothing the moment it passed through here. That's what was
+    // making every scouting comparison compare undefined-vs-undefined as a "perfect" match.
     const cleaned = players.map((p) => ({
       id: uid(),
       name: (p.name || "").trim(),
       position: (p.position || "").trim().toUpperCase(),
+      positions: p.positions || undefined,
       rating: Number(p.rating) || 0,
+      potential: p.potential !== undefined ? Number(p.potential) || 0 : undefined,
       club: (p.club || "").trim(),
       age: Number(p.age) || 0,
       value: Number(p.value) || 0,
       wage: Number(p.wage) || 0,
+      weakFoot: p.weakFoot, skillMoves: p.skillMoves, accelerationType: p.accelerationType,
+      pac: p.pac, sho: p.sho, pas: p.pas, dri: p.dri, def: p.def, phy: p.phy,
+      detailedStats: p.detailedStats || undefined,
+      playStyles: p.playStyles || undefined,
+      roles: p.roles || undefined,
     })).filter((p) => p.name);
     if (mode === "replace") {
       setPlayerDatabase(cleaned);
+    } else if (mode === "attribute-stats-only") {
+      setPlayerDatabase((existing) => {
+        // Matches by name + position + age (NOT club) - built for enriching free agents (who Sofifa
+        // often lists under their national team rather than a club) and drafted/signed players
+        // whose real-world club has since diverged from whatever club they're associated with in
+        // this league's database. Never creates a new entry, and never touches the existing club -
+        // this mode exists purely to backfill missing stats/playstyles/etc onto players already here.
+        const normName = (n) => (n || "").toLowerCase().trim();
+        return existing.map((existingPlayer) => {
+          const match = cleaned.find((p) =>
+            normName(p.name) === normName(existingPlayer.name) &&
+            p.position === existingPlayer.position &&
+            Math.abs((Number(p.age) || 0) - (Number(existingPlayer.age) || 0)) <= 1 // tolerates a birthday passing between imports
+          );
+          if (!match) return existingPlayer;
+          const merged = { ...existingPlayer };
+          Object.entries(match).forEach(([k, v]) => {
+            if (v === undefined) return;
+            if (k === "club" || k === "id") return; // this mode never touches club or id, only stats
+            if (preserveValueWage && (k === "value" || k === "wage")) return;
+            merged[k] = v;
+          });
+          return merged;
+        });
+      });
     } else {
       setPlayerDatabase((existing) => {
         // Keyed by name + position + club — matches on the full combination so an update only
@@ -3215,7 +3252,27 @@ export default function EafcLeagueApp() {
         // player at the same club in the same position.
         const dedupeKey = (p) => `${p.name.toLowerCase()}::${p.position.toLowerCase()}::${p.club.toLowerCase()}`;
         const byKey = new Map(existing.map((p) => [dedupeKey(p), p]));
-        cleaned.forEach((p) => byKey.set(dedupeKey(p), p));
+        cleaned.forEach((p) => {
+          const key = dedupeKey(p);
+          const prior = byKey.get(key);
+          // A re-import (e.g. richer Sofifa data arriving after a bare-bones manual add) should
+          // only overwrite fields the new data actually provides — never blank out detailed stats
+          // that were already there just because this particular import batch didn't include them.
+          if (prior) {
+            const merged = { ...prior };
+            Object.entries(p).forEach(([k, v]) => {
+              if (v === undefined) return;
+              // If asked to preserve value/wage, an existing player keeps whatever they already
+              // have for those two fields specifically, regardless of what this import says -
+              // protects manual corrections from being silently reset by Sofifa's own figures.
+              if (preserveValueWage && (k === "value" || k === "wage")) return;
+              merged[k] = v;
+            });
+            byKey.set(key, merged);
+          } else {
+            byKey.set(key, p);
+          }
+        });
         return Array.from(byKey.values());
       });
     }
@@ -8706,7 +8763,7 @@ function guessFieldForColumn(headerText) {
 }
 
 function SofifaImport({ importPlayerDatabase }) {
-  const [mode, setMode] = useState("league"); // "league" | "club"
+  const [mode, setMode] = useState("league"); // "league" | "club" — which scope is being browsed
   const [leagues, setLeagues] = useState([]); // {id, name}
   const [teams, setTeams] = useState([]); // {id, name, league}
   const [roster, setRoster] = useState(null);
@@ -8716,6 +8773,8 @@ function SofifaImport({ importPlayerDatabase }) {
   const [selected, setSelected] = useState(null);
   const [pin, setPin] = useState("");
   const [msg, setMsg] = useState(null);
+  const [preserveValueWage, setPreserveValueWage] = useState(true); // safe default for re-imports - protects manual corrections
+  const [importMatchMode, setImportMatchMode] = useState("merge"); // "merge" | "attribute-stats-only" - how incoming players get matched against the existing database
 
   const [progress, setProgress] = useState(null); // { current, total, label }
   const busy = progress !== null;
@@ -8758,7 +8817,7 @@ function SofifaImport({ importPlayerDatabase }) {
     try {
       const team = await sofifaFetch(`/team/${selected.id}/${roster}`);
       const players = (team.players || []).map((p) => mapSofifaPlayer(p, team.name));
-      const err = importPlayerDatabase(pin, players, "merge");
+      const err = importPlayerDatabase(pin, players, importMatchMode, preserveValueWage);
       setPin("");
       if (err) setMsg({ text: err, tone: "red" });
       else setMsg({ text: `Imported ${players.length} players from ${team.name}.`, tone: "green" });
@@ -8785,7 +8844,7 @@ function SofifaImport({ importPlayerDatabase }) {
         }
         await sleep(1100); // ~54 requests/minute, safely under Sofifa's stated 60/minute limit
       }
-      const err = importPlayerDatabase(pin, allPlayers, "merge");
+      const err = importPlayerDatabase(pin, allPlayers, importMatchMode, preserveValueWage);
       setPin("");
       if (err) setMsg({ text: err, tone: "red" });
       else setMsg({ text: `Imported ${allPlayers.length} players from ${clubTeams.length} clubs in ${selected.name}.`, tone: "green" });
@@ -8827,14 +8886,33 @@ function SofifaImport({ importPlayerDatabase }) {
             </div>
           )}
           {selected && !busy && (
-            <div className="flex items-end gap-2 flex-wrap">
-              <Field label="Admin PIN">
-                <TextInput type="password" value={pin} onChange={(e) => setPin(e.target.value)} style={{ width: 140 }} />
-              </Field>
-              <Btn onClick={mode === "league" ? importLeague : importClub}>
-                Import {selected.name}{mode === "league" ? " (all clubs)" : "'s squad"}
-              </Btn>
-              <Btn variant="outline" size="sm" onClick={() => { setSelected(null); setQuery(""); }}>Change {mode === "league" ? "league" : "club"}</Btn>
+            <div>
+              <div style={{ marginBottom: 10 }}>
+                <div style={{ color: C.muted, fontSize: 10.5, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 4 }}>Import mode</div>
+                <label className="flex items-start gap-2" style={{ cursor: "pointer", color: C.muted, fontSize: 12.5, marginBottom: 6 }}>
+                  <input type="radio" name="importMatchMode" checked={importMatchMode === "merge"} onChange={() => setImportMatchMode("merge")} style={{ marginTop: 3 }} />
+                  <span><b style={{ color: C.text }}>Full import</b> — adds new players and updates existing ones, matched by name + position + club. Use this for a normal league/club import.</span>
+                </label>
+                <label className="flex items-start gap-2" style={{ cursor: "pointer", color: C.muted, fontSize: 12.5 }}>
+                  <input type="radio" name="importMatchMode" checked={importMatchMode === "attribute-stats-only"} onChange={() => setImportMatchMode("attribute-stats-only")} style={{ marginTop: 3 }} />
+                  <span><b style={{ color: C.text }}>Attribute stats only</b> — matches by name + position + age instead (ignoring club entirely), only fills in stats/playstyles for
+                  players already in your database, and never adds anyone new or changes their existing club. Use this for free agents Sofifa lists under their country, or anyone
+                  whose real-world club has drifted from their club in this league.</span>
+                </label>
+              </div>
+              <label className="flex items-center gap-2" style={{ marginBottom: 10, cursor: "pointer", color: C.muted, fontSize: 12.5 }}>
+                <input type="checkbox" checked={preserveValueWage} onChange={(e) => setPreserveValueWage(e.target.checked)} />
+                Keep existing Value/Wage for players already in the database (won't reset any manual corrections — only fills in missing stats/playstyles/etc.)
+              </label>
+              <div className="flex items-end gap-2 flex-wrap">
+                <Field label="Admin PIN">
+                  <TextInput type="password" value={pin} onChange={(e) => setPin(e.target.value)} style={{ width: 140 }} />
+                </Field>
+                <Btn onClick={mode === "league" ? importLeague : importClub}>
+                  Import {selected.name}{mode === "league" ? " (all clubs)" : "'s squad"}
+                </Btn>
+                <Btn variant="outline" size="sm" onClick={() => { setSelected(null); setQuery(""); }}>Change {mode === "league" ? "league" : "club"}</Btn>
+              </div>
             </div>
           )}
           {busy && (
