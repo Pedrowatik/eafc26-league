@@ -299,6 +299,7 @@ function PlayerAutocomplete({ value, onChange, onSelect, playerDatabase, placeho
   const [open, setOpen] = useState(false);
   const [dropdownRect, setDropdownRect] = useState(null);
   const boxRef = useRef(null);
+  const dropdownRef = useRef(null); // the portal-rendered dropdown lives outside boxRef's DOM subtree
 
   const matches = useMemo(() => {
     const q = (value || "").trim().toLowerCase();
@@ -314,8 +315,14 @@ function PlayerAutocomplete({ value, onChange, onSelect, playerDatabase, placeho
   };
 
   useEffect(() => {
+    // Since the dropdown renders via a portal (outside boxRef's own DOM subtree, to escape any
+    // clipped/backdrop-filtered parent), a click on the dropdown itself would otherwise look like
+    // a click "outside" boxRef - closing it via mousedown before the button's own click/onSelect
+    // ever gets a chance to fire. Checking dropdownRef too is what actually lets selection work.
     const onClickOutside = (e) => {
-      if (boxRef.current && !boxRef.current.contains(e.target)) setOpen(false);
+      const inBox = boxRef.current && boxRef.current.contains(e.target);
+      const inDropdown = dropdownRef.current && dropdownRef.current.contains(e.target);
+      if (!inBox && !inDropdown) setOpen(false);
     };
     document.addEventListener("mousedown", onClickOutside);
     window.addEventListener("scroll", updateDropdownPosition, true);
@@ -336,7 +343,7 @@ function PlayerAutocomplete({ value, onChange, onSelect, playerDatabase, placeho
         onFocus={() => { setOpen(true); updateDropdownPosition(); }}
       />
       {open && matches.length > 0 && dropdownRect && createPortal(
-        <div style={{
+        <div ref={dropdownRef} style={{
           position: "fixed", top: dropdownRect.top, left: dropdownRect.left, width: dropdownRect.width, zIndex: 10000,
           background: C.panel, border: `1px solid ${C.border}`, borderRadius: 8,
           maxHeight: 220, overflowY: "auto", boxShadow: "0 8px 20px rgba(0,0,0,0.4)",
