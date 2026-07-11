@@ -1245,7 +1245,17 @@ export default function EafcLeagueApp() {
   // prize pool even after the records were correctly created.
   const mergeTransfersById = (local, incoming) => {
     const byId = new Map(local.map((tx) => [tx.id, tx]));
-    (incoming || []).forEach((tx) => byId.set(tx.id, tx));
+    (incoming || []).forEach((tx) => {
+      const existing = byId.get(tx.id);
+      // A deletion is a tombstone, not just "absence" — once either side has marked a record
+      // deleted, it stays deleted no matter what a stale browser's older, still-intact copy says.
+      // This is what was actually letting deleted duplicate transfer records silently reappear.
+      if ((existing && existing.deleted) || tx.deleted) {
+        byId.set(tx.id, { ...tx, deleted: true });
+      } else {
+        byId.set(tx.id, tx);
+      }
+    });
     return Array.from(byId.values()).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
   };
 
@@ -2129,13 +2139,18 @@ export default function EafcLeagueApp() {
     return out;
   }, [teams, squads]);
 
+  // Everywhere transfers are displayed or calculated should use this, not the raw `transfers`
+  // state directly — that raw state deliberately still contains tombstoned (deleted: true) records,
+  // needed so a deletion survives merging with any stale browser's older, still-intact copy.
+  const activeTransfers = useMemo(() => transfers.filter((tx) => !tx.deleted), [transfers]);
+
   const budgetStats = useMemo(() => {
     const out = {};
     for (const t of teams) {
-      const boughtFromOthers = transfers.filter(
+      const boughtFromOthers = activeTransfers.filter(
         (tx) => tx.to === t.id && tx.from !== t.id && !tx.buyerAlreadyPaidDirectly && (tx.instant || nowTick - (tx.createdAt || 0) >= BUYER_RATIFY_MS)
       );
-      const soldToOthersOrFA = transfers.filter(
+      const soldToOthersOrFA = activeTransfers.filter(
         (tx) => tx.from === t.id && tx.to !== t.id && (tx.instant || nowTick - (tx.createdAt || 0) >= SELLER_CREDIT_MS)
       );
       const spent = boughtFromOthers.reduce((s, tx) => s + Number(tx.price || 0), 0);
@@ -2149,7 +2164,7 @@ export default function EafcLeagueApp() {
       // above (to avoid double-counting, since those already deduct the budget directly). Without
       // this, a season built entirely from draft/blind-bid signings showed those columns as empty,
       // even though real money had genuinely been spent.
-      const allBought = transfers.filter(
+      const allBought = activeTransfers.filter(
         (tx) => tx.to === t.id && tx.from !== t.id && (tx.instant || nowTick - (tx.createdAt || 0) >= BUYER_RATIFY_MS)
       );
       const spentAllSources = allBought.reduce((s, tx) => s + Number(tx.price || 0), 0);
@@ -2182,7 +2197,7 @@ export default function EafcLeagueApp() {
       };
     }
     return out;
-  }, [teams, transfers, teamById, squadStats, auctions, nowTick]);
+  }, [teams, activeTransfers, teamById, squadStats, auctions, nowTick]);
 
   const allMatchdaysComplete = useMemo(
     () => fixtures.length > 0 && fixtures.every((f) => f.score1 !== "" && f.score1 != null && f.score2 !== "" && f.score2 != null),
@@ -2225,10 +2240,10 @@ export default function EafcLeagueApp() {
   }, [teams, fixtures, teamById]);
 
   const taxCollected = useMemo(
-    () => transfers
+    () => activeTransfers
       .filter((tx) => tx.instant || nowTick - (tx.createdAt || 0) >= BUYER_RATIFY_MS)
       .reduce((s, tx) => s + Number(tx.tax || 0), 0),
-    [transfers, nowTick]
+    [activeTransfers, nowTick]
   );
   const prizeTotal = useMemo(
     () => taxCollected + prizes.reduce((s, p) => s + Number(p.amount || 0), 0),
@@ -2556,9 +2571,30 @@ export default function EafcLeagueApp() {
 
   // Admin-only: remove a transfer record entirely (covers auction wins, losing-bid tax charges,
   // and instant admin rewards) — regular users can no longer delete these.
-  const deleteTransfer = (pinAttempt, id) => {
+  // Marks it as a tombstone (deleted: true) rather than just removing it from the array, and
+  // writes immediately/directly — since transfers sync via merge-by-id, a plain removal could
+  // silently reappear the moment any stale browser's older, still-intact copy got merged back in.
+  const deleteTransfer = async (pinAttempt, id) => {
     if (pinAttempt !== adminPin) return "Incorrect PIN.";
-    setTransfers((all) => all.filter((x) => x.id !== id));
+    let updatedList = null;
+    setTransfers((all) => {
+      updatedList = all.map((x) => (x.id === id ? { ...x, deleted: true } : x));
+      return updatedList; // tombstone stays in state - the regular autosave needs to see it too
+    });
+    try {
+      const fresh = await storage.get(TRANSFERS_STORAGE_KEY, true);
+      let freshList = updatedList || [];
+      if (fresh && fresh.value) {
+        const freshData = JSON.parse(fresh.value);
+        if (freshData.transfers) freshList = mergeTransfersById(freshData.transfers, updatedList || []);
+      }
+      const mergedList = freshList.map((x) => (x.id === id ? { ...x, deleted: true } : x));
+      const savedAt = Date.now();
+      await storage.set(TRANSFERS_STORAGE_KEY, JSON.stringify({ transfers: mergedList, savedAt }), true);
+      knownTransfersSavedAtRef.current = savedAt;
+    } catch (e) {
+      // best effort — the autosave will still pick this up if this direct write fails
+    }
     return null;
   };
 
@@ -2782,7 +2818,7 @@ export default function EafcLeagueApp() {
 
     setSeasonHistory((h) => [{
       id: uid(), season, endedAt: Date.now(), standings: finalStandings, sponsorships,
-      fixtures, transfers, prizes, taxCollected,
+      fixtures, transfers: activeTransfers, prizes, taxCollected,
     }, ...h]);
 
     // Sponsorship bonus: awarded if a team's actual final position beats (any improvement at all)
@@ -3967,7 +4003,7 @@ export default function EafcLeagueApp() {
           <BudgetsTab teams={teams} budgetStats={budgetStats} renameTeam={renameTeam} />
         )}
         {tab === "transfers" && (
-          <TransfersTab teams={teams} squads={squads} transfers={transfers} logTransfer={logTransfer}
+          <TransfersTab teams={teams} squads={squads} transfers={activeTransfers} logTransfer={logTransfer}
             setTransfers={setTransfers} auctions={auctions} createAuction={createAuction}
             placeBid={placeBid} finalizeAuction={finalizeAuction} respondToAuction={respondToAuction}
             deleteBid={deleteBid} cancelAuction={cancelAuction} deleteTransfer={deleteTransfer} editAuctionPlayerName={editAuctionPlayerName} nowTick={nowTick}
@@ -4035,7 +4071,7 @@ export default function EafcLeagueApp() {
             draftPicks={draftPicks} draftSubmitted={draftSubmitted} clearSquadsAndTransfers={clearSquadsAndTransfers}
             applyNewBudgetAndWageCap={applyNewBudgetAndWageCap} resetTeamDraft={resetTeamDraft}
             reopenDraftKeepPicks={reopenDraftKeepPicks} clearBlindBids={clearBlindBids} blindBids={blindBids}
-            assignSponsorships={assignSponsorships} transfers={transfers} removePlayerFromSquad={removePlayerFromSquad} deleteTransfer={deleteTransfer} forceMarkBlindBidResolved={forceMarkBlindBidResolved} />
+            assignSponsorships={assignSponsorships} transfers={activeTransfers} removePlayerFromSquad={removePlayerFromSquad} deleteTransfer={deleteTransfer} forceMarkBlindBidResolved={forceMarkBlindBidResolved} />
         )}
       </div>
 
