@@ -769,6 +769,11 @@ export default function EafcLeagueApp() {
   // completely different team).
   const lastSyncedSquadDataRef = useRef(new Map());
   const knownAuctionsSavedAtRef = useRef(0);
+  // Tracks each auction's last-synced JSON by id, so the autosave can merge instead of blindly
+  // overwriting the whole array - that blanket-overwrite was exactly what let one bidder's stale
+  // local copy silently erase another team's just-placed bid, which then fed a stale budget
+  // calculation for their next action.
+  const lastSyncedAuctionsRef = useRef(new Map());
   const knownTransferListingsSavedAtRef = useRef(0);
   const knownWantedListingsSavedAtRef = useRef(0);
   const knownTeamSavedAtRef = useRef(new Map()); // per-team: teamId -> savedAt
@@ -1006,10 +1011,13 @@ export default function EafcLeagueApp() {
         const ares = await storage.get(AUCTIONS_STORAGE_KEY, true);
         if (ares && ares.value) {
           const adata = JSON.parse(ares.value);
-          setAuctions(adata.auctions || []);
+          const loadedAuctions = adata.auctions || [];
+          setAuctions(loadedAuctions);
           knownAuctionsSavedAtRef.current = adata.savedAt || Date.now();
+          lastSyncedAuctionsRef.current = new Map(loadedAuctions.map((a) => [a.id, JSON.stringify(a)]));
         } else if (legacyAuctionsForMigration) {
           setAuctions(legacyAuctionsForMigration);
+          lastSyncedAuctionsRef.current = new Map(legacyAuctionsForMigration.map((a) => [a.id, JSON.stringify(a)]));
         }
       } catch (e) {
         if (legacyAuctionsForMigration) setAuctions(legacyAuctionsForMigration);
@@ -1692,9 +1700,36 @@ export default function EafcLeagueApp() {
     auctionsSavingRef.current = true;
     const t = setTimeout(async () => {
       try {
+        // Merge with whatever's actually on the server right now, rather than blindly overwriting
+        // the whole array with this browser's local copy - only auctions that genuinely changed
+        // locally (a new bid, a new listing, a cancellation) get written over the server version;
+        // anything else (like another team's bid this browser hasn't polled in yet) survives intact.
+        let serverAuctions = [];
+        try {
+          const fresh = await storage.get(AUCTIONS_STORAGE_KEY, true);
+          if (fresh && fresh.value) serverAuctions = JSON.parse(fresh.value).auctions || [];
+        } catch (e) {
+          // if the fresh read fails, fall back to merging against what we last knew locally
+          serverAuctions = auctions;
+        }
+        const byId = new Map(serverAuctions.map((a) => [a.id, a]));
+        auctions.forEach((a) => {
+          const lastSynced = lastSyncedAuctionsRef.current.get(a.id);
+          const current = JSON.stringify(a);
+          if (lastSynced !== current) byId.set(a.id, a); // only overwrite if this browser actually changed it
+        });
+        const merged = Array.from(byId.values());
         const savedAt = Date.now();
-        await storage.set(AUCTIONS_STORAGE_KEY, JSON.stringify({ auctions, savedAt }), true);
+        await storage.set(AUCTIONS_STORAGE_KEY, JSON.stringify({ auctions: merged, savedAt }), true);
         knownAuctionsSavedAtRef.current = savedAt;
+        lastSyncedAuctionsRef.current = new Map(merged.map((a) => [a.id, JSON.stringify(a)]));
+        // Reflect the merged result locally too, in case this browser was missing something the
+        // server already had (e.g. another team's bid it hadn't polled in yet) - but only if it
+        // actually differs, so this doesn't retrigger the same effect and loop indefinitely.
+        const mergedJSON = JSON.stringify(merged);
+        if (mergedJSON !== JSON.stringify(auctions)) {
+          setAuctions(merged);
+        }
       } catch (e) {
         // best effort
       } finally {
@@ -1712,8 +1747,10 @@ export default function EafcLeagueApp() {
         const data = JSON.parse(res.value);
         const remoteSavedAt = data.savedAt || 0;
         if (remoteSavedAt > knownAuctionsSavedAtRef.current) {
-          setAuctions(data.auctions || []);
+          const incoming = data.auctions || [];
+          setAuctions(incoming);
           knownAuctionsSavedAtRef.current = remoteSavedAt;
+          lastSyncedAuctionsRef.current = new Map(incoming.map((a) => [a.id, JSON.stringify(a)]));
         }
       }
     } catch (e) {
@@ -1735,8 +1772,10 @@ export default function EafcLeagueApp() {
         const data = JSON.parse(row.value);
         const remoteSavedAt = data.savedAt || 0;
         if (remoteSavedAt > knownAuctionsSavedAtRef.current && !auctionsSavingRef.current) {
-          setAuctions(data.auctions || []);
+          const incoming = data.auctions || [];
+          setAuctions(incoming);
           knownAuctionsSavedAtRef.current = remoteSavedAt;
+          lastSyncedAuctionsRef.current = new Map(incoming.map((a) => [a.id, JSON.stringify(a)]));
         }
       } catch (e) {
         // ignore malformed payloads
