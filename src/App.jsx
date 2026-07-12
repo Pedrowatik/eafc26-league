@@ -266,6 +266,62 @@ function Label({ children }) {
   return <div style={{ color: "rgba(255,255,255,0.55)", fontSize: 11, fontWeight: 500, textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 4 }}>{children}</div>;
 }
 
+// Wraps any admin-only control that lives outside the Admin tab (cancel auction, force resolve,
+// etc). Locked, it shows just a small "Admin View" label with a Show button; entering the correct
+// PIN unlocks it globally (adminViewUnlocked), so every other AdminGate on the page unlocks too,
+// and it stays that way until Hide is clicked anywhere — no need to re-enter the PIN per control.
+function AdminGate({ adminPin, adminViewUnlocked, setAdminViewUnlocked, children }) {
+  const [showPrompt, setShowPrompt] = useState(false);
+  const [pinInput, setPinInput] = useState("");
+  const [error, setError] = useState(null);
+
+  const doUnlock = () => {
+    if (pinInput !== adminPin) { setError("Incorrect PIN."); return; }
+    setAdminViewUnlocked(true);
+    setShowPrompt(false);
+    setPinInput("");
+    setError(null);
+  };
+
+  if (adminViewUnlocked) {
+    return (
+      <div>
+        <button onClick={() => setAdminViewUnlocked(false)}
+          style={{ background: "transparent", border: "none", padding: 0, marginBottom: 6, cursor: "pointer", color: C.muted, fontSize: 10.5, textDecoration: "underline" }}>
+          Hide admin view
+        </button>
+        {children}
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ position: "relative", display: "inline-block" }}>
+      <button onClick={() => setShowPrompt((s) => !s)}
+        className="flex items-center gap-1"
+        style={{ background: "transparent", border: `1px dashed ${C.border}`, borderRadius: 6, padding: "3px 8px", cursor: "pointer", color: C.muted, fontSize: 10.5 }}>
+        <Lock size={11} /> Admin view
+      </button>
+      {showPrompt && (
+        <div style={{
+          position: "absolute", top: "calc(100% + 4px)", left: 0, zIndex: 50,
+          background: C.panel, border: `1px solid ${C.border}`, borderRadius: 8, padding: 10,
+          boxShadow: "0 8px 20px rgba(0,0,0,0.4)", minWidth: 200,
+        }}>
+          <div className="flex items-center gap-2">
+            <TextInput type="password" placeholder="Admin PIN" value={pinInput}
+              onChange={(e) => setPinInput(e.target.value)} onKeyDown={(e) => e.key === "Enter" && doUnlock()}
+              style={{ width: 130 }} />
+            <Btn size="sm" onClick={doUnlock}>Show</Btn>
+          </div>
+          {error && <div style={{ color: C.red, fontSize: 11, marginTop: 6 }}>{error}</div>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+
 function Field({ label, children }) {
   return (
     <div style={{ minWidth: 0 }}>
@@ -680,6 +736,11 @@ export default function EafcLeagueApp() {
 
   const [myTeamId, setMyTeamId] = useState(null); // personal — which team is "me" on this device
   const [tab, setTab] = useState("dashboard");
+  // Global "Admin View" unlock — controls scattered outside the Admin tab (cancel auction, force
+  // resolve, etc.) stay hidden behind a small toggle until this is unlocked, and once unlocked it
+  // stays that way across all of them until explicitly hidden again, rather than re-prompting for
+  // the PIN every single time.
+  const [adminViewUnlocked, setAdminViewUnlocked] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [saveState, setSaveState] = useState("idle"); // idle | saving | saved
   const [syncState, setSyncState] = useState("idle"); // idle | checking | updated
@@ -4163,7 +4224,7 @@ export default function EafcLeagueApp() {
             addWantedListing={addWantedListing} removeWantedListing={removeWantedListing}
             sendMarketMessage={sendMarketMessage} transferWindow={transferWindow} transferWindowOpen={transferWindowOpen}
             season={season} swapOffers={swapOffers} offerSwap={offerSwap} respondToSwapOffer={respondToSwapOffer}
-            hasUsedSwapThisWindow={hasUsedSwapThisWindow} />
+            hasUsedSwapThisWindow={hasUsedSwapThisWindow} adminPin={adminPin} adminViewUnlocked={adminViewUnlocked} setAdminViewUnlocked={setAdminViewUnlocked} />
         )}
         {tab === "draft" && (
           <DraftTab teams={teams} squads={squads} squadStats={squadStats} myTeamId={myTeamId}
@@ -4171,7 +4232,7 @@ export default function EafcLeagueApp() {
             draftSubmitted={draftSubmitted} updateDraftPick={updateDraftPick} submitDraft={submitDraft}
             validateDraft={validateDraft} openDraft={openDraft} resolveDraft={resolveDraft}
             blindBids={blindBids} submitBlindBid={submitBlindBid} resolveBlindBidNow={resolveBlindBidNow}
-            budgetStats={budgetStats} />
+            budgetStats={budgetStats} adminPin={adminPin} adminViewUnlocked={adminViewUnlocked} setAdminViewUnlocked={setAdminViewUnlocked} />
         )}
         {tab === "fixtures" && (
           <FixturesTab teams={teams} fixtures={fixtures} setFixtures={setFixtures} logActivity={logActivity}
@@ -4186,7 +4247,7 @@ export default function EafcLeagueApp() {
           <CupTab teams={teams} fixtures={fixtures} cupState={cupState} adminPin={adminPin}
             openCup={openCup} resolveCupGroupStage={resolveCupGroupStage}
             resolveCupSemis={resolveCupSemis} resolveCupFinal={resolveCupFinal}
-            cupGroupTable={cupGroupTable} />
+            cupGroupTable={cupGroupTable} adminViewUnlocked={adminViewUnlocked} setAdminViewUnlocked={setAdminViewUnlocked} />
         )}
         {tab === "prizes" && (
           <PrizesTab prizes={prizes} setPrizes={setPrizes} taxCollected={taxCollected} prizeTotal={prizeTotal}
@@ -4204,7 +4265,7 @@ export default function EafcLeagueApp() {
           <RulesTab teams={teams} standings={standings} />
         )}
         {tab === "playerdb" && (
-          <PlayerDatabaseTab teams={teams} squads={squads} playerDatabase={playerDatabase} openPlayerStats={openPlayerStats} refreshPlayerDatabase={pullLatestPlayerDb} adminPin={adminPin} importPlayerDatabase={importPlayerDatabase} deletePlayerFromDatabase={deletePlayerFromDatabase} deleteMultiplePlayersFromDatabase={deleteMultiplePlayersFromDatabase} />
+          <PlayerDatabaseTab teams={teams} squads={squads} playerDatabase={playerDatabase} openPlayerStats={openPlayerStats} refreshPlayerDatabase={pullLatestPlayerDb} adminPin={adminPin} importPlayerDatabase={importPlayerDatabase} deletePlayerFromDatabase={deletePlayerFromDatabase} deleteMultiplePlayersFromDatabase={deleteMultiplePlayersFromDatabase} adminViewUnlocked={adminViewUnlocked} setAdminViewUnlocked={setAdminViewUnlocked} />
         )}
         {tab === "admin" && (
           <AdminTab teams={teams} squads={squads} myTeamId={myTeamId} playerDatabase={playerDatabase}
@@ -4230,7 +4291,7 @@ export default function EafcLeagueApp() {
         )}
       </div>
 
-      <ActivityTicker activity={activity} clearActivity={clearActivity} />
+      <ActivityTicker activity={activity} clearActivity={clearActivity} adminPin={adminPin} adminViewUnlocked={adminViewUnlocked} setAdminViewUnlocked={setAdminViewUnlocked} />
 
       <div className="flex items-center justify-center gap-2" style={{ textAlign: "center", padding: "10px 18px 20px", color: C.muted, fontSize: 11.5 }}>
         Player data powered by{" "}
@@ -4633,14 +4694,12 @@ function RecentActivity({ activity }) {
   );
 }
 
-function ActivityTicker({ activity, clearActivity }) {
+function ActivityTicker({ activity, clearActivity, adminPin, adminViewUnlocked, setAdminViewUnlocked }) {
   const [clearing, setClearing] = useState(false);
-  const [pin, setPin] = useState("");
   const [err, setErr] = useState("");
 
   const doClear = () => {
-    const e = clearActivity(pin);
-    setPin("");
+    const e = clearActivity(adminPin);
     if (e) setErr(e);
     else { setClearing(false); setErr(""); }
   };
@@ -4663,15 +4722,16 @@ function ActivityTicker({ activity, clearActivity }) {
             <span className="hud-font" style={{ color: "rgba(255,255,255,0.75)", fontSize: 12.5 }}>{tickerText}</span>
           </div>
         </div>
-        <button onClick={() => setClearing((c) => !c)} title="Clear activity log"
-          style={{ background: "transparent", border: "none", cursor: "pointer", color: "rgba(255,255,255,0.4)", flexShrink: 0 }}>
-          <Trash2 size={12} />
-        </button>
+        <AdminGate adminPin={adminPin} adminViewUnlocked={adminViewUnlocked} setAdminViewUnlocked={setAdminViewUnlocked}>
+          <button onClick={() => setClearing((c) => !c)} title="Clear activity log"
+            style={{ background: "transparent", border: "none", cursor: "pointer", color: "rgba(255,255,255,0.4)", flexShrink: 0 }}>
+            <Trash2 size={12} />
+          </button>
+        </AdminGate>
       </div>
 
       {clearing && (
         <div className="flex items-center gap-2 flex-wrap" style={{ maxWidth: 1180, margin: "0 auto", padding: "8px 18px" }}>
-          <TextInput type="password" placeholder="Admin PIN" value={pin} onChange={(e) => setPin(e.target.value)} style={{ width: 120 }} />
           <Btn size="sm" variant="danger" onClick={doClear}>Clear all activity</Btn>
           <Btn size="sm" variant="outline" onClick={() => setClearing(false)}>Cancel</Btn>
           {err && <span style={{ color: C.red, fontSize: 11.5 }}>{err}</span>}
@@ -5275,7 +5335,7 @@ function formatCountdown(ms) {
   return `${m}m ${s}s left`;
 }
 
-function AuctionsPanel({ teams, squads, auctions, createAuction, placeBid, finalizeAuction, respondToAuction, deleteBid, cancelAuction, editAuctionPlayerName, myTeamId, playerDatabase, squadStats }) {
+function AuctionsPanel({ teams, squads, auctions, createAuction, placeBid, finalizeAuction, respondToAuction, deleteBid, cancelAuction, editAuctionPlayerName, myTeamId, playerDatabase, squadStats, adminPin, adminViewUnlocked, setAdminViewUnlocked }) {
   const firstBidderFor = (sellerId) => {
     if (myTeamId && myTeamId !== sellerId) return myTeamId;
     return teams.find((t) => t.id !== sellerId)?.id || teams[0].id;
@@ -5408,7 +5468,7 @@ function AuctionsPanel({ teams, squads, auctions, createAuction, placeBid, final
               <PendingAuctionCard key={a.id} auction={a} teams={teams} respondToAuction={respondToAuction} editAuctionPlayerName={editAuctionPlayerName} />
             ))}
             {myOpen.map((a) => (
-              <AuctionCard key={a.id} auction={a} teams={teams} now={now} placeBid={placeBid} finalizeAuction={finalizeAuction} deleteBid={deleteBid} cancelAuction={cancelAuction} editAuctionPlayerName={editAuctionPlayerName} myTeamId={myTeamId} squadStats={squadStats} />
+              <AuctionCard key={a.id} auction={a} teams={teams} now={now} placeBid={placeBid} finalizeAuction={finalizeAuction} deleteBid={deleteBid} cancelAuction={cancelAuction} editAuctionPlayerName={editAuctionPlayerName} myTeamId={myTeamId} squadStats={squadStats} adminPin={adminPin} adminViewUnlocked={adminViewUnlocked} setAdminViewUnlocked={setAdminViewUnlocked} />
             ))}
           </div>
         </div>
@@ -5430,7 +5490,7 @@ function AuctionsPanel({ teams, squads, auctions, createAuction, placeBid, final
           <div style={{ color: C.gold, fontWeight: 700, fontSize: 13, marginBottom: 10 }}>Live Auctions ({open.length})</div>
           <div className="grid gap-3">
             {open.map((a) => (
-              <AuctionCard key={a.id} auction={a} teams={teams} now={now} placeBid={placeBid} finalizeAuction={finalizeAuction} deleteBid={deleteBid} cancelAuction={cancelAuction} editAuctionPlayerName={editAuctionPlayerName} myTeamId={myTeamId} squadStats={squadStats} />
+              <AuctionCard key={a.id} auction={a} teams={teams} now={now} placeBid={placeBid} finalizeAuction={finalizeAuction} deleteBid={deleteBid} cancelAuction={cancelAuction} editAuctionPlayerName={editAuctionPlayerName} myTeamId={myTeamId} squadStats={squadStats} adminPin={adminPin} adminViewUnlocked={adminViewUnlocked} setAdminViewUnlocked={setAdminViewUnlocked} />
             ))}
           </div>
         </div>
@@ -5521,14 +5581,12 @@ function PendingAuctionCard({ auction, teams, respondToAuction, editAuctionPlaye
   );
 }
 
-function AuctionCard({ auction, teams, now, placeBid, finalizeAuction, deleteBid, cancelAuction, editAuctionPlayerName, myTeamId, squadStats }) {
+function AuctionCard({ auction, teams, now, placeBid, finalizeAuction, deleteBid, cancelAuction, editAuctionPlayerName, myTeamId, squadStats, adminPin, adminViewUnlocked, setAdminViewUnlocked }) {
   const [bidAmount, setBidAmount] = useState("");
   const [err, setErr] = useState("");
   const [deletingBidId, setDeletingBidId] = useState(null);
-  const [deletePin, setDeletePin] = useState("");
   const [deleteErr, setDeleteErr] = useState("");
   const [cancelling, setCancelling] = useState(false);
-  const [cancelPin, setCancelPin] = useState("");
   const [cancelReason, setCancelReason] = useState("");
   const [cancelErr, setCancelErr] = useState("");
 
@@ -5548,15 +5606,13 @@ function AuctionCard({ auction, teams, now, placeBid, finalizeAuction, deleteBid
   };
 
   const confirmDeleteBid = () => {
-    const e = deleteBid(auction.id, deletingBidId, deletePin);
-    setDeletePin("");
+    const e = deleteBid(auction.id, deletingBidId, adminPin);
     if (e) setDeleteErr(e);
     else { setDeletingBidId(null); setDeleteErr(""); }
   };
 
   const confirmCancel = () => {
-    const e = cancelAuction(auction.id, cancelPin, cancelReason);
-    setCancelPin("");
+    const e = cancelAuction(auction.id, adminPin, cancelReason);
     if (e) setCancelErr(e);
     else { setCancelling(false); setCancelErr(""); setCancelReason(""); }
   };
@@ -5626,46 +5682,46 @@ function AuctionCard({ auction, teams, now, placeBid, finalizeAuction, deleteBid
       {err && <div className="flex items-center gap-2" style={{ marginTop: 8, color: C.red, fontSize: 12 }}><AlertTriangle size={13} /> {err}</div>}
 
       <div style={{ marginTop: 10 }}>
-        {!cancelling ? (
-          <button onClick={() => setCancelling(true)} title="Admin only — removes this auction entirely"
-            style={{ background: "transparent", border: "none", cursor: "pointer", color: C.muted, fontSize: 11, textDecoration: "underline" }}>
-            Cancel this auction (admin)
-          </button>
-        ) : (
-          <div className="flex items-center gap-2 flex-wrap">
-            <TextInput placeholder="Reason (optional)" value={cancelReason} onChange={(e) => setCancelReason(e.target.value)} style={{ width: 180 }} />
-            <TextInput type="password" placeholder="Admin PIN" value={cancelPin} onChange={(e) => setCancelPin(e.target.value)} style={{ width: 120 }} />
-            <Btn size="sm" variant="danger" onClick={confirmCancel}>Confirm cancel</Btn>
-            <Btn size="sm" variant="outline" onClick={() => { setCancelling(false); setCancelPin(""); setCancelReason(""); setCancelErr(""); }}>Back</Btn>
-            {cancelErr && <span style={{ color: C.red, fontSize: 11.5 }}>{cancelErr}</span>}
-          </div>
-        )}
+        <AdminGate adminPin={adminPin} adminViewUnlocked={adminViewUnlocked} setAdminViewUnlocked={setAdminViewUnlocked}>
+          {!cancelling ? (
+            <button onClick={() => setCancelling(true)} title="Removes this auction entirely"
+              style={{ background: "transparent", border: "none", cursor: "pointer", color: C.muted, fontSize: 11, textDecoration: "underline" }}>
+              Cancel this auction
+            </button>
+          ) : (
+            <div className="flex items-center gap-2 flex-wrap">
+              <TextInput placeholder="Reason (optional)" value={cancelReason} onChange={(e) => setCancelReason(e.target.value)} style={{ width: 180 }} />
+              <Btn size="sm" variant="danger" onClick={confirmCancel}>Confirm cancel</Btn>
+              <Btn size="sm" variant="outline" onClick={() => { setCancelling(false); setCancelReason(""); setCancelErr(""); }}>Back</Btn>
+              {cancelErr && <span style={{ color: C.red, fontSize: 11.5 }}>{cancelErr}</span>}
+            </div>
+          )}
+        </AdminGate>
       </div>
 
       {auction.history.length > 0 && (
         <div style={{ marginTop: 12, paddingTop: 10, borderTop: `1px solid ${C.border}` }}>
-          <div style={{ color: C.muted, fontSize: 11, marginBottom: 6 }}>Bid history (admin can remove a mistaken bid):</div>
-          <div className="grid gap-1">
-            {auction.history.map((h) => (
-              <div key={h.id} className="flex items-center justify-between" style={{ fontSize: 11.5, color: C.muted }}>
-                <span>{teams.find((t) => t.id === h.team)?.name} — {money(h.amount)}</span>
-                <button onClick={() => { setDeletingBidId(h.id); setDeletePin(""); setDeleteErr(""); }}
-                  title="Remove this bid (admin)" style={{ background: "transparent", border: "none", cursor: "pointer", color: C.red }}>
-                  <Trash2 size={12} />
-                </button>
-              </div>
-            ))}
-          </div>
-          {deletingBidId && (
-            <div className="flex items-end gap-2 flex-wrap" style={{ marginTop: 8, background: C.panel, borderRadius: 8, padding: 10 }}>
-              <Field label="Admin PIN to remove this bid">
-                <TextInput type="password" value={deletePin} onChange={(e) => setDeletePin(e.target.value)} style={{ width: 140 }} />
-              </Field>
-              <Btn variant="danger" size="sm" onClick={confirmDeleteBid}>Remove bid</Btn>
-              <Btn variant="outline" size="sm" onClick={() => setDeletingBidId(null)}>Cancel</Btn>
-              {deleteErr && <span style={{ color: C.red, fontSize: 11.5 }}>{deleteErr}</span>}
+          <AdminGate adminPin={adminPin} adminViewUnlocked={adminViewUnlocked} setAdminViewUnlocked={setAdminViewUnlocked}>
+            <div style={{ color: C.muted, fontSize: 11, marginBottom: 6 }}>Bid history (remove a mistaken bid):</div>
+            <div className="grid gap-1">
+              {auction.history.map((h) => (
+                <div key={h.id} className="flex items-center justify-between" style={{ fontSize: 11.5, color: C.muted }}>
+                  <span>{teams.find((t) => t.id === h.team)?.name} — {money(h.amount)}</span>
+                  <button onClick={() => { setDeletingBidId(h.id); setDeleteErr(""); }}
+                    title="Remove this bid" style={{ background: "transparent", border: "none", cursor: "pointer", color: C.red }}>
+                    <Trash2 size={12} />
+                  </button>
+                </div>
+              ))}
             </div>
-          )}
+            {deletingBidId && (
+              <div className="flex items-end gap-2 flex-wrap" style={{ marginTop: 8, background: C.panel, borderRadius: 8, padding: 10 }}>
+                <Btn variant="danger" size="sm" onClick={confirmDeleteBid}>Remove bid</Btn>
+                <Btn variant="outline" size="sm" onClick={() => setDeletingBidId(null)}>Cancel</Btn>
+                {deleteErr && <span style={{ color: C.red, fontSize: 11.5 }}>{deleteErr}</span>}
+              </div>
+            )}
+          </AdminGate>
         </div>
       )}
     </div>
@@ -6082,8 +6138,7 @@ function TransferWindowBanner({ transferWindow, transferWindowOpen, nowTick }) {
 
 const DRAFT_SLOTS_UI = 21;
 
-function DraftTab({ teams, squads, squadStats, myTeamId, playerDatabase, draftState, draftPicks, draftSubmitted, updateDraftPick, submitDraft, validateDraft, openDraft, resolveDraft, blindBids, submitBlindBid, resolveBlindBidNow, budgetStats }) {
-  const [pin, setPin] = useState("");
+function DraftTab({ teams, squads, squadStats, myTeamId, playerDatabase, draftState, draftPicks, draftSubmitted, updateDraftPick, submitDraft, validateDraft, openDraft, resolveDraft, blindBids, submitBlindBid, resolveBlindBidNow, budgetStats, adminPin, adminViewUnlocked, setAdminViewUnlocked }) {
   const [msg, setMsg] = useState(null);
   const [now, setNow] = useState(Date.now());
 
@@ -6132,7 +6187,6 @@ function DraftTab({ teams, squads, squadStats, myTeamId, playerDatabase, draftSt
 
   const liveError = myTeamId && !submitted ? validateDraft(myTeamId) : null;
   const [bidAmounts, setBidAmounts] = useState({}); // blindBidId -> typed amount, kept local until submitted
-  const [bbPin, setBbPin] = useState({}); // blindBidId -> admin pin, for the force-resolve override
   const [submittingBid, setSubmittingBid] = useState(null); // blindBidId currently being submitted
   const [resolving, setResolving] = useState(false);
 
@@ -6141,16 +6195,14 @@ function DraftTab({ teams, squads, squadStats, myTeamId, playerDatabase, draftSt
     setMsg(err ? { text: err, tone: "red" } : { text: "Draft submitted — sit tight for the others (or the deadline).", tone: "green" });
   };
   const doOpen = () => {
-    const err = openDraft(pin);
-    setPin("");
+    const err = openDraft(adminPin);
     setMsg(err ? { text: err, tone: "red" } : { text: "Draft opened — 7 days on the clock.", tone: "green" });
   };
   const doResolve = async () => {
     if (resolving) return;
     if (!window.confirm("Resolve the draft now? Uncontested picks sign instantly, and anyone with a conflict goes to a blind bid. This can't be undone.")) return;
     setResolving(true);
-    const err = await resolveDraft(pin);
-    setPin("");
+    const err = await resolveDraft(adminPin);
     setMsg(err ? { text: err, tone: "red" } : { text: "Draft resolved — check below for any blind bids that need a bid from you.", tone: "green" });
     setResolving(false);
   };
@@ -6165,8 +6217,7 @@ function DraftTab({ teams, squads, squadStats, myTeamId, playerDatabase, draftSt
   };
   const doForceResolve = async (bbId) => {
     if (!window.confirm("Resolve this blind bid now using whichever bids have come in? Anyone who hasn't bid yet is simply left out.")) return;
-    const err = await resolveBlindBidNow(bbPin[bbId], bbId);
-    setBbPin((all) => ({ ...all, [bbId]: "" }));
+    const err = await resolveBlindBidNow(adminPin, bbId);
     setMsg(err ? { text: err, tone: "red" } : { text: "Blind bid resolved.", tone: "green" });
   };
 
@@ -6191,15 +6242,16 @@ function DraftTab({ teams, squads, squadStats, myTeamId, playerDatabase, draftSt
 
         <div style={{ background: C.panelAlt, borderRadius: 8, padding: 12 }}>
           <div style={{ color: C.gold, fontWeight: 700, fontSize: 12.5, marginBottom: 8 }}>Admin</div>
-          <div className="flex items-end gap-2 flex-wrap">
-            <Field label="Admin PIN"><TextInput type="password" value={pin} onChange={(e) => setPin(e.target.value)} style={{ width: 130 }} /></Field>
-            {draftState.status !== "open" ? (
-              <Btn onClick={doOpen}>Open New Draft (7 days)</Btn>
-            ) : (
-              <Btn variant="danger" onClick={doResolve} disabled={resolving}>{resolving ? "Resolving…" : "Resolve Draft Now"}</Btn>
-            )}
-          </div>
-          {msg && <div style={{ color: msg.tone === "green" ? C.green : C.red, fontSize: 12, marginTop: 8 }}>{msg.text}</div>}
+          <AdminGate adminPin={adminPin} adminViewUnlocked={adminViewUnlocked} setAdminViewUnlocked={setAdminViewUnlocked}>
+            <div className="flex items-end gap-2 flex-wrap">
+              {draftState.status !== "open" ? (
+                <Btn onClick={doOpen}>Open New Draft (7 days)</Btn>
+              ) : (
+                <Btn variant="danger" onClick={doResolve} disabled={resolving}>{resolving ? "Resolving…" : "Resolve Draft Now"}</Btn>
+              )}
+            </div>
+            {msg && <div style={{ color: msg.tone === "green" ? C.green : C.red, fontSize: 12, marginTop: 8 }}>{msg.text}</div>}
+          </AdminGate>
         </div>
       </Panel>
 
@@ -6329,11 +6381,10 @@ function DraftTab({ teams, squads, squadStats, myTeamId, playerDatabase, draftSt
                     <div style={{ color: C.muted, fontSize: 11.5, marginTop: 8, fontStyle: "italic" }}>You're not one of the teams involved in this one.</div>
                   )}
                   {!bb.resolved && (
-                    <div className="flex items-end gap-2 flex-wrap" style={{ marginTop: 10, paddingTop: 10, borderTop: `1px solid ${C.border}` }}>
-                      <Field label="Admin PIN (force resolve)">
-                        <TextInput type="password" value={bbPin[bb.id] || ""} onChange={(e) => setBbPin((all) => ({ ...all, [bb.id]: e.target.value }))} style={{ width: 130 }} />
-                      </Field>
-                      <Btn size="sm" variant="outline" onClick={() => doForceResolve(bb.id)}>Force Resolve Now</Btn>
+                    <div style={{ marginTop: 10, paddingTop: 10, borderTop: `1px solid ${C.border}` }}>
+                      <AdminGate adminPin={adminPin} adminViewUnlocked={adminViewUnlocked} setAdminViewUnlocked={setAdminViewUnlocked}>
+                        <Btn size="sm" variant="outline" onClick={() => doForceResolve(bb.id)}>Force Resolve Now</Btn>
+                      </AdminGate>
                     </div>
                   )}
                 </div>
@@ -6346,14 +6397,12 @@ function DraftTab({ teams, squads, squadStats, myTeamId, playerDatabase, draftSt
   );
 }
 
-function TransfersTab({ teams, squads, transfers, logTransfer, logAdminReward, setTransfers, auctions, createAuction, placeBid, finalizeAuction, respondToAuction, deleteBid, cancelAuction, deleteTransfer, editAuctionPlayerName, nowTick, myTeamId, playerDatabase, squadStats, transferListings, wantedListings, addTransferListing, removeTransferListing, addWantedListing, removeWantedListing, sendMarketMessage, transferWindow, transferWindowOpen, season, swapOffers, offerSwap, respondToSwapOffer, hasUsedSwapThisWindow }) {
+function TransfersTab({ teams, squads, transfers, logTransfer, logAdminReward, setTransfers, auctions, createAuction, placeBid, finalizeAuction, respondToAuction, deleteBid, cancelAuction, deleteTransfer, editAuctionPlayerName, nowTick, myTeamId, playerDatabase, squadStats, transferListings, wantedListings, addTransferListing, removeTransferListing, addWantedListing, removeWantedListing, sendMarketMessage, transferWindow, transferWindowOpen, season, swapOffers, offerSwap, respondToSwapOffer, hasUsedSwapThisWindow, adminPin, adminViewUnlocked, setAdminViewUnlocked }) {
   const [deletingId, setDeletingId] = useState(null);
-  const [deletePin, setDeletePin] = useState("");
   const [deleteErr, setDeleteErr] = useState("");
 
   const confirmDelete = () => {
-    const err = deleteTransfer(deletePin, deletingId);
-    setDeletePin("");
+    const err = deleteTransfer(adminPin, deletingId);
     if (err) setDeleteErr(err);
     else { setDeletingId(null); setDeleteErr(""); }
   };
@@ -6365,7 +6414,7 @@ function TransfersTab({ teams, squads, transfers, logTransfer, logAdminReward, s
       <AuctionsPanel teams={teams} squads={squads} auctions={auctions} createAuction={createAuction}
         placeBid={placeBid} finalizeAuction={finalizeAuction} respondToAuction={respondToAuction}
         deleteBid={deleteBid} cancelAuction={cancelAuction} editAuctionPlayerName={editAuctionPlayerName} myTeamId={myTeamId}
-        playerDatabase={playerDatabase} squadStats={squadStats} />
+        playerDatabase={playerDatabase} squadStats={squadStats} adminPin={adminPin} adminViewUnlocked={adminViewUnlocked} setAdminViewUnlocked={setAdminViewUnlocked} />
 
       <PlayerMarket teams={teams} squads={squads} myTeamId={myTeamId}
         transferListings={transferListings} wantedListings={wantedListings}
@@ -6375,18 +6424,23 @@ function TransfersTab({ teams, squads, transfers, logTransfer, logAdminReward, s
         offerSwap={offerSwap} respondToSwapOffer={respondToSwapOffer} hasUsedSwapThisWindow={hasUsedSwapThisWindow} />
 
       <Panel style={{ padding: 18 }}>
-        <SectionTitle icon={Repeat}>Transfer History</SectionTitle>
+        <div className="flex items-center justify-between flex-wrap gap-2" style={{ marginBottom: 4 }}>
+          <SectionTitle icon={Repeat}>Transfer History</SectionTitle>
+          <AdminGate adminPin={adminPin} adminViewUnlocked={adminViewUnlocked} setAdminViewUnlocked={setAdminViewUnlocked}>
+            <span />
+          </AdminGate>
+        </div>
         <div style={{ color: C.muted, fontSize: 11.5, marginBottom: 12, lineHeight: 1.6 }}>
           Every deal is ratified in two stages: the selling side is settled after 12 hours (budget credited, player
           leaves their squad); the buying side — the actual signing, squad placement, budget hit and tax — only
-          becomes official after the full 24 hours. Deleting a record requires the admin PIN.
+          becomes official after the full 24 hours.
         </div>
         <Table
           dense
-          head={["Date", "Player", "From", "To", "Bid", "Tax", "Final Cost", "Status", ""]}
+          head={adminViewUnlocked ? ["Date", "Player", "From", "To", "Bid", "Tax", "Final Cost", "Status", ""] : ["Date", "Player", "From", "To", "Bid", "Tax", "Final Cost", "Status"]}
           rows={transfers.map((tx) => {
             const st = transferStatus(tx, nowTick);
-            return [
+            const row = [
               tx.date, tx.player,
               tx.from === "FA" ? "Non OCM" : tx.from === "AUCTION_LOSS" ? "— (losing bid)" : teams.find((t) => t.id === tx.from)?.name || tx.from,
               tx.to === "FA" ? "Non OCM" : teams.find((t) => t.id === tx.to)?.name || tx.to,
@@ -6398,17 +6452,19 @@ function TransfersTab({ teams, squads, transfers, logTransfer, logAdminReward, s
               ) : (
                 <Pill tone={st.tone}>{st.label}</Pill>
               ),
-              <button onClick={() => { setDeletingId(tx.id); setDeletePin(""); setDeleteErr(""); }} style={{ background: "transparent", border: "none", cursor: "pointer", color: C.red }}>
-                <Trash2 size={14} />
-              </button>,
             ];
+            if (adminViewUnlocked) {
+              row.push(
+                <button onClick={() => { setDeletingId(tx.id); setDeleteErr(""); }} style={{ background: "transparent", border: "none", cursor: "pointer", color: C.red }}>
+                  <Trash2 size={14} />
+                </button>
+              );
+            }
+            return row;
           })}
         />
         {deletingId && (
           <div className="flex items-center gap-2 flex-wrap" style={{ marginTop: 12, background: C.panelAlt, borderRadius: 8, padding: 10 }}>
-            <Field label="Admin PIN to delete this record">
-              <TextInput type="password" value={deletePin} onChange={(e) => setDeletePin(e.target.value)} style={{ width: 140 }} />
-            </Field>
             <Btn variant="danger" size="sm" onClick={confirmDelete}>Delete</Btn>
             <Btn variant="outline" size="sm" onClick={() => setDeletingId(null)}>Cancel</Btn>
             {deleteErr && <span style={{ color: C.red, fontSize: 11.5 }}>{deleteErr}</span>}
@@ -6916,15 +6972,13 @@ function FormDots({ results }) {
   );
 }
 
-function CupTab({ teams, fixtures, cupState, adminPin, openCup, resolveCupGroupStage, resolveCupSemis, resolveCupFinal, cupGroupTable }) {
+function CupTab({ teams, fixtures, cupState, adminPin, openCup, resolveCupGroupStage, resolveCupSemis, resolveCupFinal, cupGroupTable, adminViewUnlocked, setAdminViewUnlocked }) {
   const teamById = useMemo(() => Object.fromEntries(teams.map((t) => [t.id, t])), [teams]);
-  const [pin, setPin] = useState("");
   const [msg, setMsg] = useState(null);
   const teamName = (id) => teamById[id]?.name || id;
 
   const runAction = (fn, successText) => {
-    const err = fn(pin);
-    setPin("");
+    const err = fn(adminPin);
     setMsg(err ? { text: err, tone: "red" } : { text: successText, tone: "green" });
   };
 
@@ -6977,13 +7031,10 @@ function CupTab({ teams, fixtures, cupState, adminPin, openCup, resolveCupGroupS
             semi-finals (cross-group), then a single-match final. Winner gets £{CUP_WINNER_BUDGET}M + £{CUP_WINNER_WAGE * 1000}k
             wage cap, runner-up gets £{CUP_RUNNERUP_BUDGET}M + £{CUP_RUNNERUP_WAGE * 1000}k wage cap.
           </div>
-          <div className="flex items-end gap-2 flex-wrap">
-            <Field label="Admin PIN">
-              <TextInput type="password" value={pin} onChange={(e) => setPin(e.target.value)} style={{ width: 130 }} />
-            </Field>
+          <AdminGate adminPin={adminPin} adminViewUnlocked={adminViewUnlocked} setAdminViewUnlocked={setAdminViewUnlocked}>
             <Btn onClick={() => runAction(openCup, "Cup opened — groups drawn.")}>Open Cup</Btn>
-          </div>
-          {msg && <div style={{ color: msg.tone === "green" ? C.green : C.red, fontSize: 12, marginTop: 8 }}>{msg.text}</div>}
+            {msg && <div style={{ color: msg.tone === "green" ? C.green : C.red, fontSize: 12, marginTop: 8 }}>{msg.text}</div>}
+          </AdminGate>
         </div>
       )}
 
@@ -7005,13 +7056,10 @@ function CupTab({ teams, fixtures, cupState, adminPin, openCup, resolveCupGroupS
             })}
           </div>
           <div style={{ color: C.muted, fontSize: 11.5, marginBottom: 14 }}>Top 2 in green qualify for the semi-finals.</div>
-          <div className="flex items-end gap-2 flex-wrap">
-            <Field label="Admin PIN">
-              <TextInput type="password" value={pin} onChange={(e) => setPin(e.target.value)} style={{ width: 130 }} />
-            </Field>
+          <AdminGate adminPin={adminPin} adminViewUnlocked={adminViewUnlocked} setAdminViewUnlocked={setAdminViewUnlocked}>
             <Btn onClick={() => runAction(resolveCupGroupStage, "Group stage resolved — semi-finals generated.")}>Resolve Group Stage</Btn>
-          </div>
-          {msg && <div style={{ color: msg.tone === "green" ? C.green : C.red, fontSize: 12, marginTop: 8 }}>{msg.text}</div>}
+            {msg && <div style={{ color: msg.tone === "green" ? C.green : C.red, fontSize: 12, marginTop: 8 }}>{msg.text}</div>}
+          </AdminGate>
         </div>
       )}
 
@@ -7019,13 +7067,12 @@ function CupTab({ teams, fixtures, cupState, adminPin, openCup, resolveCupGroupS
         <div>
           {renderTie("semi1", "Semi-Final 1")}
           {renderTie("semi2", "Semi-Final 2")}
-          <div className="flex items-end gap-2 flex-wrap" style={{ marginTop: 8 }}>
-            <Field label="Admin PIN">
-              <TextInput type="password" value={pin} onChange={(e) => setPin(e.target.value)} style={{ width: 130 }} />
-            </Field>
-            <Btn onClick={() => runAction(resolveCupSemis, "Semi-finals resolved — the final is set.")}>Resolve Semi-Finals</Btn>
+          <div style={{ marginTop: 8 }}>
+            <AdminGate adminPin={adminPin} adminViewUnlocked={adminViewUnlocked} setAdminViewUnlocked={setAdminViewUnlocked}>
+              <Btn onClick={() => runAction(resolveCupSemis, "Semi-finals resolved — the final is set.")}>Resolve Semi-Finals</Btn>
+              {msg && <div style={{ color: msg.tone === "green" ? C.green : C.red, fontSize: 12, marginTop: 8 }}>{msg.text}</div>}
+            </AdminGate>
           </div>
-          {msg && <div style={{ color: msg.tone === "green" ? C.green : C.red, fontSize: 12, marginTop: 8 }}>{msg.text}</div>}
         </div>
       )}
 
@@ -7033,13 +7080,12 @@ function CupTab({ teams, fixtures, cupState, adminPin, openCup, resolveCupGroupS
         <div>
           <div style={{ color: C.gold, fontWeight: 700, fontSize: 13, marginBottom: 6 }}>Final</div>
           {renderScoreLine(finalFixture)}
-          <div className="flex items-end gap-2 flex-wrap" style={{ marginTop: 14 }}>
-            <Field label="Admin PIN">
-              <TextInput type="password" value={pin} onChange={(e) => setPin(e.target.value)} style={{ width: 130 }} />
-            </Field>
-            <Btn onClick={() => runAction(resolveCupFinal, "Final resolved — prizes awarded.")}>Resolve Final</Btn>
+          <div style={{ marginTop: 14 }}>
+            <AdminGate adminPin={adminPin} adminViewUnlocked={adminViewUnlocked} setAdminViewUnlocked={setAdminViewUnlocked}>
+              <Btn onClick={() => runAction(resolveCupFinal, "Final resolved — prizes awarded.")}>Resolve Final</Btn>
+              {msg && <div style={{ color: msg.tone === "green" ? C.green : C.red, fontSize: 12, marginTop: 8 }}>{msg.text}</div>}
+            </AdminGate>
           </div>
-          {msg && <div style={{ color: msg.tone === "green" ? C.green : C.red, fontSize: 12, marginTop: 8 }}>{msg.text}</div>}
         </div>
       )}
 
@@ -7052,13 +7098,10 @@ function CupTab({ teams, fixtures, cupState, adminPin, openCup, resolveCupGroupS
             <div style={{ marginTop: 14, color: C.text, fontSize: 13.5 }}>Runner-up: {teamName(cupState.runnerUp)}</div>
             <div style={{ color: C.muted, fontSize: 12.5 }}>£{CUP_RUNNERUP_BUDGET}M + £{CUP_RUNNERUP_WAGE * 1000}k wage cap</div>
           </div>
-          <div className="flex items-end gap-2 flex-wrap">
-            <Field label="Admin PIN">
-              <TextInput type="password" value={pin} onChange={(e) => setPin(e.target.value)} style={{ width: 130 }} />
-            </Field>
+          <AdminGate adminPin={adminPin} adminViewUnlocked={adminViewUnlocked} setAdminViewUnlocked={setAdminViewUnlocked}>
             <Btn onClick={() => runAction(openCup, "New cup opened — groups drawn.")}>Start a New Cup</Btn>
-          </div>
-          {msg && <div style={{ color: msg.tone === "green" ? C.green : C.red, fontSize: 12, marginTop: 8 }}>{msg.text}</div>}
+            {msg && <div style={{ color: msg.tone === "green" ? C.green : C.red, fontSize: 12, marginTop: 8 }}>{msg.text}</div>}
+          </AdminGate>
         </div>
       )}
     </Panel>
@@ -7578,29 +7621,19 @@ function ScoutingTab({ playerDatabase, openPlayerStats }) {
   );
 }
 
-function PlayerDatabaseTab({ teams, squads, playerDatabase, openPlayerStats, refreshPlayerDatabase, adminPin, importPlayerDatabase, deletePlayerFromDatabase, deleteMultiplePlayersFromDatabase }) {
+function PlayerDatabaseTab({ teams, squads, playerDatabase, openPlayerStats, refreshPlayerDatabase, adminPin, importPlayerDatabase, deletePlayerFromDatabase, deleteMultiplePlayersFromDatabase, adminViewUnlocked, setAdminViewUnlocked }) {
   const [query, setQuery] = useState("");
   const [sortKey, setSortKey] = useState("rating");
   const [sortDir, setSortDir] = useState(-1);
   const [refreshing, setRefreshing] = useState(false);
   const [missingOnly, setMissingOnly] = useState(false);
   const [duplicatesOnly, setDuplicatesOnly] = useState(false);
-  const [adminUnlocked, setAdminUnlocked] = useState(false);
-  const [unlockPin, setUnlockPin] = useState("");
-  const [unlockError, setUnlockError] = useState(null);
   const [editValues, setEditValues] = useState({}); // rowKey -> { value, wage }
   const [rowMsg, setRowMsg] = useState({}); // rowKey -> { text, tone }
   const [selected, setSelected] = useState(() => new Set()); // Set of rowKeys currently ticked
   const [bulkMsg, setBulkMsg] = useState(null);
 
   const rowKeyOf = (p) => `${p.name}::${p.position}::${p.club || ""}`;
-
-  const doUnlock = () => {
-    if (unlockPin !== adminPin) { setUnlockError("Incorrect PIN."); return; }
-    setAdminUnlocked(true);
-    setUnlockError(null);
-    setUnlockPin("");
-  };
 
   const doSaveEdit = (p) => {
     const key = rowKeyOf(p);
@@ -7739,7 +7772,7 @@ function PlayerDatabaseTab({ teams, squads, playerDatabase, openPlayerStats, ref
     { key: "value", label: "Value" },
     { key: "wage", label: "Wage (£k)" },
   ];
-  const tableColumns = adminUnlocked ? [...columns, { key: "actions", label: "Admin" }] : columns;
+  const tableColumns = adminViewUnlocked ? [...columns, { key: "actions", label: "Admin" }] : columns;
 
   return (
     <Panel style={{ padding: 18 }}>
@@ -7783,29 +7816,19 @@ function PlayerDatabaseTab({ teams, squads, playerDatabase, openPlayerStats, ref
       )}
 
       <div style={{ background: C.panelAlt, borderRadius: 8, padding: 12, marginBottom: 14 }}>
-        {adminUnlocked ? (
-          <div>
-            <div className="flex items-center gap-2" style={{ color: C.green, fontSize: 12.5, marginBottom: 10 }}>
-              <CheckCircle2 size={14} /> Admin editing unlocked — you can now edit values/wages and delete players directly below.
-            </div>
-            <div className="flex items-center gap-2 flex-wrap">
-              <Btn size="sm" variant="outline" onClick={doSelectAllOnPage}>Select All (this view)</Btn>
-              <Btn size="sm" variant="outline" onClick={doDeselectAllOnPage}>Deselect All</Btn>
-              <Btn size="sm" variant="danger" onClick={doDeleteSelected} disabled={selected.size === 0}>
-                Delete Selected ({selected.size})
-              </Btn>
-              {bulkMsg && <div style={{ color: bulkMsg.tone === "green" ? C.green : C.red, fontSize: 12 }}>{bulkMsg.text}</div>}
-            </div>
+        <AdminGate adminPin={adminPin} adminViewUnlocked={adminViewUnlocked} setAdminViewUnlocked={setAdminViewUnlocked}>
+          <div className="flex items-center gap-2" style={{ color: C.green, fontSize: 12.5, marginBottom: 10 }}>
+            <CheckCircle2 size={14} /> Admin editing unlocked — you can now edit values/wages and delete players directly below.
           </div>
-        ) : (
-          <div className="flex items-end gap-2 flex-wrap">
-            <Field label="Admin PIN (to edit or delete players directly on this page)">
-              <TextInput type="password" value={unlockPin} onChange={(e) => setUnlockPin(e.target.value)} style={{ width: 160 }} />
-            </Field>
-            <Btn size="sm" onClick={doUnlock}>Unlock Editing</Btn>
-            {unlockError && <div style={{ color: C.red, fontSize: 12 }}>{unlockError}</div>}
+          <div className="flex items-center gap-2 flex-wrap">
+            <Btn size="sm" variant="outline" onClick={doSelectAllOnPage}>Select All (this view)</Btn>
+            <Btn size="sm" variant="outline" onClick={doDeselectAllOnPage}>Deselect All</Btn>
+            <Btn size="sm" variant="danger" onClick={doDeleteSelected} disabled={selected.size === 0}>
+              Delete Selected ({selected.size})
+            </Btn>
+            {bulkMsg && <div style={{ color: bulkMsg.tone === "green" ? C.green : C.red, fontSize: 12 }}>{bulkMsg.text}</div>}
           </div>
-        )}
+        </AdminGate>
       </div>
 
       <div style={{ overflowX: "auto", marginTop: 14 }}>
@@ -7851,20 +7874,20 @@ function PlayerDatabaseTab({ teams, squads, playerDatabase, openPlayerStats, ref
                 </td>
                 <td style={{ padding: "6px 8px", borderBottom: `1px solid ${C.border}33`, textAlign: "center", color: C.text }}>{p.age}</td>
                 <td style={{ padding: "6px 8px", borderBottom: `1px solid ${C.border}33`, textAlign: "center", color: !p.value ? C.red : C.text }}>
-                  {adminUnlocked ? (
+                  {adminViewUnlocked ? (
                     <TextInput type="number" step="0.25" value={edit.value}
                       onChange={(e) => setEditValues((all) => ({ ...all, [key]: { ...edit, value: e.target.value } }))}
                       style={{ width: 70, textAlign: "center" }} />
                   ) : (p.value ? money(p.value) : "Missing")}
                 </td>
                 <td style={{ padding: "6px 8px", borderBottom: `1px solid ${C.border}33`, textAlign: "center", color: !p.wage ? C.red : C.text }}>
-                  {adminUnlocked ? (
+                  {adminViewUnlocked ? (
                     <TextInput type="number" value={edit.wage}
                       onChange={(e) => setEditValues((all) => ({ ...all, [key]: { ...edit, wage: e.target.value } }))}
                       style={{ width: 70, textAlign: "center" }} />
                   ) : (p.wage ? moneyK(p.wage) : "Missing")}
                 </td>
-                {adminUnlocked && (
+                {adminViewUnlocked && (
                   <td style={{ padding: "6px 8px", borderBottom: `1px solid ${C.border}33`, textAlign: "center" }}>
                     <div className="flex items-center justify-center gap-1.5">
                       <input type="checkbox" checked={selected.has(key)} onChange={() => toggleRowSelected(p)} title="Select for bulk delete" />
