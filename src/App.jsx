@@ -2269,9 +2269,21 @@ export default function EafcLeagueApp() {
       const committedBlindBidSpend = activeBlindBids.reduce((s, bb) => s + Number(bb.bids[t.id] || 0), 0);
       const committedBlindBidWage = activeBlindBids.reduce((s, bb) => s + Number(bb.player?.wage || 0), 0) / 1000;
 
-      const current = t.budget + received - spent - tax - committedSpend - committedTax - committedBlindBidSpend;
+      // A won auction (or any other purchase) stops counting as "committed" the moment it closes,
+      // but doesn't count as "spent" until it actually ratifies up to 24h later — without this, that
+      // gap made the cost briefly invisible to the budget check entirely, letting a team rack up
+      // other commitments in the meantime that only turned out to be over budget once everything
+      // settled. This picks up exactly that window: purchases already logged but not yet ratified.
+      const pendingUnratifiedPurchases = activeTransfers.filter(
+        (tx) => tx.to === t.id && tx.from !== t.id && !tx.buyerAlreadyPaidDirectly && !tx.instant && nowTick - (tx.createdAt || 0) < BUYER_RATIFY_MS
+      );
+      const pendingSpend = pendingUnratifiedPurchases.reduce((s, tx) => s + Number(tx.price || 0), 0);
+      const pendingTax = pendingUnratifiedPurchases.reduce((s, tx) => s + Number(tx.tax || 0), 0);
+      const pendingWage = pendingUnratifiedPurchases.reduce((s, tx) => s + Number(tx.wage || 0), 0) / 1000;
+
+      const current = t.budget + received - spent - tax - committedSpend - committedTax - committedBlindBidSpend - pendingSpend - pendingTax;
       const wages = (squadStats[t.id] && squadStats[t.id].wageM) || 0;
-      const wagesWithCommitted = wages + committedWage + committedBlindBidWage;
+      const wagesWithCommitted = wages + committedWage + committedBlindBidWage + pendingWage;
       out[t.id] = {
         spent, tax, received, current, wages,
         committedSpend, committedTax, committedWage, wagesWithCommitted,
