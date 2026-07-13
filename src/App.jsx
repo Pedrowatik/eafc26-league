@@ -2287,6 +2287,14 @@ export default function EafcLeagueApp() {
           // Tax-only auction-loss charges have no player to place — just mark them ratified.
           if (tx.from === "AUCTION_LOSS") { txChanged = true; return { ...tx, buyerProcessed: true }; }
           const team = nextSquads[tx.to];
+          // Already there? (e.g. placed manually as a workaround while this was stuck) - don't add
+          // a second copy, but still mark it ratified so the tax collects and it stops sitting
+          // here as "unresolved" forever.
+          const alreadyInSquad = team && (
+            team.starters.some((p) => p && p.name === tx.player) ||
+            team.reserves.some((p) => p && p.name === tx.player)
+          );
+          if (alreadyInSquad) { txChanged = true; return { ...tx, buyerProcessed: true }; }
           const si = team.starters.findIndex((p, i) => !p && i !== CAPTAIN_SLOT_INDEX);
           const group = si !== -1 ? "starters" : null;
           const ri = group ? -1 : team.reserves.findIndex((p) => !p);
