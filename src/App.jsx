@@ -2231,9 +2231,12 @@ export default function EafcLeagueApp() {
   const transfersRef = useRef(transfers);
   const squadsRef = useRef(squads);
   const teamByIdRef = useRef(teamById);
+  const auctionsRef = useRef(auctions);
+  const finalizeAuctionRef = useRef(null); // set once finalizeAuction itself is defined, further down
   useEffect(() => { transfersRef.current = transfers; }, [transfers]);
   useEffect(() => { squadsRef.current = squads; }, [squads]);
   useEffect(() => { teamByIdRef.current = teamById; }, [teamById]);
+  useEffect(() => { auctionsRef.current = auctions; }, [auctions]);
 
   useEffect(() => {
     // Deliberately an empty dependency array - this interval must be set up once and persist for
@@ -2306,6 +2309,22 @@ export default function EafcLeagueApp() {
       if (squadsChanged) setSquads(nextSquads);
       if (txChanged) setTransfers(finalTx);
     }, 15000); // check every 15s — plenty for a 12h/24h window
+    return () => clearInterval(t);
+  }, []);
+
+  // Auto-finalizes any auction whose deadline has passed, without needing anyone to remember to
+  // click Finalize manually - the 24h bidding window itself is the only clock that should matter;
+  // once it's up (and nobody's outbid to reset it), the deal should just go through on its own.
+  // Same empty-dependency-array + refs pattern as the ratification interval above, for the same
+  // reason: this must not restart every time unrelated state (teams, auctions themselves) changes.
+  useEffect(() => {
+    const t = setInterval(() => {
+      const nowMs = Date.now();
+      const expiredOpenAuctions = auctionsRef.current.filter((a) => a.status === "open" && nowMs >= a.deadline);
+      expiredOpenAuctions.forEach((a) => {
+        if (finalizeAuctionRef.current) finalizeAuctionRef.current(a.id);
+      });
+    }, 15000);
     return () => clearInterval(t);
   }, []);
 
@@ -2893,14 +2912,17 @@ export default function EafcLeagueApp() {
         notes: `Won auction for ${auction.player.name}`,
       }, { instant: true, sellerAlreadyPaidDirectly: true });
     } else {
-      // Single-bidder auction — unchanged, normal staggered ratification (seller credited in 12h,
-      // buyer's signing ratified in 24h).
+      // Single-bidder auction. The auction's own 24h window has already fully run its course by
+      // the time this is even callable (finalizeAuction refuses otherwise) - there's no reason to
+      // then make the buyer wait a SECOND, separate 24h on top of that before the signing counts
+      // and the player actually moves into their squad. Settles instantly, same as the multi-bidder
+      // path above.
       logTransfer({
         date: todayISO(), from: auction.seller, to: winner, name: auction.player.name,
         position: auction.player.position, rating: auction.player.rating, club: auction.player.club,
         age: auction.player.age, wage: auction.player.wage, price: winningBid,
         notes: `Won auction for ${auction.player.name}`,
-      });
+      }, { instant: true });
     }
 
     // Every other bidder pays 10% tax (min £0.25M) on their own highest bid, no player received.
@@ -2932,6 +2954,7 @@ export default function EafcLeagueApp() {
     setAuctions((all) => all.map((a) => (a.id === auctionId ? { ...a, status: "closed", winner, winningBid } : a)));
     return null;
   };
+  finalizeAuctionRef.current = finalizeAuction; // keep pointed at the latest version every render
 
   const resetAll = async (pinAttempt) => {
     if (pinAttempt !== adminPin) return "Incorrect PIN.";
@@ -3546,6 +3569,22 @@ export default function EafcLeagueApp() {
       return { ...all, [teamId]: next };
     });
     logActivity(`Admin manually placed ${player.name} into ${teamById[teamId]?.name || teamId}'s squad (recovery from a sync issue)${matchingTransfer ? ", using the value/wage already on record from their transfer" : ""}.`, "transfer");
+    return null;
+  };
+
+
+  // For a transfer already sitting there waiting out the old staggered ratification clock (created
+  // before the auction finalize logic was fixed to settle instantly) - pushes its timestamp back far
+  // enough that the very next ratification interval tick picks it up as ready, using the existing
+  // ratification logic itself rather than duplicating the squad-placement/tax logic here.
+  const forceRatifyTransfer = (pinAttempt, transferId) => {
+    if (pinAttempt !== adminPin) return "Incorrect PIN.";
+    const tx = transfers.find((t) => t.id === transferId);
+    if (!tx) return "Transfer not found.";
+    setTransfers((all) => all.map((t) => (
+      t.id === transferId ? { ...t, createdAt: Date.now() - BUYER_RATIFY_MS - 60000 } : t
+    )));
+    logActivity(`Admin force-ratified the transfer for ${tx.player} (was stuck on the old settlement clock).`, "transfer");
     return null;
   };
 
@@ -8437,7 +8476,7 @@ function AdminTab({ teams, squads, myTeamId, playerDatabase, adminPin, logAdminR
 
       <EndSeasonTools endSeason={endSeason} season={season} seasonHistory={seasonHistory} standings={standings} teams={teams} assignSponsorships={assignSponsorships} />
 
-      <BlindBidDamageDiagnostic teams={teams} squads={squads} transfers={transfers} adminPin={adminPin} removePlayerFromSquad={removePlayerFromSquad} deleteTransfer={deleteTransfer} addPlayerToSquad={addPlayerToSquad} playerDatabase={playerDatabase} />
+      <BlindBidDamageDiagnostic teams={teams} squads={squads} transfers={transfers} adminPin={adminPin} removePlayerFromSquad={removePlayerFromSquad} deleteTransfer={deleteTransfer} addPlayerToSquad={addPlayerToSquad} playerDatabase={playerDatabase} forceRatifyTransfer={forceRatifyTransfer} />
 
       <AdminTools teams={teams} squads={squads} resetAll={resetAll} changeAdminPin={changeAdminPin}
         addFundsToTeam={addFundsToTeam} addEarned86Slot={addEarned86Slot}
@@ -9411,7 +9450,7 @@ function EndSeasonTools({ endSeason, season, seasonHistory, standings, teams, as
   );
 }
 
-function BlindBidDamageDiagnostic({ teams, squads, transfers, adminPin, removePlayerFromSquad, deleteTransfer, addPlayerToSquad, playerDatabase }) {
+function BlindBidDamageDiagnostic({ teams, squads, transfers, adminPin, removePlayerFromSquad, deleteTransfer, addPlayerToSquad, playerDatabase, forceRatifyTransfer }) {
   const teamById = useMemo(() => Object.fromEntries(teams.map((t) => [t.id, t])), [teams]);
   const [pin, setPin] = useState("");
   const [msg, setMsg] = useState(null);
@@ -9436,6 +9475,20 @@ function BlindBidDamageDiagnostic({ teams, squads, transfers, adminPin, removePl
       setAddPlayerSelected(null);
       setAddPlayerQuery("");
     }
+  };
+
+  // Transfers still waiting on the buyer side to settle - a candidate list for force-ratifying,
+  // most relevant for anything created before auctions were fixed to settle instantly.
+  const unratifiedTransfers = useMemo(
+    () => transfers.filter((tx) => !tx.buyerProcessed && !tx.cancelled && tx.from !== "AUCTION_LOSS"),
+    [transfers]
+  );
+  const [ratifyMsg, setRatifyMsg] = useState(null);
+  const doForceRatify = (transferId) => {
+    if (!window.confirm("Force this transfer to settle right now - places the player, credits the seller, and collects the tax immediately?")) return;
+    const err = forceRatifyTransfer(pin, transferId);
+    if (err) setRatifyMsg({ text: err, tone: "red" });
+    else setRatifyMsg({ text: "Transfer force-ratified — should settle within the next 15 seconds.", tone: "green" });
   };
 
   // Duplicate blind-bid transfer records: the same player won via blind bid more than once for
@@ -9528,6 +9581,25 @@ function BlindBidDamageDiagnostic({ teams, squads, transfers, adminPin, removePl
         )}
         {addMsg && <div style={{ color: addMsg.tone === "green" ? C.green : C.red, fontSize: 12, marginTop: 8 }}>{addMsg.text}</div>}
       </div>
+
+      {unratifiedTransfers.length > 0 && (
+        <div style={{ background: C.panelAlt, borderRadius: 8, padding: 12, marginBottom: 18 }}>
+          <div style={{ color: C.text, fontWeight: 700, fontSize: 13, marginBottom: 6 }}>Force Ratify a Stuck Transfer</div>
+          <div style={{ color: C.muted, fontSize: 11.5, marginBottom: 10 }}>
+            For a transfer still waiting out the old settlement clock (created before auctions were fixed to settle
+            instantly) — pushes it through immediately: places the player, credits the seller, and collects the tax.
+          </div>
+          <div style={{ display: "grid", gap: 6 }}>
+            {unratifiedTransfers.map((tx) => (
+              <div key={tx.id} className="flex items-center justify-between flex-wrap gap-2" style={{ fontSize: 11.5, color: C.muted }}>
+                <span>{tx.player} — {teamById[tx.to]?.name || tx.to} — created {new Date(tx.createdAt).toLocaleString()}</span>
+                <Btn size="sm" variant="outline" onClick={() => doForceRatify(tx.id)}>Force Ratify Now</Btn>
+              </div>
+            ))}
+          </div>
+          {ratifyMsg && <div style={{ color: ratifyMsg.tone === "green" ? C.green : C.red, fontSize: 12, marginTop: 8 }}>{ratifyMsg.text}</div>}
+        </div>
+      )}
 
       {duplicateTransfers.length === 0 && duplicateSquadSlots.length === 0 && (
         <div style={{ color: C.muted, fontSize: 12 }}>No duplicate charges or squad slots currently detected.</div>
