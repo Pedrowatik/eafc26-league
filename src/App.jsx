@@ -786,6 +786,12 @@ export default function EafcLeagueApp() {
   const knownAdminPinSavedAtRef = useRef(0);
   const knownBlindBidsSavedAtRef = useRef(0);
   const knownTransfersSavedAtRef = useRef(0);
+  // Tracks each transfer's last-synced JSON by id, so the autosave can genuinely merge instead of
+  // blindly overwriting the whole array - the comment on that autosave claimed this already
+  // happened, but the actual code never did. That gap was exactly what let a force-ratified
+  // transfer's updated createdAt get silently reverted by any other browser's stale save shortly
+  // after, which is why the tax kept disappearing back out of the pot.
+  const lastSyncedTransfersRef = useRef(new Map());
   // Snapshot of each blind bid's bids object as last synced, keyed by blind bid id — lets the
   // autosave detect exactly which records this browser actually changed locally.
   const lastSyncedBlindBidsRef = useRef(new Map());
@@ -978,10 +984,13 @@ export default function EafcLeagueApp() {
         const txRes = await storage.get(TRANSFERS_STORAGE_KEY, true);
         if (txRes && txRes.value) {
           const txData = JSON.parse(txRes.value);
-          setTransfers(txData.transfers || []);
+          const loadedTransfers = txData.transfers || [];
+          setTransfers(loadedTransfers);
           knownTransfersSavedAtRef.current = txData.savedAt || Date.now();
+          lastSyncedTransfersRef.current = new Map(loadedTransfers.map((tx) => [tx.id, JSON.stringify(tx)]));
         } else if (legacyTransfersForMigration) {
           setTransfers(legacyTransfersForMigration);
+          lastSyncedTransfersRef.current = new Map(legacyTransfersForMigration.map((tx) => [tx.id, JSON.stringify(tx)]));
         }
       } catch (e) {
         if (legacyTransfersForMigration) setTransfers(legacyTransfersForMigration);
@@ -1610,9 +1619,40 @@ export default function EafcLeagueApp() {
     transfersSavingRef.current = true;
     const t = setTimeout(async () => {
       try {
+        // Merge with whatever's actually on the server right now, rather than blindly overwriting
+        // the whole array with this browser's local copy - only transfers that genuinely changed
+        // locally (a new signing, a force-ratify, a deletion) get written over the server version;
+        // anything else - like another team's transfer this browser hasn't polled in yet - survives.
+        let serverTransfers = [];
+        try {
+          const fresh = await storage.get(TRANSFERS_STORAGE_KEY, true);
+          if (fresh && fresh.value) serverTransfers = JSON.parse(fresh.value).transfers || [];
+        } catch (e) {
+          serverTransfers = transfers;
+        }
+        const byId = new Map(serverTransfers.map((tx) => [tx.id, tx]));
+        transfers.forEach((tx) => {
+          const lastSynced = lastSyncedTransfersRef.current.get(tx.id);
+          const current = JSON.stringify(tx);
+          if (lastSynced !== current) {
+            // A deletion tombstone always wins, same reasoning as mergeTransfersById above.
+            const existing = byId.get(tx.id);
+            if ((existing && existing.deleted) || tx.deleted) {
+              byId.set(tx.id, { ...tx, deleted: true });
+            } else {
+              byId.set(tx.id, tx);
+            }
+          }
+        });
+        const merged = Array.from(byId.values()).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
         const savedAt = Date.now();
-        await storage.set(TRANSFERS_STORAGE_KEY, JSON.stringify({ transfers, savedAt }), true);
+        await storage.set(TRANSFERS_STORAGE_KEY, JSON.stringify({ transfers: merged, savedAt }), true);
         knownTransfersSavedAtRef.current = savedAt;
+        lastSyncedTransfersRef.current = new Map(merged.map((tx) => [tx.id, JSON.stringify(tx)]));
+        const mergedJSON = JSON.stringify(merged);
+        if (mergedJSON !== JSON.stringify(transfers)) {
+          setTransfers(merged);
+        }
       } catch (e) {
         // best effort
       } finally {
@@ -1630,7 +1670,11 @@ export default function EafcLeagueApp() {
         const data = JSON.parse(res.value);
         const remoteSavedAt = data.savedAt || 0;
         if (remoteSavedAt > knownTransfersSavedAtRef.current) {
-          setTransfers((local) => mergeTransfersById(local, data.transfers));
+          setTransfers((local) => {
+            const merged = mergeTransfersById(local, data.transfers);
+            lastSyncedTransfersRef.current = new Map(merged.map((tx) => [tx.id, JSON.stringify(tx)]));
+            return merged;
+          });
           knownTransfersSavedAtRef.current = remoteSavedAt;
         }
       }
@@ -1653,7 +1697,11 @@ export default function EafcLeagueApp() {
         const data = JSON.parse(row.value);
         const remoteSavedAt = data.savedAt || 0;
         if (remoteSavedAt > knownTransfersSavedAtRef.current && !transfersSavingRef.current) {
-          setTransfers((local) => mergeTransfersById(local, data.transfers));
+          setTransfers((local) => {
+            const merged = mergeTransfersById(local, data.transfers);
+            lastSyncedTransfersRef.current = new Map(merged.map((tx) => [tx.id, JSON.stringify(tx)]));
+            return merged;
+          });
           knownTransfersSavedAtRef.current = remoteSavedAt;
         }
       } catch (e) {
@@ -2819,6 +2867,7 @@ export default function EafcLeagueApp() {
       const savedAt = Date.now();
       await storage.set(TRANSFERS_STORAGE_KEY, JSON.stringify({ transfers: mergedList, savedAt }), true);
       knownTransfersSavedAtRef.current = savedAt;
+      lastSyncedTransfersRef.current = new Map(mergedList.map((tx) => [tx.id, JSON.stringify(tx)]));
     } catch (e) {
       // best effort — the autosave will still pick this up if this direct write fails
     }
