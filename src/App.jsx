@@ -778,6 +778,11 @@ export default function EafcLeagueApp() {
   const knownWantedListingsSavedAtRef = useRef(0);
   const knownTeamSavedAtRef = useRef(new Map()); // per-team: teamId -> savedAt
   const knownPlayerDbSavedAtRef = useRef(0);
+  // Tracks each player's last-synced JSON by name+position+club, so the autosave can merge instead
+  // of blindly overwriting the whole (often multi-MB, thousands-of-players) array. That blanket
+  // overwrite was exactly what let one browser's stale, smaller copy of the database silently wipe
+  // out a much richer one the moment it made even a single small edit.
+  const lastSyncedPlayerDbRef = useRef(new Map());
   const knownAdminPinSavedAtRef = useRef(0);
   const knownBlindBidsSavedAtRef = useRef(0);
   const knownTransfersSavedAtRef = useRef(0);
@@ -898,10 +903,13 @@ export default function EafcLeagueApp() {
         const pdbRes = await storage.get(PLAYERDB_STORAGE_KEY, true);
         if (pdbRes && pdbRes.value) {
           const pdbData = JSON.parse(pdbRes.value);
-          setPlayerDatabase(pdbData.players || []);
+          const loadedPlayers = pdbData.players || [];
+          setPlayerDatabase(loadedPlayers);
           knownPlayerDbSavedAtRef.current = pdbData.savedAt || Date.now();
+          lastSyncedPlayerDbRef.current = new Map(loadedPlayers.map((p) => [`${p.name}::${p.position}::${p.club || ""}`, JSON.stringify(p)]));
         } else if (legacyPlayerDbForMigration) {
           setPlayerDatabase(legacyPlayerDbForMigration);
+          lastSyncedPlayerDbRef.current = new Map(legacyPlayerDbForMigration.map((p) => [`${p.name}::${p.position}::${p.club || ""}`, JSON.stringify(p)]));
         }
       } catch (e) {
         if (legacyPlayerDbForMigration) setPlayerDatabase(legacyPlayerDbForMigration);
@@ -1329,7 +1337,7 @@ export default function EafcLeagueApp() {
   // sync) should only ever add/update players, never silently drop ones that aren't in whichever
   // snapshot happens to save last. This is what was actually causing whole clubs to vanish.
   const mergePlayersByKey = (local, incoming) => {
-    const keyOf = (p) => `${(p.name || "").toLowerCase()}::${(p.club || "").toLowerCase()}`;
+    const keyOf = (p) => `${(p.name || "").toLowerCase()}::${(p.position || "").toLowerCase()}::${(p.club || "").toLowerCase()}`;
     const byKey = new Map(local.map((p) => [keyOf(p), p]));
     (incoming || []).forEach((p) => byKey.set(keyOf(p), p));
     return Array.from(byKey.values());
@@ -1361,9 +1369,48 @@ export default function EafcLeagueApp() {
     playerDbSavingRef.current = true;
     const t = setTimeout(async () => {
       try {
+        const keyOf = (p) => `${p.name}::${p.position}::${p.club || ""}`;
+        // Merge with whatever's actually on the server right now, rather than blindly overwriting
+        // the whole (often multi-MB, thousands-of-players) array with this browser's local copy -
+        // only players that genuinely changed locally (an edit, a delete, a fresh import this
+        // browser just ran) get written over the server version; everything else - including a
+        // massive bulk import another browser did that this one hasn't polled/received yet -
+        // survives intact.
+        let serverPlayers = [];
+        try {
+          const fresh = await storage.get(PLAYERDB_STORAGE_KEY, true);
+          if (fresh && fresh.value) serverPlayers = JSON.parse(fresh.value).players || [];
+        } catch (e) {
+          serverPlayers = playerDatabase;
+        }
+        const byKey = new Map(serverPlayers.map((p) => [keyOf(p), p]));
+        const localKeys = new Set();
+        playerDatabase.forEach((p) => {
+          const key = keyOf(p);
+          localKeys.add(key);
+          const lastSynced = lastSyncedPlayerDbRef.current.get(key);
+          const current = JSON.stringify(p);
+          if (lastSynced !== current) byKey.set(key, p); // only overwrite if this browser actually changed it
+        });
+        // A player deleted locally (was tracked before, no longer in local state) should be
+        // removed from the merged result too, not silently resurrected from the server copy.
+        lastSyncedPlayerDbRef.current.forEach((_, key) => {
+          if (!localKeys.has(key) && byKey.has(key)) {
+            // was known locally before, isn't now, and the server version wasn't itself just
+            // freshly changed by someone else (i.e. it still matches what we last saw) - remove it
+            const stillMatchesLastKnown = JSON.stringify(byKey.get(key)) === lastSyncedPlayerDbRef.current.get(key);
+            if (stillMatchesLastKnown) byKey.delete(key);
+          }
+        });
+        const merged = Array.from(byKey.values());
         const savedAt = Date.now();
-        await storage.set(PLAYERDB_STORAGE_KEY, JSON.stringify({ players: playerDatabase, savedAt }), true);
+        await storage.set(PLAYERDB_STORAGE_KEY, JSON.stringify({ players: merged, savedAt }), true);
         knownPlayerDbSavedAtRef.current = savedAt;
+        lastSyncedPlayerDbRef.current = new Map(merged.map((p) => [keyOf(p), JSON.stringify(p)]));
+        const mergedJSON = JSON.stringify(merged);
+        if (mergedJSON !== JSON.stringify(playerDatabase)) {
+          setPlayerDatabase(merged);
+        }
       } catch (e) {
         // best effort
       } finally {
@@ -1381,7 +1428,11 @@ export default function EafcLeagueApp() {
         const data = JSON.parse(res.value);
         const remoteSavedAt = data.savedAt || 0;
         if (remoteSavedAt > knownPlayerDbSavedAtRef.current) {
-          setPlayerDatabase((local) => mergePlayersByKey(local, data.players));
+          setPlayerDatabase((local) => {
+            const merged = mergePlayersByKey(local, data.players);
+            lastSyncedPlayerDbRef.current = new Map(merged.map((p) => [`${p.name}::${p.position}::${p.club || ""}`, JSON.stringify(p)]));
+            return merged;
+          });
           knownPlayerDbSavedAtRef.current = remoteSavedAt;
         }
       }
@@ -1404,7 +1455,11 @@ export default function EafcLeagueApp() {
         const data = JSON.parse(row.value);
         const remoteSavedAt = data.savedAt || 0;
         if (remoteSavedAt > knownPlayerDbSavedAtRef.current && !playerDbSavingRef.current) {
-          setPlayerDatabase((local) => mergePlayersByKey(local, data.players));
+          setPlayerDatabase((local) => {
+            const merged = mergePlayersByKey(local, data.players);
+            lastSyncedPlayerDbRef.current = new Map(merged.map((p) => [`${p.name}::${p.position}::${p.club || ""}`, JSON.stringify(p)]));
+            return merged;
+          });
           knownPlayerDbSavedAtRef.current = remoteSavedAt;
         }
       } catch (e) {
@@ -1723,13 +1778,13 @@ export default function EafcLeagueApp() {
         await storage.set(AUCTIONS_STORAGE_KEY, JSON.stringify({ auctions: merged, savedAt }), true);
         knownAuctionsSavedAtRef.current = savedAt;
         lastSyncedAuctionsRef.current = new Map(merged.map((a) => [a.id, JSON.stringify(a)]));
-        // Reflect the merged result locally too, in case this browser was missing something the
-        // server already had (e.g. another team's bid it hadn't polled in yet) - but only if it
-        // actually differs, so this doesn't retrigger the same effect and loop indefinitely.
-        const mergedJSON = JSON.stringify(merged);
-        if (mergedJSON !== JSON.stringify(auctions)) {
-          setAuctions(merged);
-        }
+        // Deliberately NOT calling setAuctions(merged) here - a JSON comparison to decide whether
+        // to update local state is order-sensitive, and this merge's output order can easily differ
+        // from the original array's order even when the actual content is identical (Map insertion
+        // order isn't guaranteed to match). That was creating a real infinite loop: harmless
+        // reordering kept looking like a "change", retriggering this same effect indefinitely,
+        // hammering the whole app with constant re-renders. The existing poll/realtime handlers
+        // already safely pull in anything this browser is missing, without that risk.
       } catch (e) {
         // best effort
       } finally {
@@ -2794,18 +2849,6 @@ export default function EafcLeagueApp() {
     return err;
   };
 
-  // Open to everyone — fixes a typo in the player's name on a bid that hasn't closed yet.
-  const editAuctionPlayerName = (auctionId, newName) => {
-    if (!newName || !newName.trim()) return "Enter a name.";
-    let err = null;
-    setAuctions((all) => all.map((a) => {
-      if (a.id !== auctionId) return a;
-      if (a.status !== "open" && a.status !== "pending") { err = "Can't edit a closed auction."; return a; }
-      return { ...a, player: { ...a.player, name: newName.trim() } };
-    }));
-    return err;
-  };
-
   const finalizeAuction = (auctionId) => {
     const auction = auctions.find((a) => a.id === auctionId);
     if (!auction) return "Auction not found.";
@@ -3220,8 +3263,8 @@ export default function EafcLeagueApp() {
   const exportBackup = () => {
     const payload = {
       exportedAt: new Date().toISOString(),
-      version: 1,
-      teams, squads, transfers, fixtures, prizes, events, auctions,
+      version: 2,
+      teams, squads, transfers, fixtures, prizes, events, auctions, playerDatabase,
     };
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
@@ -3267,6 +3310,12 @@ export default function EafcLeagueApp() {
     setPrizes(data.prizes || []);
     setEvents(data.events || []);
     setAuctions(data.auctions || []);
+    // Only touch playerDatabase if this backup actually has one - an older (version 1) backup file
+    // predates this being included at all, and should never wipe out the current database with
+    // nothing just because it wasn't captured back then.
+    if (Array.isArray(data.playerDatabase)) {
+      setPlayerDatabase(data.playerDatabase);
+    }
   };
 
   // Restores from a previously exported backup file. PIN-gated since it overwrites live data.
@@ -4268,7 +4317,7 @@ export default function EafcLeagueApp() {
           <TransfersTab teams={teams} squads={squads} transfers={activeTransfers} logTransfer={logTransfer}
             setTransfers={setTransfers} auctions={auctions} createAuction={createAuction}
             placeBid={placeBid} finalizeAuction={finalizeAuction} respondToAuction={respondToAuction}
-            deleteBid={deleteBid} cancelAuction={cancelAuction} deleteTransfer={deleteTransfer} editAuctionPlayerName={editAuctionPlayerName} nowTick={nowTick}
+            deleteBid={deleteBid} cancelAuction={cancelAuction} deleteTransfer={deleteTransfer} nowTick={nowTick}
             myTeamId={myTeamId} playerDatabase={playerDatabase} squadStats={squadStats}
             transferListings={transferListings} wantedListings={wantedListings}
             addTransferListing={addTransferListing} removeTransferListing={removeTransferListing}
@@ -5386,7 +5435,7 @@ function formatCountdown(ms) {
   return `${m}m ${s}s left`;
 }
 
-function AuctionsPanel({ teams, squads, auctions, createAuction, placeBid, finalizeAuction, respondToAuction, deleteBid, cancelAuction, editAuctionPlayerName, myTeamId, playerDatabase, squadStats, adminPin, adminViewUnlocked, setAdminViewUnlocked }) {
+function AuctionsPanel({ teams, squads, auctions, createAuction, placeBid, finalizeAuction, respondToAuction, deleteBid, cancelAuction, myTeamId, playerDatabase, squadStats, adminPin, adminViewUnlocked, setAdminViewUnlocked }) {
   const firstBidderFor = (sellerId) => {
     if (myTeamId && myTeamId !== sellerId) return myTeamId;
     return teams.find((t) => t.id !== sellerId)?.id || teams[0].id;
@@ -5516,10 +5565,10 @@ function AuctionsPanel({ teams, squads, auctions, createAuction, placeBid, final
           <div style={{ color: C.gold, fontWeight: 700, fontSize: 13, marginBottom: 10 }}>My Auctions ({myAuctions.length})</div>
           <div className="grid gap-3">
             {myPending.map((a) => (
-              <PendingAuctionCard key={a.id} auction={a} teams={teams} respondToAuction={respondToAuction} editAuctionPlayerName={editAuctionPlayerName} />
+              <PendingAuctionCard key={a.id} auction={a} teams={teams} respondToAuction={respondToAuction} />
             ))}
             {myOpen.map((a) => (
-              <AuctionCard key={a.id} auction={a} teams={teams} now={now} placeBid={placeBid} finalizeAuction={finalizeAuction} deleteBid={deleteBid} cancelAuction={cancelAuction} editAuctionPlayerName={editAuctionPlayerName} myTeamId={myTeamId} squadStats={squadStats} adminPin={adminPin} adminViewUnlocked={adminViewUnlocked} setAdminViewUnlocked={setAdminViewUnlocked} />
+              <AuctionCard key={a.id} auction={a} teams={teams} now={now} placeBid={placeBid} finalizeAuction={finalizeAuction} deleteBid={deleteBid} cancelAuction={cancelAuction} myTeamId={myTeamId} squadStats={squadStats} adminPin={adminPin} adminViewUnlocked={adminViewUnlocked} setAdminViewUnlocked={setAdminViewUnlocked} />
             ))}
           </div>
         </div>
@@ -5530,7 +5579,7 @@ function AuctionsPanel({ teams, squads, auctions, createAuction, placeBid, final
           <div style={{ color: C.gold, fontWeight: 700, fontSize: 13, marginBottom: 10 }}>Awaiting Team Approval ({pending.length})</div>
           <div className="grid gap-3">
             {pending.map((a) => (
-              <PendingAuctionCard key={a.id} auction={a} teams={teams} respondToAuction={respondToAuction} editAuctionPlayerName={editAuctionPlayerName} />
+              <PendingAuctionCard key={a.id} auction={a} teams={teams} respondToAuction={respondToAuction} />
             ))}
           </div>
         </div>
@@ -5541,7 +5590,7 @@ function AuctionsPanel({ teams, squads, auctions, createAuction, placeBid, final
           <div style={{ color: C.gold, fontWeight: 700, fontSize: 13, marginBottom: 10 }}>Live Auctions ({open.length})</div>
           <div className="grid gap-3">
             {open.map((a) => (
-              <AuctionCard key={a.id} auction={a} teams={teams} now={now} placeBid={placeBid} finalizeAuction={finalizeAuction} deleteBid={deleteBid} cancelAuction={cancelAuction} editAuctionPlayerName={editAuctionPlayerName} myTeamId={myTeamId} squadStats={squadStats} adminPin={adminPin} adminViewUnlocked={adminViewUnlocked} setAdminViewUnlocked={setAdminViewUnlocked} />
+              <AuctionCard key={a.id} auction={a} teams={teams} now={now} placeBid={placeBid} finalizeAuction={finalizeAuction} deleteBid={deleteBid} cancelAuction={cancelAuction} myTeamId={myTeamId} squadStats={squadStats} adminPin={adminPin} adminViewUnlocked={adminViewUnlocked} setAdminViewUnlocked={setAdminViewUnlocked} />
             ))}
           </div>
         </div>
@@ -5571,40 +5620,7 @@ function AuctionsPanel({ teams, squads, auctions, createAuction, placeBid, final
   );
 }
 
-function PlayerNameEditor({ auction, editAuctionPlayerName, textStyle }) {
-  const [editing, setEditing] = useState(false);
-  const [value, setValue] = useState(auction.player.name);
-  const [err, setErr] = useState("");
-
-  if (!editing) {
-    return (
-      <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-        <span style={textStyle}>{auction.player.name}</span>
-        <button onClick={() => { setValue(auction.player.name); setEditing(true); setErr(""); }}
-          title="Fix a spelling mistake in this name" style={{ background: "transparent", border: "none", cursor: "pointer", color: C.muted }}>
-          <Pencil size={12} />
-        </button>
-      </span>
-    );
-  }
-
-  const save = () => {
-    const e = editAuctionPlayerName(auction.id, value);
-    if (e) setErr(e); else setEditing(false);
-  };
-
-  return (
-    <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-      <TextInput autoFocus value={value} onChange={(e) => setValue(e.target.value)}
-        style={{ padding: "2px 6px", fontSize: 13, width: 160, display: "inline-block" }} />
-      <button onClick={save} title="Save" style={{ background: "transparent", border: "none", cursor: "pointer", color: C.green }}><Check size={14} /></button>
-      <button onClick={() => setEditing(false)} title="Cancel" style={{ background: "transparent", border: "none", cursor: "pointer", color: C.red }}><X size={14} /></button>
-      {err && <span style={{ color: C.red, fontSize: 11 }}>{err}</span>}
-    </span>
-  );
-}
-
-function PendingAuctionCard({ auction, teams, respondToAuction, editAuctionPlayerName }) {
+function PendingAuctionCard({ auction, teams, respondToAuction }) {
   const sellerName = teams.find((t) => t.id === auction.seller)?.name || auction.seller;
   const bidderName = teams.find((t) => t.id === auction.currentBidder)?.name || auction.currentBidder;
   return (
@@ -5612,7 +5628,7 @@ function PendingAuctionCard({ auction, teams, respondToAuction, editAuctionPlaye
       <div className="flex items-center justify-between flex-wrap gap-2" style={{ marginBottom: 8 }}>
         <div>
           <div style={{ color: C.text, fontWeight: 700, fontSize: 14 }}>
-            <PlayerNameEditor auction={auction} editAuctionPlayerName={editAuctionPlayerName} />
+            {auction.player.name}
             <span style={{ color: C.muted, fontWeight: 400 }}> · {auction.player.position}, {auction.player.rating} OVR</span>
           </div>
           <div style={{ color: C.muted, fontSize: 11.5 }}>Owned by {sellerName}</div>
@@ -5632,7 +5648,7 @@ function PendingAuctionCard({ auction, teams, respondToAuction, editAuctionPlaye
   );
 }
 
-function AuctionCard({ auction, teams, now, placeBid, finalizeAuction, deleteBid, cancelAuction, editAuctionPlayerName, myTeamId, squadStats, adminPin, adminViewUnlocked, setAdminViewUnlocked }) {
+function AuctionCard({ auction, teams, now, placeBid, finalizeAuction, deleteBid, cancelAuction, myTeamId, squadStats, adminPin, adminViewUnlocked, setAdminViewUnlocked }) {
   const [bidAmount, setBidAmount] = useState("");
   const [err, setErr] = useState("");
   const [deletingBidId, setDeletingBidId] = useState(null);
@@ -5673,7 +5689,7 @@ function AuctionCard({ auction, teams, now, placeBid, finalizeAuction, deleteBid
       <div className="flex items-center justify-between flex-wrap gap-2" style={{ marginBottom: 8 }}>
         <div>
           <div style={{ color: C.text, fontWeight: 700, fontSize: 14 }}>
-            <PlayerNameEditor auction={auction} editAuctionPlayerName={editAuctionPlayerName} />
+            {auction.player.name}
             <span style={{ color: C.muted, fontWeight: 400 }}> · {auction.player.position}, {auction.player.rating} OVR</span>
           </div>
           <div style={{ color: C.muted, fontSize: 11.5 }}>
@@ -6448,7 +6464,7 @@ function DraftTab({ teams, squads, squadStats, myTeamId, playerDatabase, draftSt
   );
 }
 
-function TransfersTab({ teams, squads, transfers, logTransfer, logAdminReward, setTransfers, auctions, createAuction, placeBid, finalizeAuction, respondToAuction, deleteBid, cancelAuction, deleteTransfer, editAuctionPlayerName, nowTick, myTeamId, playerDatabase, squadStats, transferListings, wantedListings, addTransferListing, removeTransferListing, addWantedListing, removeWantedListing, sendMarketMessage, transferWindow, transferWindowOpen, season, swapOffers, offerSwap, respondToSwapOffer, hasUsedSwapThisWindow, adminPin, adminViewUnlocked, setAdminViewUnlocked }) {
+function TransfersTab({ teams, squads, transfers, logTransfer, logAdminReward, setTransfers, auctions, createAuction, placeBid, finalizeAuction, respondToAuction, deleteBid, cancelAuction, deleteTransfer, nowTick, myTeamId, playerDatabase, squadStats, transferListings, wantedListings, addTransferListing, removeTransferListing, addWantedListing, removeWantedListing, sendMarketMessage, transferWindow, transferWindowOpen, season, swapOffers, offerSwap, respondToSwapOffer, hasUsedSwapThisWindow, adminPin, adminViewUnlocked, setAdminViewUnlocked }) {
   const [deletingId, setDeletingId] = useState(null);
   const [deleteErr, setDeleteErr] = useState("");
 
@@ -6464,7 +6480,7 @@ function TransfersTab({ teams, squads, transfers, logTransfer, logAdminReward, s
 
       <AuctionsPanel teams={teams} squads={squads} auctions={auctions} createAuction={createAuction}
         placeBid={placeBid} finalizeAuction={finalizeAuction} respondToAuction={respondToAuction}
-        deleteBid={deleteBid} cancelAuction={cancelAuction} editAuctionPlayerName={editAuctionPlayerName} myTeamId={myTeamId}
+        deleteBid={deleteBid} cancelAuction={cancelAuction} myTeamId={myTeamId}
         playerDatabase={playerDatabase} squadStats={squadStats} adminPin={adminPin} adminViewUnlocked={adminViewUnlocked} setAdminViewUnlocked={setAdminViewUnlocked} />
 
       <PlayerMarket teams={teams} squads={squads} myTeamId={myTeamId}
