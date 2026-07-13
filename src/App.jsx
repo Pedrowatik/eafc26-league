@@ -2230,10 +2230,20 @@ export default function EafcLeagueApp() {
   const [nowTick, setNowTick] = useState(Date.now());
   const transfersRef = useRef(transfers);
   const squadsRef = useRef(squads);
+  const teamByIdRef = useRef(teamById);
   useEffect(() => { transfersRef.current = transfers; }, [transfers]);
   useEffect(() => { squadsRef.current = squads; }, [squads]);
+  useEffect(() => { teamByIdRef.current = teamById; }, [teamById]);
 
   useEffect(() => {
+    // Deliberately an empty dependency array - this interval must be set up once and persist for
+    // the component's whole lifetime. It used to depend on teamById directly, which meant every
+    // single change to teams (a budget deduction, a wage update, another team's action syncing in -
+    // all of which happen constantly in an active league) tore down and recreated this interval
+    // before its 15s mark could ever be reached. That's what was silently preventing ratification
+    // from ever actually firing - transfers finalized, but their players never made it into a
+    // squad. All the data this interval needs now comes from refs instead, updated by their own
+    // separate effects, so this one never has to restart.
     const t = setInterval(() => {
       const nowMs = Date.now();
       setNowTick(nowMs);
@@ -2243,7 +2253,7 @@ export default function EafcLeagueApp() {
       let txChanged = false;
       const newTx = currentTx.map((tx) => {
         const created = tx.createdAt || 0;
-        if (!tx.sellerProcessed && teamById[tx.from] && nowMs - created >= SELLER_CREDIT_MS) {
+        if (!tx.sellerProcessed && teamByIdRef.current[tx.from] && nowMs - created >= SELLER_CREDIT_MS) {
           sellerRemovals.push({ teamId: tx.from, playerName: tx.player });
           txChanged = true;
           return { ...tx, sellerProcessed: true };
@@ -2270,7 +2280,7 @@ export default function EafcLeagueApp() {
       let squadsChanged = sellerRemovals.length > 0;
       const finalTx = newTx.map((tx) => {
         const created = tx.createdAt || 0;
-        if (!tx.buyerProcessed && teamById[tx.to] && nowMs - created >= BUYER_RATIFY_MS) {
+        if (!tx.buyerProcessed && teamByIdRef.current[tx.to] && nowMs - created >= BUYER_RATIFY_MS) {
           // Tax-only auction-loss charges have no player to place — just mark them ratified.
           if (tx.from === "AUCTION_LOSS") { txChanged = true; return { ...tx, buyerProcessed: true }; }
           const team = nextSquads[tx.to];
@@ -2297,7 +2307,7 @@ export default function EafcLeagueApp() {
       if (txChanged) setTransfers(finalTx);
     }, 15000); // check every 15s — plenty for a 12h/24h window
     return () => clearInterval(t);
-  }, [teamById]);
+  }, []);
 
   /* ------------------------------ derived data ------------------------------ */
   const squadStats = useMemo(() => {
