@@ -4489,7 +4489,7 @@ export default function EafcLeagueApp() {
             applyNewBudgetAndWageCap={applyNewBudgetAndWageCap} resetTeamDraft={resetTeamDraft}
             reopenDraftKeepPicks={reopenDraftKeepPicks} clearBlindBids={clearBlindBids} blindBids={blindBids}
             assignSponsorships={assignSponsorships} transfers={activeTransfers} removePlayerFromSquad={removePlayerFromSquad} deleteTransfer={deleteTransfer} forceMarkBlindBidResolved={forceMarkBlindBidResolved}
-            archiveDraft={archiveDraft} draftArchives={draftArchives} addPlayerToSquad={addPlayerToSquad} />
+            archiveDraft={archiveDraft} draftArchives={draftArchives} addPlayerToSquad={addPlayerToSquad} forceRatifyTransfer={forceRatifyTransfer} />
         )}
 
         {tab === "scouting" && (
@@ -8490,7 +8490,7 @@ function AddPrizeTools({ teams, addPrize }) {
   );
 }
 
-function AdminTab({ teams, squads, myTeamId, playerDatabase, adminPin, logAdminReward, resetAll, changeAdminPin, addFundsToTeam, addEarned86Slot, exportBackup, restoreBackup, restoreFromNightlyBackup, endSeason, season, seasonHistory, standings, importPlayerDatabase, clearPlayerDatabase, teamLockOverride, toggleTeamLockOverride, clearChat, resetTeamPassword, squadStats, transferWindow, setTransferWindowDates, clearTransferWindow, addPrize, exportPlayerDatabaseCSV, adminRemoveCaptain, draftPicks, draftSubmitted, clearSquadsAndTransfers, applyNewBudgetAndWageCap, resetTeamDraft, reopenDraftKeepPicks, clearBlindBids, blindBids, assignSponsorships, transfers, removePlayerFromSquad, deleteTransfer, forceMarkBlindBidResolved, archiveDraft, draftArchives, addPlayerToSquad }) {
+function AdminTab({ teams, squads, myTeamId, playerDatabase, adminPin, logAdminReward, resetAll, changeAdminPin, addFundsToTeam, addEarned86Slot, exportBackup, restoreBackup, restoreFromNightlyBackup, endSeason, season, seasonHistory, standings, importPlayerDatabase, clearPlayerDatabase, teamLockOverride, toggleTeamLockOverride, clearChat, resetTeamPassword, squadStats, transferWindow, setTransferWindowDates, clearTransferWindow, addPrize, exportPlayerDatabaseCSV, adminRemoveCaptain, draftPicks, draftSubmitted, clearSquadsAndTransfers, applyNewBudgetAndWageCap, resetTeamDraft, reopenDraftKeepPicks, clearBlindBids, blindBids, assignSponsorships, transfers, removePlayerFromSquad, deleteTransfer, forceMarkBlindBidResolved, archiveDraft, draftArchives, addPlayerToSquad, forceRatifyTransfer }) {
   const [unlocked, setUnlocked] = useState(false);
   const [pinInput, setPinInput] = useState("");
   const [err, setErr] = useState("");
