@@ -4445,7 +4445,8 @@ export default function EafcLeagueApp() {
           <SquadsTab teams={teams} squads={squads} squadStats={squadStats} renameTeam={renameTeam}
             setTab={setTab} movePlayerToGroup={movePlayerToGroup}
             movePlayerToIndex={movePlayerToIndex} myTeamId={myTeamId}
-            signCaptain={signCaptain} playerDatabase={playerDatabase} openPlayerStats={openPlayerStats} />
+            signCaptain={signCaptain} playerDatabase={playerDatabase} openPlayerStats={openPlayerStats}
+            injuries={injuries} fixtures={fixtures} />
         )}
         {tab === "budgets" && (
           <BudgetsTab teams={teams} budgetStats={budgetStats} renameTeam={renameTeam} />
@@ -5148,7 +5149,7 @@ function FormationPitch({ formation, starters, openPlayerStats }) {
   );
 }
 
-function SquadsTab({ teams, squads, squadStats, renameTeam, setTab, movePlayerToGroup, movePlayerToIndex, myTeamId, signCaptain, playerDatabase, openPlayerStats }) {
+function SquadsTab({ teams, squads, squadStats, renameTeam, setTab, movePlayerToGroup, movePlayerToIndex, myTeamId, signCaptain, playerDatabase, openPlayerStats, injuries, fixtures }) {
   const [activeTeam, setActiveTeam] = useState(myTeamId || teams[0].id);
   const [moveError, setMoveError] = useState("");
   const [captainForm, setCaptainForm] = useState({ name: "", position: "CM", rating: 75, club: "", age: 25 });
@@ -5157,6 +5158,14 @@ function SquadsTab({ teams, squads, squadStats, renameTeam, setTab, movePlayerTo
   const sq = squads[activeTeam];
   const stat = squadStats[activeTeam];
   const clubOptions = useMemo(() => [...new Set(playerDatabase.map((p) => p.club).filter(Boolean))].sort(), [playerDatabase]);
+
+  // Same reference matchday logic as the persistent Injuries panel in Fixtures - shows injury
+  // status directly in context here too, not just tucked away in a separate tab.
+  const currentMatchdayForSquadInjuries = Math.max(0, ...(fixtures || []).filter((f) => f.injuriesGenerated).map((f) => f.matchday), 0);
+  const currentlyInjuredNames = useMemo(() => {
+    const teamInjuries = (injuries || {})[activeTeam] || {};
+    return new Set(Object.entries(teamInjuries).filter(([, until]) => until >= currentMatchdayForSquadInjuries).map(([name]) => name));
+  }, [injuries, activeTeam, currentMatchdayForSquadInjuries]);
 
   const move = (fromGroup, index, toGroup) => {
     const err = movePlayerToGroup(activeTeam, fromGroup, index, toGroup);
@@ -5324,14 +5333,14 @@ function SquadsTab({ teams, squads, squadStats, renameTeam, setTab, movePlayerTo
             }}
             group="starters" onMove={(index) => move("starters", index, "reserves")} moveLabel="Bench" moveIcon={ChevronDown}
             movePlayerToIndex={(from, to) => movePlayerToIndex(activeTeam, "starters", from, to)} minWidth={600}
-            openPlayerStats={openPlayerStats} />
+            openPlayerStats={openPlayerStats} currentlyInjuredNames={currentlyInjuredNames} />
           <FormationPitch formation={team.formation || "4-4-2"} starters={sq.starters} openPlayerStats={openPlayerStats} />
         </div>
         <div style={{ height: 18 }} />
         <SquadTable title={`Reserves (${RESERVE_SLOTS} slots)`} players={sq.reserves} labelForIdx={(i) => `R${i + 1}`}
           group="reserves" onMove={(index) => move("reserves", index, "starters")} moveLabel="Start" moveIcon={ChevronUp}
           movePlayerToIndex={(from, to) => movePlayerToIndex(activeTeam, "reserves", from, to)}
-          openPlayerStats={openPlayerStats} />
+          openPlayerStats={openPlayerStats} currentlyInjuredNames={currentlyInjuredNames} />
       </Panel>
     </div>
   );
@@ -5358,7 +5367,7 @@ function DragHandleIcon() {
   );
 }
 
-function SquadTable({ title, players, labelForIdx, group, onMove, moveLabel, moveIcon: MoveIcon, movePlayerToIndex, minWidth = 780, openPlayerStats }) {
+function SquadTable({ title, players, labelForIdx, group, onMove, moveLabel, moveIcon: MoveIcon, movePlayerToIndex, minWidth = 780, openPlayerStats, currentlyInjuredNames }) {
   const [sortKey, setSortKey] = useState(null);
   const [sortDir, setSortDir] = useState(1); // 1 = asc, -1 = desc
   const [dragIndex, setDragIndex] = useState(null);
@@ -5456,7 +5465,8 @@ function SquadTable({ title, players, labelForIdx, group, onMove, moveLabel, mov
                 rowIndex={index} canDrag={canDrag}
                 isDragging={dragIndex === index}
                 isDragOver={overIndex === index && dragIndex !== null && dragIndex !== index}
-                onDragHandlePointerDown={() => startDrag(index)} openPlayerStats={openPlayerStats} />
+                onDragHandlePointerDown={() => startDrag(index)} openPlayerStats={openPlayerStats}
+                isInjured={player && currentlyInjuredNames && currentlyInjuredNames.has(player.name)} />
             ))}
           </tbody>
         </table>
@@ -5470,7 +5480,7 @@ function SquadTable({ title, players, labelForIdx, group, onMove, moveLabel, mov
   );
 }
 
-function SquadRow({ label, player, onMove, moveLabel, moveIcon: MoveIcon, rowIndex, canDrag, isDragging, isDragOver, onDragHandlePointerDown, openPlayerStats }) {
+function SquadRow({ label, player, onMove, moveLabel, moveIcon: MoveIcon, rowIndex, canDrag, isDragging, isDragOver, onDragHandlePointerDown, openPlayerStats, isInjured }) {
   const filled = !!player;
   const cellPad = { padding: "5px 6px", borderBottom: `1px solid ${C.border}33` };
   const highlight = filled && Number(player.rating) >= 86 ? { background: `${C.gold}1a` } : {};
@@ -5504,6 +5514,7 @@ function SquadRow({ label, player, onMove, moveLabel, moveIcon: MoveIcon, rowInd
             style={{ background: "transparent", border: "none", padding: 0, cursor: openPlayerStats ? "pointer" : "default", color: C.text, fontWeight: 600, fontSize: "inherit", textDecoration: openPlayerStats ? "underline" : "none", textDecorationColor: `${C.gold}66` }}>
             {player.name}
           </button>
+          {isInjured && <span title="Currently injured" style={{ color: C.red, fontSize: 11 }}>🤕</span>}
         </div>
       </td>
       <td style={{ ...cellPad, textAlign: "center", color: C.text }}>{player.position}</td>
@@ -6833,6 +6844,23 @@ function FixturesTab({ teams, fixtures, setFixtures, logActivity, myTeamId, squa
 
   const suspendedNamesFor = (teamId) => new Set(Object.keys(suspensions[teamId] || {}));
 
+  // A persistent, always-visible view of who's currently injured across the whole league - the
+  // chat announcement when injuries are generated is easy to lose if people are actively talking,
+  // so this gives everyone a reliable place to just look it up directly instead.
+  const currentMatchdayForInjuries = Math.max(0, ...fixtures.filter((f) => f.injuriesGenerated).map((f) => f.matchday), 0);
+  const currentInjuriesByTeam = useMemo(() => {
+    const out = {};
+    teams.forEach((t) => {
+      const teamInjuries = injuries[t.id] || {};
+      const active = Object.entries(teamInjuries)
+        .filter(([, until]) => until >= currentMatchdayForInjuries)
+        .map(([name, until]) => ({ name, until, remaining: until - currentMatchdayForInjuries + 1 }));
+      if (active.length > 0) out[t.id] = active;
+    });
+    return out;
+  }, [teams, injuries, currentMatchdayForInjuries]);
+  const totalCurrentlyInjured = Object.values(currentInjuriesByTeam).reduce((s, list) => s + list.length, 0);
+
   const eligiblePlayersFor = (teamId, matchday) => {
     const hurt = injuredNamesFor(teamId, matchday);
     const banned = suspendedNamesFor(teamId);
@@ -6955,6 +6983,33 @@ function FixturesTab({ teams, fixtures, setFixtures, logActivity, myTeamId, squa
 
   return (
     <div className="grid gap-4">
+      {totalCurrentlyInjured > 0 && (
+        <Panel style={{ padding: 18, border: `1px solid ${C.red}55` }}>
+          <SectionTitle icon={AlertTriangle}>Current Injuries ({totalCurrentlyInjured})</SectionTitle>
+          <div style={{ color: C.muted, fontSize: 11.5, marginBottom: 12 }}>
+            A persistent view of who's currently unavailable — separate from the chat announcement, which is easy to
+            lose if people are actively talking when injuries get generated.
+          </div>
+          <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))" }}>
+            {teams.filter((t) => currentInjuriesByTeam[t.id]).map((t) => (
+              <div key={t.id} style={{ background: C.panelAlt, borderRadius: 8, padding: 10 }}>
+                <div style={{ color: C.gold, fontWeight: 700, fontSize: 12.5, marginBottom: 6 }}>{t.name}</div>
+                <div style={{ display: "grid", gap: 3 }}>
+                  {currentInjuriesByTeam[t.id].map((inj) => (
+                    <div key={inj.name} className="flex items-center justify-between" style={{ fontSize: 12, color: C.text }}>
+                      <span>{inj.name}</span>
+                      <span style={{ color: C.red, fontSize: 11 }}>
+                        {inj.remaining <= 1 ? "out this MD" : `out ${inj.remaining} more MD${inj.remaining === 1 ? "" : "s"}`}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        </Panel>
+      )}
+
       <Panel style={{ padding: 18 }}>
         <SectionTitle icon={CalendarClock}>Auto-Draft Season Schedule</SectionTitle>
         <div style={{ color: C.muted, fontSize: 11.5, marginBottom: 12 }}>
