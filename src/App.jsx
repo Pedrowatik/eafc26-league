@@ -5276,7 +5276,7 @@ function SquadsTab({ teams, squads, squadStats, renameTeam, setTab, movePlayerTo
 
   // Same reference matchday logic as the persistent Injuries panel in Fixtures - shows injury
   // status directly in context here too, not just tucked away in a separate tab.
-  const currentMatchdayForSquadInjuries = Math.max(0, ...(fixtures || []).filter((f) => f.injuriesGenerated).map((f) => f.matchday), 0);
+  const currentMatchdayForSquadInjuries = Math.max(0, ...(fixtures || []).filter((f) => f.score1 !== "" && f.score1 != null && f.score2 !== "" && f.score2 != null).map((f) => f.matchday), 0) + 1;
   const currentlyInjuredNames = useMemo(() => {
     const teamInjuries = (injuries || {})[activeTeam] || {};
     return new Set(Object.entries(teamInjuries).filter(([, until]) => until >= currentMatchdayForSquadInjuries).map(([name]) => name));
@@ -6962,7 +6962,7 @@ function FixturesTab({ teams, fixtures, setFixtures, logActivity, myTeamId, squa
   // A persistent, always-visible view of who's currently injured across the whole league - the
   // chat announcement when injuries are generated is easy to lose if people are actively talking,
   // so this gives everyone a reliable place to just look it up directly instead.
-  const currentMatchdayForInjuries = Math.max(0, ...fixtures.filter((f) => f.injuriesGenerated).map((f) => f.matchday), 0);
+  const currentMatchdayForInjuries = Math.max(0, ...fixtures.filter((f) => f.score1 !== "" && f.score1 != null && f.score2 !== "" && f.score2 != null).map((f) => f.matchday), 0) + 1;
   const currentInjuriesByTeam = useMemo(() => {
     const out = {};
     teams.forEach((t) => {
