@@ -2295,7 +2295,7 @@ export default function EafcLeagueApp() {
     // from ever actually firing - transfers finalized, but their players never made it into a
     // squad. All the data this interval needs now comes from refs instead, updated by their own
     // separate effects, so this one never has to restart.
-    const t = setInterval(() => {
+    const t = setInterval(async () => {
       const nowMs = Date.now();
       setNowTick(nowMs);
 
@@ -2312,57 +2312,88 @@ export default function EafcLeagueApp() {
         return tx;
       });
 
-      // Build the post-removal squad snapshot locally so buyer placements below see accurate free slots.
-      let nextSquads = squadsRef.current;
-      if (sellerRemovals.length) {
-        nextSquads = { ...nextSquads };
-        sellerRemovals.forEach(({ teamId, playerName }) => {
-          if (!nextSquads[teamId]) return;
-          nextSquads = {
-            ...nextSquads,
-            [teamId]: {
-              starters: nextSquads[teamId].starters.map((p) => (p && p.name === playerName ? null : p)),
-              reserves: nextSquads[teamId].reserves.map((p) => (p && p.name === playerName ? null : p)),
-            },
-          };
-        });
-      }
+      // Transfers whose buyer side is ready to settle this tick.
+      const buyerReadyTx = newTx.filter((tx) =>
+        !tx.buyerProcessed && teamByIdRef.current[tx.to] && nowMs - (tx.createdAt || 0) >= BUYER_RATIFY_MS
+      );
 
-      let squadsChanged = sellerRemovals.length > 0;
+      // Every open browser tab runs this same interval independently. Grouping all the squad work
+      // by team and doing one fresh read straight from storage per team - rather than trusting this
+      // browser's local squadsRef, which could be stale relative to another tab's very recent
+      // change - is what actually prevents two tabs from placing the same player at once (a
+      // duplicate) or one tab's stale write silently erasing another's real signing (a miss).
+      const affectedTeamIds = new Set([
+        ...sellerRemovals.map((r) => r.teamId),
+        ...buyerReadyTx.filter((tx) => tx.from !== "AUCTION_LOSS").map((tx) => tx.to),
+      ]);
+
+      const processedTxIds = new Set();
+
+      await Promise.all([...affectedTeamIds].map(async (teamId) => {
+        try {
+          let squad = squadsRef.current[teamId] || { starters: [], reserves: [] };
+          try {
+            const fresh = await storage.get(squadKeyFor(teamId), true);
+            if (fresh && fresh.value) {
+              const data = JSON.parse(fresh.value);
+              squad = { starters: data.starters || [], reserves: data.reserves || [] };
+            }
+          } catch (e) {
+            // fall back to the local ref copy if the fresh read fails
+          }
+
+          let teamChanged = false;
+
+          sellerRemovals.filter((r) => r.teamId === teamId).forEach(({ playerName }) => {
+            const before = JSON.stringify(squad);
+            squad = {
+              starters: squad.starters.map((p) => (p && p.name === playerName ? null : p)),
+              reserves: squad.reserves.map((p) => (p && p.name === playerName ? null : p)),
+            };
+            if (JSON.stringify(squad) !== before) teamChanged = true;
+          });
+
+          buyerReadyTx.filter((tx) => tx.to === teamId && tx.from !== "AUCTION_LOSS").forEach((tx) => {
+            const alreadyInSquad = squad.starters.some((p) => p && p.name === tx.player) || squad.reserves.some((p) => p && p.name === tx.player);
+            if (alreadyInSquad) { processedTxIds.add(tx.id); return; } // e.g. another tab already placed them this tick
+            const si = squad.starters.findIndex((p, i) => !p && i !== CAPTAIN_SLOT_INDEX);
+            const group = si !== -1 ? "starters" : null;
+            const ri = group ? -1 : squad.reserves.findIndex((p) => !p);
+            const targetGroup = group || (ri !== -1 ? "reserves" : null);
+            if (!targetGroup) return; // squad still full — retry on the next tick
+            const idx = targetGroup === "starters" ? si : ri;
+            const playerObj = {
+              name: tx.player, position: tx.position, rating: tx.rating,
+              club: tx.club, age: tx.age, value: tx.price, wage: tx.wage,
+            };
+            squad = { ...squad, [targetGroup]: [...squad[targetGroup]] };
+            squad[targetGroup][idx] = playerObj;
+            processedTxIds.add(tx.id);
+            teamChanged = true;
+          });
+
+          if (teamChanged) {
+            const savedAt = Date.now();
+            await storage.set(squadKeyFor(teamId), JSON.stringify({ ...squad, savedAt }), true);
+            knownSquadSavedAtRef.current.set(teamId, savedAt);
+            lastSyncedSquadDataRef.current.set(teamId, JSON.stringify(squad));
+            setSquads((all) => ({ ...all, [teamId]: squad }));
+          }
+        } catch (e) {
+          // best effort — one team failing shouldn't block the others, and this retries next tick
+        }
+      }));
+
       const finalTx = newTx.map((tx) => {
-        const created = tx.createdAt || 0;
-        if (!tx.buyerProcessed && teamByIdRef.current[tx.to] && nowMs - created >= BUYER_RATIFY_MS) {
-          // Tax-only auction-loss charges have no player to place — just mark them ratified.
-          if (tx.from === "AUCTION_LOSS") { txChanged = true; return { ...tx, buyerProcessed: true }; }
-          const team = nextSquads[tx.to];
-          // Already there? (e.g. placed manually as a workaround while this was stuck) - don't add
-          // a second copy, but still mark it ratified so the tax collects and it stops sitting
-          // here as "unresolved" forever.
-          const alreadyInSquad = team && (
-            team.starters.some((p) => p && p.name === tx.player) ||
-            team.reserves.some((p) => p && p.name === tx.player)
-          );
-          if (alreadyInSquad) { txChanged = true; return { ...tx, buyerProcessed: true }; }
-          const si = team.starters.findIndex((p, i) => !p && i !== CAPTAIN_SLOT_INDEX);
-          const group = si !== -1 ? "starters" : null;
-          const ri = group ? -1 : team.reserves.findIndex((p) => !p);
-          const targetGroup = group || (ri !== -1 ? "reserves" : null);
-          if (!targetGroup) return tx; // squad still full — retry on the next tick
-          const idx = targetGroup === "starters" ? si : ri;
-          const playerObj = {
-            name: tx.player, position: tx.position, rating: tx.rating,
-            club: tx.club, age: tx.age, value: tx.price, wage: tx.wage,
-          };
-          nextSquads = { ...nextSquads, [tx.to]: { ...nextSquads[tx.to], [targetGroup]: [...nextSquads[tx.to][targetGroup]] } };
-          nextSquads[tx.to][targetGroup][idx] = playerObj;
-          squadsChanged = true;
+        if (processedTxIds.has(tx.id)) { txChanged = true; return { ...tx, buyerProcessed: true }; }
+        // Tax-only auction-loss charges have no squad involvement — ratify on time alone.
+        if (tx.from === "AUCTION_LOSS" && !tx.buyerProcessed && teamByIdRef.current[tx.to] && nowMs - (tx.createdAt || 0) >= BUYER_RATIFY_MS) {
           txChanged = true;
           return { ...tx, buyerProcessed: true };
         }
         return tx;
       });
 
-      if (squadsChanged) setSquads(nextSquads);
       if (txChanged) setTransfers(finalTx);
     }, 15000); // check every 15s — plenty for a 12h/24h window
     return () => clearInterval(t);
