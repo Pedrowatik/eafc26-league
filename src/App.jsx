@@ -202,6 +202,7 @@ const teamKeyFor = (teamId) => `eafc26-team-${teamId}-v1`;
 // that aren't in whichever snapshot happens to save last.
 const draftKeyFor = (teamId) => `eafc26-draft-${teamId}-v1`;
 const PLAYERDB_STORAGE_KEY = "eafc26-player-database-v1";
+const SCOUTING_BOOKMARKS_STORAGE_KEY = "eafc26-scouting-bookmarks-v1"; // { [teamId]: [{ name, club, position, bookmarkedAt }] }
 // The admin PIN gets its own dedicated key — it's the "keys to the kingdom," and it's exactly what
 // just got wiped when a stale browser overwrote the whole shared blob back to defaults.
 const ADMIN_PIN_STORAGE_KEY = "eafc26-admin-pin-v1";
@@ -701,6 +702,7 @@ export default function EafcLeagueApp() {
   const [activity, setActivity] = useState([]);
   const [chat, setChat] = useState([]);
   const [playerDatabase, setPlayerDatabase] = useState([]); // imported from Sofifa for autocomplete
+  const [scoutingBookmarks, setScoutingBookmarks] = useState({}); // { [teamId]: [{ name, club, position, bookmarkedAt }] }
   const [injuries, setInjuries] = useState({}); // { [teamId]: { [playerName]: lastInjuredMatchday } }
   const [teamLockOverride, setTeamLockOverride] = useState(false); // admin toggle to allow re-picks mid-season
   // Stable across renders unless the actual set of team IDs changes (not just team.budget/formation/
@@ -783,6 +785,9 @@ export default function EafcLeagueApp() {
   // overwrite was exactly what let one browser's stale, smaller copy of the database silently wipe
   // out a much richer one the moment it made even a single small edit.
   const lastSyncedPlayerDbRef = useRef(new Map());
+  const knownScoutingBookmarksSavedAtRef = useRef(0);
+  const lastSyncedScoutingBookmarksRef = useRef(new Map()); // per-team: teamId -> last-synced JSON, same dirty-tracking approach used elsewhere
+  const scoutingBookmarksSavingRef = useRef(false);
   const knownAdminPinSavedAtRef = useRef(0);
   const knownBlindBidsSavedAtRef = useRef(0);
   const knownTransfersSavedAtRef = useRef(0);
@@ -919,6 +924,21 @@ export default function EafcLeagueApp() {
         }
       } catch (e) {
         if (legacyPlayerDbForMigration) setPlayerDatabase(legacyPlayerDbForMigration);
+      }
+      // Scouting bookmarks — own key too, per-team.
+      try {
+        const bmRes = await storage.get(SCOUTING_BOOKMARKS_STORAGE_KEY, true);
+        if (bmRes && bmRes.value) {
+          const bmData = JSON.parse(bmRes.value);
+          const loadedBookmarks = bmData.bookmarks || {};
+          setScoutingBookmarks(loadedBookmarks);
+          knownScoutingBookmarksSavedAtRef.current = bmData.savedAt || Date.now();
+          lastSyncedScoutingBookmarksRef.current = new Map(
+            Object.entries(loadedBookmarks).map(([teamId, list]) => [teamId, JSON.stringify(list)])
+          );
+        }
+      } catch (e) {
+        // best effort — starts empty if nothing's been saved yet
       }
       // Each team's own draft picks + submitted flag live under their own key too — the draft is
       // specifically designed for everyone to edit their own picks at the same time.
@@ -1470,6 +1490,87 @@ export default function EafcLeagueApp() {
             return merged;
           });
           knownPlayerDbSavedAtRef.current = remoteSavedAt;
+        }
+      } catch (e) {
+        // ignore malformed payloads
+      }
+    });
+    return unsubscribe;
+  }, [loaded]);
+
+  // Scouting bookmarks save to their own key, per-team - only writes teams whose bookmark list
+  // actually changed locally, same reasoning as squads/teams: a blanket overwrite here would let
+  // one team's bookmark list silently wipe out another's the moment either one changed.
+  useEffect(() => {
+    if (!loaded) return;
+    scoutingBookmarksSavingRef.current = true;
+    const t = setTimeout(async () => {
+      try {
+        let serverBookmarks = {};
+        try {
+          const fresh = await storage.get(SCOUTING_BOOKMARKS_STORAGE_KEY, true);
+          if (fresh && fresh.value) serverBookmarks = JSON.parse(fresh.value).bookmarks || {};
+        } catch (e) {
+          serverBookmarks = scoutingBookmarks;
+        }
+        const merged = { ...serverBookmarks };
+        Object.entries(scoutingBookmarks).forEach(([teamId, list]) => {
+          const lastSynced = lastSyncedScoutingBookmarksRef.current.get(teamId);
+          const current = JSON.stringify(list);
+          if (lastSynced !== current) merged[teamId] = list; // only overwrite if this browser actually changed it
+        });
+        const savedAt = Date.now();
+        await storage.set(SCOUTING_BOOKMARKS_STORAGE_KEY, JSON.stringify({ bookmarks: merged, savedAt }), true);
+        knownScoutingBookmarksSavedAtRef.current = savedAt;
+        lastSyncedScoutingBookmarksRef.current = new Map(Object.entries(merged).map(([teamId, list]) => [teamId, JSON.stringify(list)]));
+        const mergedJSON = JSON.stringify(merged);
+        if (mergedJSON !== JSON.stringify(scoutingBookmarks)) setScoutingBookmarks(merged);
+      } catch (e) {
+        // best effort
+      } finally {
+        scoutingBookmarksSavingRef.current = false;
+      }
+    }, 300);
+    return () => clearTimeout(t);
+  }, [scoutingBookmarks, loaded]);
+
+  const pullLatestScoutingBookmarks = useCallback(async () => {
+    if (scoutingBookmarksSavingRef.current) return;
+    try {
+      const res = await storage.get(SCOUTING_BOOKMARKS_STORAGE_KEY, true);
+      if (res && res.value) {
+        const data = JSON.parse(res.value);
+        const remoteSavedAt = data.savedAt || 0;
+        if (remoteSavedAt > knownScoutingBookmarksSavedAtRef.current) {
+          const incoming = data.bookmarks || {};
+          setScoutingBookmarks(incoming);
+          knownScoutingBookmarksSavedAtRef.current = remoteSavedAt;
+          lastSyncedScoutingBookmarksRef.current = new Map(Object.entries(incoming).map(([teamId, list]) => [teamId, JSON.stringify(list)]));
+        }
+      }
+    } catch (e) {
+      // best effort
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!loaded) return;
+    const t = setInterval(() => pullLatestScoutingBookmarks(), SYNC_POLL_MS);
+    return () => clearInterval(t);
+  }, [loaded, pullLatestScoutingBookmarks]);
+
+  useEffect(() => {
+    if (!loaded) return;
+    const unsubscribe = subscribeToKey(SCOUTING_BOOKMARKS_STORAGE_KEY, (row) => {
+      if (!row || !row.value) return;
+      try {
+        const data = JSON.parse(row.value);
+        const remoteSavedAt = data.savedAt || 0;
+        if (remoteSavedAt > knownScoutingBookmarksSavedAtRef.current && !scoutingBookmarksSavingRef.current) {
+          const incoming = data.bookmarks || {};
+          setScoutingBookmarks(incoming);
+          knownScoutingBookmarksSavedAtRef.current = remoteSavedAt;
+          lastSyncedScoutingBookmarksRef.current = new Map(Object.entries(incoming).map(([teamId, list]) => [teamId, JSON.stringify(list)]));
         }
       } catch (e) {
         // ignore malformed payloads
@@ -3372,6 +3473,20 @@ export default function EafcLeagueApp() {
     return null;
   };
 
+  // Bookmarks a scouted player for later reference (or removes them if already bookmarked) - no
+  // PIN needed since this is just a personal note, not something that touches money or squads.
+  const toggleScoutingBookmark = (teamId, player) => {
+    if (!teamId) return;
+    setScoutingBookmarks((all) => {
+      const list = all[teamId] || [];
+      const exists = list.some((b) => b.name === player.name && b.club === player.club);
+      const nextList = exists
+        ? list.filter((b) => !(b.name === player.name && b.club === player.club))
+        : [{ name: player.name, club: player.club, position: player.position, rating: player.rating, bookmarkedAt: Date.now() }, ...list];
+      return { ...all, [teamId]: nextList };
+    });
+  };
+
   const changeAdminPin = (currentPin, newPin) => {
     if (currentPin !== adminPin) return "Current PIN is incorrect.";
     if (!newPin || newPin.trim().length < 4) return "New PIN must be at least 4 characters.";
@@ -4525,7 +4640,7 @@ export default function EafcLeagueApp() {
         )}
 
         {tab === "scouting" && (
-          <ScoutingTab playerDatabase={playerDatabase} openPlayerStats={openPlayerStats} />
+          <ScoutingTab playerDatabase={playerDatabase} openPlayerStats={openPlayerStats} myTeamId={myTeamId} teams={teams} budgetStats={budgetStats} scoutingBookmarks={scoutingBookmarks} toggleScoutingBookmark={toggleScoutingBookmark} />
         )}
       </div>
 
@@ -7746,15 +7861,88 @@ function ChatTab({ chat, setChat, teams, myTeamId, markChatSeen }) {
 }
 
 /* --------------------------------- Rules ---------------------------------- */
-function ScoutingTab({ playerDatabase, openPlayerStats }) {
+// A simple side-by-side bar chart comparing the reference player against a chosen candidate
+// across the 6 headline stats (or the 5 GK stats for keepers) - built with plain SVG since this
+// app doesn't have a charting library available.
+function StatComparisonChart({ refPlayer, candidate, onClose }) {
+  const isGk = refPlayer.position === "GK";
+  const statKeys = isGk
+    ? [["gkDiving", "DIV"], ["gkHandling", "HAN"], ["gkKicking", "KIC"], ["gkPositioning", "POS"], ["gkReflexes", "REF"]]
+    : [["pac", "PAC"], ["sho", "SHO"], ["pas", "PAS"], ["dri", "DRI"], ["def", "DEF"], ["phy", "PHY"]];
+  const getVal = (player, key) => (isGk ? Number((player.detailedStats || {})[key]) || 0 : Number(player[key]) || 0);
+
+  const barWidth = 26, gap = 10, groupGap = 22, chartHeight = 160, labelHeight = 34;
+  const groupWidth = barWidth * 2 + gap;
+  const totalWidth = statKeys.length * groupWidth + (statKeys.length - 1) * groupGap + 20;
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", zIndex: 2000, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}
+      onClick={onClose}>
+      <div style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 12, padding: 20, maxWidth: "95vw", overflowX: "auto" }}
+        onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between" style={{ marginBottom: 4 }}>
+          <div style={{ color: C.text, fontWeight: 700, fontSize: 14 }}>Stat Comparison</div>
+          <button onClick={onClose} style={{ background: "transparent", border: "none", cursor: "pointer", color: C.muted }}><X size={16} /></button>
+        </div>
+        <div className="flex items-center gap-4" style={{ marginBottom: 12, fontSize: 11.5 }}>
+          <div className="flex items-center gap-1.5"><span style={{ width: 10, height: 10, background: C.gold, borderRadius: 2, display: "inline-block" }} /> {refPlayer.name} (reference)</div>
+          <div className="flex items-center gap-1.5"><span style={{ width: 10, height: 10, background: C.green, borderRadius: 2, display: "inline-block" }} /> {candidate.name}</div>
+        </div>
+        <svg viewBox={`0 0 ${totalWidth} ${chartHeight + labelHeight}`} width={totalWidth} height={chartHeight + labelHeight}>
+          {statKeys.map(([key, label], i) => {
+            const refVal = getVal(refPlayer, key), candVal = getVal(candidate, key);
+            const groupX = 10 + i * (groupWidth + groupGap);
+            const refHeight = (refVal / 100) * chartHeight;
+            const candHeight = (candVal / 100) * chartHeight;
+            return (
+              <g key={key}>
+                <rect x={groupX} y={chartHeight - refHeight} width={barWidth} height={refHeight} fill={C.gold} rx={2} />
+                <text x={groupX + barWidth / 2} y={chartHeight - refHeight - 4} textAnchor="middle" fontSize="10" fill={C.gold}>{refVal}</text>
+                <rect x={groupX + barWidth + gap} y={chartHeight - candHeight} width={barWidth} height={candHeight} fill={C.green} rx={2} />
+                <text x={groupX + barWidth + gap + barWidth / 2} y={chartHeight - candHeight - 4} textAnchor="middle" fontSize="10" fill={C.green}>{candVal}</text>
+                <text x={groupX + groupWidth / 2 - gap / 2} y={chartHeight + 18} textAnchor="middle" fontSize="11" fontWeight="700" fill={C.muted}>{label}</text>
+              </g>
+            );
+          })}
+          <line x1={0} y1={chartHeight} x2={totalWidth} y2={chartHeight} stroke={C.border} strokeWidth={1} />
+        </svg>
+      </div>
+    </div>
+  );
+}
+
+function ScoutingTab({ playerDatabase, openPlayerStats, myTeamId, teams, budgetStats, scoutingBookmarks, toggleScoutingBookmark }) {
   const [refQuery, setRefQuery] = useState("");
   const [refPlayer, setRefPlayer] = useState(null);
   const [expanded, setExpanded] = useState({}); // playerKey -> bool, full breakdown toggle
+  const [maxAge, setMaxAge] = useState(""); // empty = no limit
+  const [affordableOnly, setAffordableOnly] = useState(false);
+  const [compareTarget, setCompareTarget] = useState(null); // player object currently shown in the comparison chart
+
+  const myTeam = myTeamId ? teams.find((t) => t.id === myTeamId) : null;
+  const myBudget = myTeamId && budgetStats[myTeamId] ? budgetStats[myTeamId] : null;
 
   const results = useMemo(() => {
     if (!refPlayer) return null;
-    return findScoutingMatches(refPlayer, playerDatabase, 10);
-  }, [refPlayer, playerDatabase]);
+    const raw = findScoutingMatches(refPlayer, playerDatabase, 20); // wider net before filtering, so filters don't leave too few results
+    const passesFilters = (s) => {
+      const p = s.player;
+      if (maxAge && Number(p.age) > Number(maxAge)) return false;
+      if (affordableOnly && myBudget && myTeam) {
+        const value = roundUpTo250k(Number(p.value) || 0);
+        const tax = value > 0 ? Math.max(value * 0.1, 0.25) : 0;
+        const wageHeadroom = (myTeam.wageCap || 0) - (myBudget.wagesWithCommitted || 0);
+        if (value + tax > myBudget.current) return false;
+        if (Number(p.wage) / 1000 > wageHeadroom) return false;
+      }
+      return true;
+    };
+    return {
+      ...raw,
+      hiddenGems: raw.hiddenGems.filter(passesFilters).slice(0, 10),
+      established: raw.established.filter(passesFilters).slice(0, 10),
+    };
+  }, [refPlayer, playerDatabase, maxAge, affordableOnly, myBudget, myTeam]);
 
   const toggleExpanded = (key) => setExpanded((all) => ({ ...all, [key]: !all[key] }));
 
@@ -7763,6 +7951,8 @@ function ScoutingTab({ playerDatabase, openPlayerStats }) {
     const key = p.name + p.club;
     const isOpen = !!expanded[key];
     const low = p.value * 0.85, high = p.value * 1.15;
+    const myBookmarks = (myTeamId && scoutingBookmarks[myTeamId]) || [];
+    const isBookmarked = myBookmarks.some((b) => b.name === p.name && b.club === p.club);
     return (
       <div key={key} style={{ background: C.panelAlt, borderRadius: 8, padding: 10, marginBottom: 8 }}>
         <div className="flex items-center justify-between flex-wrap gap-2">
@@ -7770,7 +7960,15 @@ function ScoutingTab({ playerDatabase, openPlayerStats }) {
             style={{ background: "transparent", border: "none", padding: 0, cursor: "pointer", color: C.text, fontWeight: 700, fontSize: 13, textDecoration: "underline", textDecorationColor: `${C.gold}66` }}>
             {p.name}
           </button>
-          <Pill tone="gold">{Math.round(match.score)}/100</Pill>
+          <div className="flex items-center gap-2">
+            {myTeamId && (
+              <button onClick={() => toggleScoutingBookmark(myTeamId, p)} title={isBookmarked ? "Remove bookmark" : "Bookmark for later"}
+                style={{ background: "transparent", border: "none", cursor: "pointer", color: isBookmarked ? C.gold : C.muted, fontSize: 15 }}>
+                {isBookmarked ? "★" : "☆"}
+              </button>
+            )}
+            <Pill tone="gold">{Math.round(match.score)}/100</Pill>
+          </div>
         </div>
         <div style={{ color: C.muted, fontSize: 11.5, marginTop: 3 }}>
           {p.position} · {p.rating} OVR · {p.club} · Age {p.age} · {moneyK(p.wage)}/wk
@@ -7796,10 +7994,16 @@ function ScoutingTab({ playerDatabase, openPlayerStats }) {
           </div>
         </div>
 
-        <button onClick={() => toggleExpanded(key)}
-          style={{ background: "transparent", border: "none", padding: 0, marginTop: 8, cursor: "pointer", color: C.gold, fontSize: 11, textDecoration: "underline" }}>
-          {isOpen ? "Hide full breakdown" : "Show full breakdown"}
-        </button>
+        <div className="flex items-center gap-3 flex-wrap" style={{ marginTop: 8 }}>
+          <button onClick={() => toggleExpanded(key)}
+            style={{ background: "transparent", border: "none", padding: 0, cursor: "pointer", color: C.gold, fontSize: 11, textDecoration: "underline" }}>
+            {isOpen ? "Hide full breakdown" : "Show full breakdown"}
+          </button>
+          <button onClick={() => setCompareTarget(p)}
+            style={{ background: "transparent", border: "none", padding: 0, cursor: "pointer", color: C.gold, fontSize: 11, textDecoration: "underline" }}>
+            Compare stats chart
+          </button>
+        </div>
 
         {isOpen && (
           <div style={{ marginTop: 8, paddingTop: 8, borderTop: `1px solid ${C.border}33`, display: "grid", gap: 3 }}>
@@ -7831,6 +8035,20 @@ function ScoutingTab({ playerDatabase, openPlayerStats }) {
           onSelect={(p) => { setRefPlayer(p); setRefQuery(p.name); }}
         />
       </Field>
+
+      {refPlayer && (
+        <div className="flex items-end gap-3 flex-wrap" style={{ marginTop: 10 }}>
+          <Field label="Max age (optional)">
+            <TextInput type="number" min={16} max={45} placeholder="No limit" value={maxAge} onChange={(e) => setMaxAge(e.target.value)} style={{ width: 110 }} />
+          </Field>
+          {myTeamId && myBudget && (
+            <label className="flex items-center gap-2" style={{ cursor: "pointer", color: C.muted, fontSize: 12.5, paddingBottom: 8 }}>
+              <input type="checkbox" checked={affordableOnly} onChange={(e) => setAffordableOnly(e.target.checked)} />
+              Only show what I can currently afford
+            </label>
+          )}
+        </div>
+      )}
 
       {refPlayer && results && (
         <div style={{ marginTop: 18 }}>
@@ -7875,6 +8093,29 @@ function ScoutingTab({ playerDatabase, openPlayerStats }) {
             <div>{results.established.map(renderMatchRow)}</div>
           )}
         </div>
+      )}
+
+      {myTeamId && (scoutingBookmarks[myTeamId] || []).length > 0 && (
+        <div style={{ marginTop: 24, paddingTop: 16, borderTop: `1px solid ${C.border}` }}>
+          <div style={{ color: C.gold, fontWeight: 700, fontSize: 13, marginBottom: 8 }}>
+            ★ My Bookmarked Players ({scoutingBookmarks[myTeamId].length})
+          </div>
+          <div style={{ display: "grid", gap: 6 }}>
+            {scoutingBookmarks[myTeamId].map((b) => (
+              <div key={b.name + b.club} className="flex items-center justify-between flex-wrap gap-2" style={{ background: C.panelAlt, borderRadius: 8, padding: "8px 10px", fontSize: 12 }}>
+                <span style={{ color: C.text }}>{b.name} <span style={{ color: C.muted }}>— {b.position}, {b.rating} OVR, {b.club}</span></span>
+                <button onClick={() => toggleScoutingBookmark(myTeamId, b)}
+                  style={{ background: "transparent", border: "none", cursor: "pointer", color: C.red, fontSize: 11, textDecoration: "underline" }}>
+                  Remove
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {compareTarget && refPlayer && (
+        <StatComparisonChart refPlayer={refPlayer} candidate={compareTarget} onClose={() => setCompareTarget(null)} />
       )}
     </Panel>
   );
