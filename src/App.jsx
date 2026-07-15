@@ -61,6 +61,7 @@ const PROOF_KEY = (fixtureId) => `eafc26-proof-${fixtureId}`;
 // 12 hours, but the buying side (the actual signing — squad placement, budget hit, tax) only
 // becomes official after the full 24 hours.
 const SELLER_CREDIT_MS = 12 * 60 * 60 * 1000;
+const MAX_INJURY_MATCHDAYS_PER_SEASON = 4; // per player, cumulative across every injury that season - not per individual injury event
 const BUYER_RATIFY_MS = 24 * 60 * 60 * 1000;
 
 function transferStatus(tx, nowMs) {
@@ -2761,12 +2762,26 @@ export default function EafcLeagueApp() {
     [fixture.team1, fixture.team2].forEach((teamId) => {
       const squadPlayers = [...(squads[teamId]?.starters || []), ...(squads[teamId]?.reserves || [])].filter(Boolean);
       const teamInjuries = { ...(nextInjuries[teamId] || {}) };
-      const eligible = squadPlayers.filter((p) => !(teamInjuries[p.name] >= fixture.matchday));
+      // A player is only eligible if they're not currently out AND haven't already used up their
+      // full season allowance of MAX_INJURY_MATCHDAYS_PER_SEASON matchdays - this is a season-long
+      // cap per player, not a per-injury-event one, so someone who's already missed a combined 4
+      // matchdays across earlier injuries this season can't be sidelined again until next season.
+      const eligible = squadPlayers.filter((p) => {
+        const rec = teamInjuries[p.name];
+        if (!rec) return true;
+        const currentlyOut = rec.until >= fixture.matchday;
+        const usedUpAllowance = (rec.totalDays || 0) >= MAX_INJURY_MATCHDAYS_PER_SEASON;
+        return !currentlyOut && !usedUpAllowance;
+      });
       const count = Math.floor(Math.random() * 4); // 0, 1, 2, or 3
       const shuffled = [...eligible].sort(() => Math.random() - 0.5).slice(0, count);
       newlyInjuredByTeam[teamId] = shuffled.map((p) => p.name);
       shuffled.forEach((p) => {
-        teamInjuries[p.name] = fixture.matchday + pickDuration() - 1;
+        const existing = teamInjuries[p.name];
+        const alreadyUsed = existing ? (existing.totalDays || 0) : 0;
+        const remainingAllowance = MAX_INJURY_MATCHDAYS_PER_SEASON - alreadyUsed;
+        const duration = Math.min(pickDuration(), remainingAllowance);
+        teamInjuries[p.name] = { until: fixture.matchday + duration - 1, totalDays: alreadyUsed + duration };
       });
       nextInjuries[teamId] = teamInjuries;
     });
@@ -5300,7 +5315,7 @@ function SquadsTab({ teams, squads, squadStats, renameTeam, setTab, movePlayerTo
   const currentMatchdayForSquadInjuries = Math.max(0, ...(fixtures || []).filter((f) => f.score1 !== "" && f.score1 != null && f.score2 !== "" && f.score2 != null).map((f) => f.matchday), 0) + 1;
   const currentlyInjuredNames = useMemo(() => {
     const teamInjuries = (injuries || {})[activeTeam] || {};
-    return new Set(Object.entries(teamInjuries).filter(([, until]) => until >= currentMatchdayForSquadInjuries).map(([name]) => name));
+    return new Set(Object.entries(teamInjuries).filter(([, rec]) => (rec.until ?? rec) >= currentMatchdayForSquadInjuries).map(([name]) => name));
   }, [injuries, activeTeam, currentMatchdayForSquadInjuries]);
 
   const move = (fromGroup, index, toGroup) => {
@@ -6975,7 +6990,7 @@ function FixturesTab({ teams, fixtures, setFixtures, logActivity, myTeamId, squa
 
   const injuredNamesFor = (teamId, matchday) => {
     const teamInjuries = injuries[teamId] || {};
-    return new Set(Object.entries(teamInjuries).filter(([, until]) => until >= matchday).map(([name]) => name));
+    return new Set(Object.entries(teamInjuries).filter(([, rec]) => (rec.until ?? rec) >= matchday).map(([name]) => name));
   };
 
   const suspendedNamesFor = (teamId) => new Set(Object.keys(suspensions[teamId] || {}));
@@ -6989,8 +7004,9 @@ function FixturesTab({ teams, fixtures, setFixtures, logActivity, myTeamId, squa
     teams.forEach((t) => {
       const teamInjuries = injuries[t.id] || {};
       const active = Object.entries(teamInjuries)
-        .filter(([, until]) => until >= currentMatchdayForInjuries)
-        .map(([name, until]) => ({ name, until, remaining: until - currentMatchdayForInjuries + 1 }));
+        .map(([name, rec]) => ({ name, until: rec.until ?? rec }))
+        .filter(({ until }) => until >= currentMatchdayForInjuries)
+        .map(({ name, until }) => ({ name, until, remaining: until - currentMatchdayForInjuries + 1 }));
       if (active.length > 0) out[t.id] = active;
     });
     return out;
