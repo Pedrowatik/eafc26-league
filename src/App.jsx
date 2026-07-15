@@ -3248,6 +3248,13 @@ export default function EafcLeagueApp() {
     setTransfers([]);
     setPrizes([]);
     setAuctions((all) => all.filter((a) => a.status !== "closed" && a.status !== "declined")); // clear resolved history
+    // Injuries and card suspensions are tied to specific matchday numbers within a season - carrying
+    // them into a new season (which restarts its own fixture list, and matchday numbering, from
+    // scratch) left old injuries anchored to matchday numbers from the season that just ended,
+    // making them look like they'd last for many more matchdays than they actually should.
+    setInjuries({});
+    setCardTally({});
+    setSuspensions({});
 
     setSeason((s) => s + 1);
     return null;
@@ -3860,6 +3867,19 @@ export default function EafcLeagueApp() {
       // best effort — the (now-fixed) autosave will still pick this up if this direct write fails
     }
     logActivity("Admin cleared all blind bids.", "transfer");
+    return null;
+  };
+
+  // For clearing out injury/card data that's carried over incorrectly from a previous season (or
+  // just needs a fresh start) - these are part of the main blob, so a plain state reset here is
+  // picked up by the regular autosave, no separate direct-write step needed.
+  const clearInjuriesAndSuspensions = (pinAttempt) => {
+    if (pinAttempt !== adminPin) return "Incorrect PIN.";
+    if (!window.confirm("Clear all current injuries and card suspensions? This can't be undone.")) return null;
+    setInjuries({});
+    setCardTally({});
+    setSuspensions({});
+    logActivity("Admin cleared all injuries and card suspensions.", "match");
     return null;
   };
 
@@ -4636,7 +4656,8 @@ export default function EafcLeagueApp() {
             applyNewBudgetAndWageCap={applyNewBudgetAndWageCap} resetTeamDraft={resetTeamDraft}
             reopenDraftKeepPicks={reopenDraftKeepPicks} clearBlindBids={clearBlindBids} blindBids={blindBids}
             assignSponsorships={assignSponsorships} transfers={activeTransfers} removePlayerFromSquad={removePlayerFromSquad} deleteTransfer={deleteTransfer} forceMarkBlindBidResolved={forceMarkBlindBidResolved}
-            archiveDraft={archiveDraft} draftArchives={draftArchives} addPlayerToSquad={addPlayerToSquad} forceRatifyTransfer={forceRatifyTransfer} />
+            archiveDraft={archiveDraft} draftArchives={draftArchives} addPlayerToSquad={addPlayerToSquad} forceRatifyTransfer={forceRatifyTransfer}
+            clearInjuriesAndSuspensions={clearInjuriesAndSuspensions} />
         )}
 
         {tab === "scouting" && (
@@ -8817,7 +8838,7 @@ function AddPrizeTools({ teams, addPrize }) {
   );
 }
 
-function AdminTab({ teams, squads, myTeamId, playerDatabase, adminPin, logAdminReward, resetAll, changeAdminPin, addFundsToTeam, addEarned86Slot, exportBackup, restoreBackup, restoreFromNightlyBackup, endSeason, season, seasonHistory, standings, importPlayerDatabase, clearPlayerDatabase, teamLockOverride, toggleTeamLockOverride, clearChat, resetTeamPassword, squadStats, transferWindow, setTransferWindowDates, clearTransferWindow, addPrize, exportPlayerDatabaseCSV, adminRemoveCaptain, draftPicks, draftSubmitted, clearSquadsAndTransfers, applyNewBudgetAndWageCap, resetTeamDraft, reopenDraftKeepPicks, clearBlindBids, blindBids, assignSponsorships, transfers, removePlayerFromSquad, deleteTransfer, forceMarkBlindBidResolved, archiveDraft, draftArchives, addPlayerToSquad, forceRatifyTransfer }) {
+function AdminTab({ teams, squads, myTeamId, playerDatabase, adminPin, logAdminReward, resetAll, changeAdminPin, addFundsToTeam, addEarned86Slot, exportBackup, restoreBackup, restoreFromNightlyBackup, endSeason, season, seasonHistory, standings, importPlayerDatabase, clearPlayerDatabase, teamLockOverride, toggleTeamLockOverride, clearChat, resetTeamPassword, squadStats, transferWindow, setTransferWindowDates, clearTransferWindow, addPrize, exportPlayerDatabaseCSV, adminRemoveCaptain, draftPicks, draftSubmitted, clearSquadsAndTransfers, applyNewBudgetAndWageCap, resetTeamDraft, reopenDraftKeepPicks, clearBlindBids, blindBids, assignSponsorships, transfers, removePlayerFromSquad, deleteTransfer, forceMarkBlindBidResolved, archiveDraft, draftArchives, addPlayerToSquad, forceRatifyTransfer, clearInjuriesAndSuspensions }) {
   const [unlocked, setUnlocked] = useState(false);
   const [pinInput, setPinInput] = useState("");
   const [err, setErr] = useState("");
@@ -8868,7 +8889,7 @@ function AdminTab({ teams, squads, myTeamId, playerDatabase, adminPin, logAdminR
         resetTeamPassword={resetTeamPassword}
         transferWindow={transferWindow} setTransferWindowDates={setTransferWindowDates} clearTransferWindow={clearTransferWindow}
         adminRemoveCaptain={adminRemoveCaptain} clearSquadsAndTransfers={clearSquadsAndTransfers}
-        applyNewBudgetAndWageCap={applyNewBudgetAndWageCap} />
+        applyNewBudgetAndWageCap={applyNewBudgetAndWageCap} clearInjuriesAndSuspensions={clearInjuriesAndSuspensions} />
     </div>
   );
 }
@@ -10042,7 +10063,7 @@ function BlindBidDamageDiagnostic({ teams, squads, transfers, adminPin, removePl
   );
 }
 
-function AdminTools({ teams, squads, resetAll, changeAdminPin, addFundsToTeam, addEarned86Slot, teamLockOverride, toggleTeamLockOverride, clearChat, resetTeamPassword, transferWindow, setTransferWindowDates, clearTransferWindow, adminRemoveCaptain, clearSquadsAndTransfers, applyNewBudgetAndWageCap }) {
+function AdminTools({ teams, squads, resetAll, changeAdminPin, addFundsToTeam, addEarned86Slot, teamLockOverride, toggleTeamLockOverride, clearChat, resetTeamPassword, transferWindow, setTransferWindowDates, clearTransferWindow, adminRemoveCaptain, clearSquadsAndTransfers, applyNewBudgetAndWageCap, clearInjuriesAndSuspensions }) {
   const [pin, setPin] = useState("");
   const [msg, setMsg] = useState(null); // { text, tone }
   const [showChangePin, setShowChangePin] = useState(false);
@@ -10107,6 +10128,14 @@ function AdminTools({ teams, squads, resetAll, changeAdminPin, addFundsToTeam, a
     setPin("");
     if (err) show(err, "red");
     else show("League Chat has been cleared.", "green");
+  };
+
+  const doClearInjuries = () => {
+    setMsg(null);
+    const err = clearInjuriesAndSuspensions(pin);
+    setPin("");
+    if (err) show(err, "red");
+    else show("Injuries and card suspensions have been cleared.", "green");
   };
 
   const doResetTeamPassword = () => {
@@ -10223,6 +10252,7 @@ function AdminTools({ teams, squads, resetAll, changeAdminPin, addFundsToTeam, a
           <Btn variant="outline" icon={Trash2} onClick={doClearSquads}>Clear Squads, Transfers & Auctions</Btn>
           <Btn variant="outline" icon={Wallet} onClick={doApplyBudget}>Apply New Budget/Wage Cap to All Teams</Btn>
           <Btn variant="outline" icon={Trash2} onClick={doClearChat}>Clear League Chat</Btn>
+          <Btn variant="outline" icon={Trash2} onClick={doClearInjuries}>Clear Injuries & Suspensions</Btn>
           <Btn variant="outline" icon={KeyRound} onClick={() => setShowChangePin((s) => !s)}>
             {showChangePin ? "Cancel" : "Change PIN"}
           </Btn>
