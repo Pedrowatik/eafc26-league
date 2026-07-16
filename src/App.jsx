@@ -5310,13 +5310,24 @@ function SquadsTab({ teams, squads, squadStats, renameTeam, setTab, movePlayerTo
   const stat = squadStats[activeTeam];
   const clubOptions = useMemo(() => [...new Set(playerDatabase.map((p) => p.club).filter(Boolean))].sort(), [playerDatabase]);
 
-  // Same reference matchday logic as the persistent Injuries panel in Fixtures - shows injury
-  // status directly in context here too, not just tucked away in a separate tab.
-  const currentMatchdayForSquadInjuries = Math.max(0, ...(fixtures || []).filter((f) => f.score1 !== "" && f.score1 != null && f.score2 !== "" && f.score2 != null).map((f) => f.matchday), 0) + 1;
+  // Same "pending fixture" logic as the Injuries panel in Fixtures - a player shows as injured
+  // here if they're out for any of this team's fixtures that have had injuries generated but no
+  // result entered yet, rather than a separate, less reliable "current matchday" guess.
   const currentlyInjuredNames = useMemo(() => {
     const teamInjuries = (injuries || {})[activeTeam] || {};
-    return new Set(Object.entries(teamInjuries).filter(([, rec]) => (rec.until ?? rec) >= currentMatchdayForSquadInjuries).map(([name]) => name));
-  }, [injuries, activeTeam, currentMatchdayForSquadInjuries]);
+    const pendingFixturesForTeam = (fixtures || []).filter((f) =>
+      (f.team1 === activeTeam || f.team2 === activeTeam) &&
+      f.injuriesGenerated &&
+      !(f.score1 !== "" && f.score1 != null && f.score2 !== "" && f.score2 != null)
+    );
+    const names = new Set();
+    pendingFixturesForTeam.forEach((f) => {
+      Object.entries(teamInjuries).forEach(([name, rec]) => {
+        if ((rec.until ?? rec) >= f.matchday) names.add(name);
+      });
+    });
+    return names;
+  }, [injuries, activeTeam, fixtures]);
 
   const move = (fromGroup, index, toGroup) => {
     const err = movePlayerToGroup(activeTeam, fromGroup, index, toGroup);
@@ -6951,6 +6962,7 @@ function generateRoundRobin(teamIds, doubleRound) {
 }
 
 function FixturesTab({ teams, fixtures, setFixtures, logActivity, myTeamId, squads, injuries, generateInjuries, cardTally, setCardTally, suspensions, setSuspensions }) {
+  const teamById = useMemo(() => Object.fromEntries(teams.map((t) => [t.id, t])), [teams]);
   const blank = { matchday: 1, team1: myTeamId || teams[0].id, team2: teams.find((t) => t.id !== myTeamId)?.id || teams[1].id, date: todayISO(), proof: "" };
   const [form, setForm] = useState(blank);
   const [warning, setWarning] = useState("");
@@ -6995,23 +7007,20 @@ function FixturesTab({ teams, fixtures, setFixtures, logActivity, myTeamId, squa
 
   const suspendedNamesFor = (teamId) => new Set(Object.keys(suspensions[teamId] || {}));
 
-  // A persistent, always-visible view of who's currently injured across the whole league - the
-  // chat announcement when injuries are generated is easy to lose if people are actively talking,
-  // so this gives everyone a reliable place to just look it up directly instead.
-  const currentMatchdayForInjuries = Math.max(0, ...fixtures.filter((f) => f.score1 !== "" && f.score1 != null && f.score2 !== "" && f.score2 != null).map((f) => f.matchday), 0) + 1;
-  const currentInjuriesByTeam = useMemo(() => {
-    const out = {};
-    teams.forEach((t) => {
-      const teamInjuries = injuries[t.id] || {};
-      const active = Object.entries(teamInjuries)
-        .map(([name, rec]) => ({ name, until: rec.until ?? rec }))
-        .filter(({ until }) => until >= currentMatchdayForInjuries)
-        .map(({ name, until }) => ({ name, until, remaining: until - currentMatchdayForInjuries + 1 }));
-      if (active.length > 0) out[t.id] = active;
-    });
-    return out;
-  }, [teams, injuries, currentMatchdayForInjuries]);
-  const totalCurrentlyInjured = Object.values(currentInjuriesByTeam).reduce((s, list) => s + list.length, 0);
+  // Organized by upcoming fixture, not by player - each fixture whose injuries have been generated
+  // but whose result hasn't been entered yet gets its own entry here, showing who's out for that
+  // specific match on each side. The moment a result is entered, that fixture naturally drops off
+  // this list on its own (since the filter below no longer matches it) - no separate cleanup needed.
+  const pendingInjuryFixtures = useMemo(() => {
+    return fixtures
+      .filter((f) => f.injuriesGenerated && !(f.score1 !== "" && f.score1 != null && f.score2 !== "" && f.score2 != null))
+      .map((f) => ({
+        fixture: f,
+        team1Injured: [...injuredNamesFor(f.team1, f.matchday)],
+        team2Injured: [...injuredNamesFor(f.team2, f.matchday)],
+      }))
+      .sort((a, b) => a.fixture.matchday - b.fixture.matchday);
+  }, [fixtures, injuries]);
 
   const eligiblePlayersFor = (teamId, matchday) => {
     const hurt = injuredNamesFor(teamId, matchday);
@@ -7135,26 +7144,31 @@ function FixturesTab({ teams, fixtures, setFixtures, logActivity, myTeamId, squa
 
   return (
     <div className="grid gap-4">
-      {totalCurrentlyInjured > 0 && (
+      {pendingInjuryFixtures.length > 0 && (
         <Panel style={{ padding: 18, border: `1px solid ${C.red}55` }}>
-          <SectionTitle icon={AlertTriangle}>Current Injuries ({totalCurrentlyInjured})</SectionTitle>
+          <SectionTitle icon={AlertTriangle}>Injury Reports Pending a Result ({pendingInjuryFixtures.length})</SectionTitle>
           <div style={{ color: C.muted, fontSize: 11.5, marginBottom: 12 }}>
-            A persistent view of who's currently unavailable — separate from the chat announcement, which is easy to
-            lose if people are actively talking when injuries get generated.
+            Every upcoming fixture that's had its injuries generated but hasn't had a result entered yet — separate
+            from the chat announcement, which is easy to lose if people are actively talking. Each one drops off this
+            list automatically the moment its result gets entered.
           </div>
-          <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))" }}>
-            {teams.filter((t) => currentInjuriesByTeam[t.id]).map((t) => (
-              <div key={t.id} style={{ background: C.panelAlt, borderRadius: 8, padding: 10 }}>
-                <div style={{ color: C.gold, fontWeight: 700, fontSize: 12.5, marginBottom: 6 }}>{t.name}</div>
-                <div style={{ display: "grid", gap: 3 }}>
-                  {currentInjuriesByTeam[t.id].map((inj) => (
-                    <div key={inj.name} className="flex items-center justify-between" style={{ fontSize: 12, color: C.text }}>
-                      <span>{inj.name}</span>
-                      <span style={{ color: C.red, fontSize: 11 }}>
-                        {inj.remaining <= 1 ? "out this MD" : `out ${inj.remaining} more MD${inj.remaining === 1 ? "" : "s"}`}
-                      </span>
-                    </div>
-                  ))}
+          <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))" }}>
+            {pendingInjuryFixtures.map(({ fixture: f, team1Injured, team2Injured }) => (
+              <div key={f.id} style={{ background: C.panelAlt, borderRadius: 8, padding: 10 }}>
+                <div style={{ color: C.gold, fontWeight: 700, fontSize: 12.5, marginBottom: 6 }}>
+                  MD{f.matchday} — {teamById[f.team1]?.name || f.team1} vs {teamById[f.team2]?.name || f.team2}
+                </div>
+                <div style={{ fontSize: 12, color: C.text, marginBottom: 3 }}>
+                  <b>{teamById[f.team1]?.name || f.team1}:</b>{" "}
+                  <span style={{ color: team1Injured.length ? C.red : C.muted }}>
+                    {team1Injured.length ? team1Injured.join(", ") : "no injuries"}
+                  </span>
+                </div>
+                <div style={{ fontSize: 12, color: C.text }}>
+                  <b>{teamById[f.team2]?.name || f.team2}:</b>{" "}
+                  <span style={{ color: team2Injured.length ? C.red : C.muted }}>
+                    {team2Injured.length ? team2Injured.join(", ") : "no injuries"}
+                  </span>
                 </div>
               </div>
             ))}
