@@ -10126,13 +10126,15 @@ function BlindBidDamageDiagnostic({ teams, squads, transfers, adminPin, removePl
     else setRatifyMsg({ text: "Transfer force-ratified — should settle within the next 15 seconds.", tone: "green" });
   };
 
-  // Duplicate blind-bid transfer records: the same player won via blind bid more than once for
-  // the same team is the direct fingerprint of the double-resolution bug — each extra occurrence
-  // represents a real, duplicate budget deduction that should be refunded via Add Funds below.
+  // Duplicate transfer records: the same player, same team, same price, same date appearing more
+  // than once is the fingerprint of a duplicate charge - regardless of how the signing happened
+  // (blind bid, auction, draft, direct add). Each extra occurrence is a real, duplicate budget
+  // deduction that should be refunded. Previously this only checked blind bid wins specifically,
+  // which meant duplicates from other signing types (like a "Non OCM" auction win) went undetected.
   const duplicateTransfers = useMemo(() => {
     const groups = {};
-    transfers.filter((tx) => tx.notes === "Won blind bid").forEach((tx) => {
-      const key = `${tx.player}::${tx.to}`;
+    transfers.filter((tx) => !tx.cancelled && tx.from !== "AUCTION_LOSS").forEach((tx) => {
+      const key = `${tx.player}::${tx.to}::${tx.price}::${tx.date}`;
       if (!groups[key]) groups[key] = [];
       groups[key].push(tx);
     });
