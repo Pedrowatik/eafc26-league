@@ -4814,7 +4814,7 @@ export default function EafcLeagueApp() {
             cardTally={cardTally} setCardTally={setCardTally} suspensions={suspensions} setSuspensions={setSuspensions} />
         )}
         {tab === "standings" && (
-          <StandingsTab teams={teams} standings={standings} fixtures={fixtures} sponsorships={sponsorships} />
+          <StandingsTab teams={teams} standings={standings} fixtures={fixtures} sponsorships={sponsorships} squads={squads} />
         )}
 
         {tab === "cup" && (
@@ -7712,7 +7712,7 @@ function CupTab({ teams, fixtures, cupState, adminPin, openCup, resolveCupGroupS
   );
 }
 
-function StandingsTab({ teams, standings, fixtures, sponsorships }) {
+function StandingsTab({ teams, standings, fixtures, sponsorships, squads }) {
   const teamById = useMemo(() => Object.fromEntries(teams.map((t) => [t.id, t])), [teams]);
 
   // Last 5 completed results per team, oldest to newest (left to right), ordered by matchday since
@@ -7734,12 +7734,19 @@ function StandingsTab({ teams, standings, fixtures, sponsorships }) {
   }, [fixtures, teams]);
 
   const seasonAwards = useMemo(() => {
-    const goals = {}, assists = {}, motmCounts = {};
+    const goals = {}, assists = {}, motmCounts = {}, cleanSheets = {};
     const bump = (map, teamId, name, amount) => {
       const key = `${teamId}::${name}`;
       if (!map[key]) map[key] = { name, teamId, count: 0 };
       map[key].count += amount;
     };
+    // Any GK who played for the side that kept a clean sheet gets credit - cross-referenced against
+    // squad data since a player's position isn't itself stored on their match stat line.
+    const gkNamesFor = (teamId) => new Set(
+      [...(squads[teamId]?.starters || []), ...(squads[teamId]?.reserves || [])]
+        .filter((p) => p && p.position === "GK")
+        .map((p) => p.name)
+    );
     fixtures.forEach((f) => {
       if (!f.stats) return;
       (f.stats.team1 || []).forEach((p) => {
@@ -7754,12 +7761,21 @@ function StandingsTab({ teams, standings, fixtures, sponsorships }) {
         const inTeam1 = (f.stats.team1 || []).some((p) => p.name === f.stats.motm);
         bump(motmCounts, inTeam1 ? f.team1 : f.team2, f.stats.motm, 1);
       }
+      const s1 = Number(f.score1), s2 = Number(f.score2);
+      if (s2 === 0) {
+        const gks = gkNamesFor(f.team1);
+        (f.stats.team1 || []).forEach((p) => { if (p.played && gks.has(p.name)) bump(cleanSheets, f.team1, p.name, 1); });
+      }
+      if (s1 === 0) {
+        const gks = gkNamesFor(f.team2);
+        (f.stats.team2 || []).forEach((p) => { if (p.played && gks.has(p.name)) bump(cleanSheets, f.team2, p.name, 1); });
+      }
     });
     const topN = (map) => Object.values(map).sort((a, b) => b.count - a.count).slice(0, 5);
-    return { topScorers: topN(goals), topAssisters: topN(assists), topMotm: topN(motmCounts) };
-  }, [fixtures]);
+    return { topScorers: topN(goals), topAssisters: topN(assists), topMotm: topN(motmCounts), goldenGlove: topN(cleanSheets) };
+  }, [fixtures, squads]);
 
-  const hasAwards = seasonAwards.topScorers.length || seasonAwards.topAssisters.length || seasonAwards.topMotm.length;
+  const hasAwards = seasonAwards.topScorers.length || seasonAwards.topAssisters.length || seasonAwards.topMotm.length || seasonAwards.goldenGlove.length;
 
   return (
     <div className="grid gap-4">
@@ -7821,6 +7837,11 @@ function StandingsTab({ teams, standings, fixtures, sponsorships }) {
               <div style={{ color: C.gold, fontWeight: 700, fontSize: 12.5, marginBottom: 8 }}>Most MOTM Awards</div>
               <Table dense head={["Player", "Team", "Awards"]}
                 rows={seasonAwards.topMotm.map((p) => [p.name, teamById[p.teamId]?.name || "—", p.count])} />
+            </div>
+            <div>
+              <div style={{ color: C.gold, fontWeight: 700, fontSize: 12.5, marginBottom: 8 }}>Golden Glove</div>
+              <Table dense head={["Goalkeeper", "Team", "Clean Sheets"]}
+                rows={seasonAwards.goldenGlove.map((p) => [p.name, teamById[p.teamId]?.name || "—", p.count])} />
             </div>
           </div>
         )}
