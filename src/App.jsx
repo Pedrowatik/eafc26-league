@@ -2908,75 +2908,70 @@ export default function EafcLeagueApp() {
   // be entered, so injured players are correctly excluded from the match stats player list.
   const generateInjuries = async (fixture) => {
     if (fixture.injuriesGenerated) return "Injuries have already been generated for this fixture.";
-    const pickDuration = () => {
-      const r = Math.random();
-      if (r < 0.40) return 1;
-      if (r < 0.70) return 2;
-      if (r < 0.90) return 3;
-      return 4; // rare
-    };
 
     // Fresh read straight from storage before computing anything - this is what actually prevents
     // two people generating injuries for two different fixtures around the same moment from each
-    // working off a stale local copy of who's already injured, which was letting the same player
-    // get independently re-injured by both, or a team's true "already out this matchday" count
-    // being miscounted, producing things like 6 injured players for one team in one match.
-    let baseInjuries = injuries;
+    // working off a stale local copy of who's already been injured this season, which could let the
+    // same player's count be incremented independently by both and end up over the cap.
+    let baseInjuryCounts = injuries;
     try {
       const fresh = await storage.get(MATCHDATA_STORAGE_KEY, true);
       if (fresh && fresh.value) {
         const freshData = JSON.parse(fresh.value);
-        if (freshData.injuries) baseInjuries = freshData.injuries;
+        if (freshData.injuries) baseInjuryCounts = freshData.injuries;
       }
     } catch (e) {
       // fall back to local state if the fresh read fails
     }
 
-    const newlyInjuredByTeam = {};
-    const nextInjuries = { ...baseInjuries };
+    const injuredPlayers = {};
+    const nextInjuryCounts = { ...baseInjuryCounts };
     [fixture.team1, fixture.team2].forEach((teamId) => {
       const squadPlayers = [...(squads[teamId]?.starters || []), ...(squads[teamId]?.reserves || [])].filter(Boolean);
-      const teamInjuries = { ...(nextInjuries[teamId] || {}) };
-      // A player is only eligible if they're not currently out AND haven't already used up their
-      // full season allowance of MAX_INJURY_MATCHDAYS_PER_SEASON matchdays - this is a season-long
-      // cap per player, not a per-injury-event one, so someone who's already missed a combined 4
-      // matchdays across earlier injuries this season can't be sidelined again until next season.
-      const eligible = squadPlayers.filter((p) => {
-        const rec = teamInjuries[p.name];
-        if (!rec) return true;
-        const currentlyOut = rec.until >= fixture.matchday;
-        const usedUpAllowance = (rec.totalDays || 0) >= MAX_INJURY_MATCHDAYS_PER_SEASON;
-        return !currentlyOut && !usedUpAllowance;
-      });
-      // How many players are already carrying an injury into this specific matchday, from an
-      // earlier fixture that hasn't expired yet - the max of 3 unavailable per team applies to the
-      // TOTAL for this match, not just how many are newly generated here, so that total (carryover
-      // + new) should never exceed 3.
-      const alreadyOutThisMatchday = squadPlayers.filter((p) => {
-        const rec = teamInjuries[p.name];
-        return rec && rec.until >= fixture.matchday;
-      }).length;
-      const maxNewInjuries = Math.max(0, 3 - alreadyOutThisMatchday);
-      const count = Math.floor(Math.random() * (maxNewInjuries + 1)); // 0 up to maxNewInjuries
+      const teamCounts = { ...(nextInjuryCounts[teamId] || {}) };
+      // A player is only eligible if they haven't already been injured MAX_INJURY_MATCHDAYS_PER_SEASON
+      // times this season - each time they're selected here counts as one, regardless of how many
+      // matchdays apart those selections are. This is a simple independent roll for THIS matchday
+      // only, not a multi-matchday duration set upfront - the game never chooses in advance whether
+      // someone will be out for a future match, only for the specific fixture being generated now.
+      const eligible = squadPlayers.filter((p) => (teamCounts[p.name] || 0) < MAX_INJURY_MATCHDAYS_PER_SEASON);
+      const count = Math.floor(Math.random() * 4); // 0, 1, 2, or 3
       const shuffled = [...eligible].sort(() => Math.random() - 0.5).slice(0, count);
-      newlyInjuredByTeam[teamId] = shuffled.map((p) => p.name);
+      injuredPlayers[teamId] = shuffled.map((p) => p.name);
       shuffled.forEach((p) => {
-        const existing = teamInjuries[p.name];
-        const alreadyUsed = existing ? (existing.totalDays || 0) : 0;
-        const remainingAllowance = MAX_INJURY_MATCHDAYS_PER_SEASON - alreadyUsed;
-        const duration = Math.min(pickDuration(), remainingAllowance);
-        teamInjuries[p.name] = { until: fixture.matchday + duration - 1, totalDays: alreadyUsed + duration };
+        teamCounts[p.name] = (teamCounts[p.name] || 0) + 1;
       });
-      nextInjuries[teamId] = teamInjuries;
+      nextInjuryCounts[teamId] = teamCounts;
     });
-    setInjuries(nextInjuries);
-    setFixtures((all) => all.map((f) => (f.id === fixture.id ? { ...f, injuriesGenerated: true } : f)));
+    setInjuries(nextInjuryCounts);
+    setFixtures((all) => all.map((f) => (f.id === fixture.id ? { ...f, injuriesGenerated: true, injuredPlayers } : f)));
+
+    // Direct, targeted write straight to storage for just this fixture's change, merged against a
+    // fresh read of everything else - this is what actually prevents two people generating
+    // injuries for two different fixtures around the same moment from clobbering each other via
+    // the main blob's blanket-overwrite autosave. Every other field in the blob comes from the
+    // fresh read itself, not this browser's local copy, so nothing else gets stomped either.
+    try {
+      const fresh = await storage.get(STORAGE_KEY, true);
+      if (fresh && fresh.value) {
+        const freshData = JSON.parse(fresh.value);
+        const freshFixtures = (freshData.fixtures || []).map((f) =>
+          f.id === fixture.id ? { ...f, injuriesGenerated: true, injuredPlayers } : f
+        );
+        const savedAt = Date.now();
+        await storage.set(STORAGE_KEY, JSON.stringify({ ...freshData, fixtures: freshFixtures, savedAt }), true);
+        knownSavedAtRef.current = savedAt;
+        setLastSyncedAt(savedAt);
+      }
+    } catch (e) {
+      // best effort — the regular autosave will still pick this up if this direct write fails
+    }
 
     // Auto-post the report to League Chat, tagged to both teams so each gets notified — saves
     // everyone having to go dig through the fixture to see who's unavailable.
     const t1Name = teamById[fixture.team1]?.name || fixture.team1, t2Name = teamById[fixture.team2]?.name || fixture.team2;
     const describe = (teamName, list) => `${teamName}: ${list.length ? list.join(", ") : "no injuries"}`;
-    const reportText = `🏥 Injury Report (MD${fixture.matchday}) — ${describe(t1Name, newlyInjuredByTeam[fixture.team1])}; ${describe(t2Name, newlyInjuredByTeam[fixture.team2])}`;
+    const reportText = `🏥 Injury Report (MD${fixture.matchday}) — ${describe(t1Name, injuredPlayers[fixture.team1])}; ${describe(t2Name, injuredPlayers[fixture.team2])}`;
     setChat((c) => [
       ...c,
       { id: uid(), author: "League", text: reportText, time: Date.now(), taggedTeam: fixture.team1 },
@@ -4078,6 +4073,13 @@ export default function EafcLeagueApp() {
     setInjuries({});
     setCardTally({});
     setSuspensions({});
+    // Also reset each fixture's own injury flag/list, so fixtures generated under the old system
+    // (which stored injury data separately, not on the fixture itself) can cleanly re-generate
+    // fresh under the current one, rather than sitting there marked "generated" with nothing in it.
+    setFixtures((all) => all.map((f) => {
+      const { injuredPlayers, ...rest } = f;
+      return { ...rest, injuriesGenerated: false };
+    }));
     logActivity("Admin cleared all injuries and card suspensions.", "match");
     return null;
   };
@@ -5494,11 +5496,9 @@ function SquadsTab({ teams, squads, squadStats, renameTeam, setTab, movePlayerTo
   const stat = squadStats[activeTeam];
   const clubOptions = useMemo(() => [...new Set(playerDatabase.map((p) => p.club).filter(Boolean))].sort(), [playerDatabase]);
 
-  // Same "pending fixture" logic as the Injuries panel in Fixtures - a player shows as injured
-  // here if they're out for any of this team's fixtures that have had injuries generated but no
-  // result entered yet, rather than a separate, less reliable "current matchday" guess.
+  // A player shows as injured here if they're listed in any of this team's pending fixtures
+  // (injuries generated, no result yet) - reads directly off each fixture's own injury list.
   const currentlyInjuredNames = useMemo(() => {
-    const teamInjuries = (injuries || {})[activeTeam] || {};
     const pendingFixturesForTeam = (fixtures || []).filter((f) =>
       (f.team1 === activeTeam || f.team2 === activeTeam) &&
       f.injuriesGenerated &&
@@ -5506,12 +5506,10 @@ function SquadsTab({ teams, squads, squadStats, renameTeam, setTab, movePlayerTo
     );
     const names = new Set();
     pendingFixturesForTeam.forEach((f) => {
-      Object.entries(teamInjuries).forEach(([name, rec]) => {
-        if ((rec.until ?? rec) >= f.matchday) names.add(name);
-      });
+      ((f.injuredPlayers && f.injuredPlayers[activeTeam]) || []).forEach((name) => names.add(name));
     });
     return names;
-  }, [injuries, activeTeam, fixtures]);
+  }, [fixtures, activeTeam]);
 
   const move = (fromGroup, index, toGroup) => {
     const err = movePlayerToGroup(activeTeam, fromGroup, index, toGroup);
@@ -7184,10 +7182,7 @@ function FixturesTab({ teams, fixtures, setFixtures, logActivity, myTeamId, squa
 
   const squadPlayersFor = (teamId) => [...(squads[teamId]?.starters || []), ...(squads[teamId]?.reserves || [])].filter(Boolean);
 
-  const injuredNamesFor = (teamId, matchday) => {
-    const teamInjuries = injuries[teamId] || {};
-    return new Set(Object.entries(teamInjuries).filter(([, rec]) => (rec.until ?? rec) >= matchday).map(([name]) => name));
-  };
+  const injuredNamesFor = (fixture, teamId) => new Set((fixture.injuredPlayers && fixture.injuredPlayers[teamId]) || []);
 
   const suspendedNamesFor = (teamId) => new Set(Object.keys(suspensions[teamId] || {}));
 
@@ -7200,14 +7195,14 @@ function FixturesTab({ teams, fixtures, setFixtures, logActivity, myTeamId, squa
       .filter((f) => f.injuriesGenerated && !(f.score1 !== "" && f.score1 != null && f.score2 !== "" && f.score2 != null))
       .map((f) => ({
         fixture: f,
-        team1Injured: [...injuredNamesFor(f.team1, f.matchday)],
-        team2Injured: [...injuredNamesFor(f.team2, f.matchday)],
+        team1Injured: (f.injuredPlayers && f.injuredPlayers[f.team1]) || [],
+        team2Injured: (f.injuredPlayers && f.injuredPlayers[f.team2]) || [],
       }))
       .sort((a, b) => a.fixture.matchday - b.fixture.matchday);
-  }, [fixtures, injuries]);
+  }, [fixtures]);
 
-  const eligiblePlayersFor = (teamId, matchday) => {
-    const hurt = injuredNamesFor(teamId, matchday);
+  const eligiblePlayersFor = (fixture, teamId) => {
+    const hurt = injuredNamesFor(fixture, teamId);
     const banned = suspendedNamesFor(teamId);
     return squadPlayersFor(teamId).filter((p) => !hurt.has(p.name) && !banned.has(p.name));
   };
@@ -7216,7 +7211,7 @@ function FixturesTab({ teams, fixtures, setFixtures, logActivity, myTeamId, squa
     setEnteringResultFor(f.id);
     setResultError("");
     const blankPlayerStats = (teamId) => Object.fromEntries(
-      eligiblePlayersFor(teamId, f.matchday).map((p) => [p.name, { played: false, goals: 0, assists: 0, yellow: false, red: false }])
+      eligiblePlayersFor(f, teamId).map((p) => [p.name, { played: false, goals: 0, assists: 0, yellow: false, red: false }])
     );
     setResultForm({
       score1: "", score2: "",
@@ -7491,8 +7486,8 @@ function FixturesTab({ teams, fixtures, setFixtures, logActivity, myTeamId, squa
                       <td colSpan={8} style={{ padding: "0 8px 14px" }}>
                         <MatchStatsPanel
                           team1Name={t1} team2Name={t2}
-                          team1Players={eligiblePlayersFor(f.team1, f.matchday)} team2Players={eligiblePlayersFor(f.team2, f.matchday)}
-                          team1Injured={[...injuredNamesFor(f.team1, f.matchday), ...suspendedNamesFor(f.team1)]} team2Injured={[...injuredNamesFor(f.team2, f.matchday), ...suspendedNamesFor(f.team2)]}
+                          team1Players={eligiblePlayersFor(f, f.team1)} team2Players={eligiblePlayersFor(f, f.team2)}
+                          team1Injured={[...injuredNamesFor(f, f.team1), ...suspendedNamesFor(f.team1)]} team2Injured={[...injuredNamesFor(f, f.team2), ...suspendedNamesFor(f.team2)]}
                           resultForm={resultForm} togglePlayed={togglePlayed} updateStat={updateStat}
                           setMotm={(name) => setResultForm((r) => ({ ...r, motm: name }))}
                           error={resultError}
