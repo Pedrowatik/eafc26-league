@@ -203,6 +203,7 @@ const teamKeyFor = (teamId) => `eafc26-team-${teamId}-v1`;
 // that aren't in whichever snapshot happens to save last.
 const draftKeyFor = (teamId) => `eafc26-draft-${teamId}-v1`;
 const PLAYERDB_STORAGE_KEY = "eafc26-player-database-v1";
+const MATCHDATA_STORAGE_KEY = "eafc26-matchday-data-v1"; // { injuries, cardTally, suspensions } — split out from the main blob since these get written concurrently by multiple people (generating injuries, entering results) and need proper per-team merge protection, not a blanket overwrite
 const SCOUTING_BOOKMARKS_STORAGE_KEY = "eafc26-scouting-bookmarks-v1"; // { [teamId]: [{ name, club, position, bookmarkedAt }] }
 // The admin PIN gets its own dedicated key — it's the "keys to the kingdom," and it's exactly what
 // just got wiped when a stale browser overwrote the whole shared blob back to defaults.
@@ -788,6 +789,14 @@ export default function EafcLeagueApp() {
   const lastSyncedPlayerDbRef = useRef(new Map());
   const knownScoutingBookmarksSavedAtRef = useRef(0);
   const lastSyncedScoutingBookmarksRef = useRef(new Map()); // per-team: teamId -> last-synced JSON, same dirty-tracking approach used elsewhere
+  const knownMatchDataSavedAtRef = useRef(0);
+  const matchDataSavingRef = useRef(false);
+  // Tracks each team's last-synced injuries/cardTally/suspensions JSON, so the autosave can merge
+  // instead of blindly overwriting - this is exactly what was letting concurrent "Generate
+  // Injuries" clicks (or a result entry landing around the same time) silently stomp on each
+  // other's changes, producing things like a team showing 6 injured players in one match or a
+  // player's total exceeding the season cap.
+  const lastSyncedMatchDataRef = useRef(new Map());
   const scoutingBookmarksSavingRef = useRef(false);
   const knownAdminPinSavedAtRef = useRef(0);
   const knownBlindBidsSavedAtRef = useRef(0);
@@ -832,7 +841,6 @@ export default function EafcLeagueApp() {
     if (data.season) setSeason(data.season);
     if (data.seasonHistory) setSeasonHistory(data.seasonHistory);
     if (data.activity) setActivity(data.activity);
-    if (data.injuries) setInjuries(data.injuries);
     if (data.teamLockOverride !== undefined) setTeamLockOverride(data.teamLockOverride);
     if (data.draftState) setDraftState(data.draftState);
     if (data.cupState) setCupState(data.cupState);
@@ -841,8 +849,6 @@ export default function EafcLeagueApp() {
     if (data.transferWindow) setTransferWindow(data.transferWindow);
     if (data.swapsUsed) setSwapsUsed(data.swapsUsed);
     if (data.swapOffers) setSwapOffers(data.swapOffers);
-    if (data.cardTally) setCardTally(data.cardTally);
-    if (data.suspensions) setSuspensions(data.suspensions);
   }, []);
 
   // load once
@@ -856,6 +862,9 @@ export default function EafcLeagueApp() {
       let legacyPlayerDbForMigration = null;
       let legacyDraftPicksForMigration = null;
       let legacyDraftSubmittedForMigration = null;
+      let legacyInjuriesForMigration = null;
+      let legacyCardTallyForMigration = null;
+      let legacySuspensionsForMigration = null;
       let legacyAdminPinForMigration = null;
       let legacyBlindBidsForMigration = null;
       let legacyTransfersForMigration = null;
@@ -876,6 +885,9 @@ export default function EafcLeagueApp() {
           legacyAdminPinForMigration = data.adminPin || null;
           legacyBlindBidsForMigration = data.blindBids || null;
           legacyTransfersForMigration = data.transfers || null;
+          legacyInjuriesForMigration = data.injuries || null;
+          legacyCardTallyForMigration = data.cardTally || null;
+          legacySuspensionsForMigration = data.suspensions || null;
           if (data.teams && data.teams.length) teamIdsForSquadLoad = data.teams.map((t) => t.id);
           knownSavedAtRef.current = data.savedAt || Date.now();
           setLastSyncedAt(knownSavedAtRef.current);
@@ -940,6 +952,35 @@ export default function EafcLeagueApp() {
         }
       } catch (e) {
         // best effort — starts empty if nothing's been saved yet
+      }
+      // Injuries, card tallies, and suspensions — own key too, per-team, merge-based. Falls back to
+      // whatever was in the old shared blob if this key hasn't been written to yet.
+      try {
+        const mdRes = await storage.get(MATCHDATA_STORAGE_KEY, true);
+        if (mdRes && mdRes.value) {
+          const mdData = JSON.parse(mdRes.value);
+          const loadedInjuries = mdData.injuries || {};
+          const loadedCardTally = mdData.cardTally || {};
+          const loadedSuspensions = mdData.suspensions || {};
+          setInjuries(loadedInjuries);
+          setCardTally(loadedCardTally);
+          setSuspensions(loadedSuspensions);
+          knownMatchDataSavedAtRef.current = mdData.savedAt || Date.now();
+          const allTeamIds = new Set([...Object.keys(loadedInjuries), ...Object.keys(loadedCardTally), ...Object.keys(loadedSuspensions)]);
+          lastSyncedMatchDataRef.current = new Map(
+            [...allTeamIds].map((teamId) => [teamId, JSON.stringify({
+              injuries: loadedInjuries[teamId] || {}, cardTally: loadedCardTally[teamId] || {}, suspensions: loadedSuspensions[teamId] || {},
+            })])
+          );
+        } else if (legacyInjuriesForMigration || legacyCardTallyForMigration || legacySuspensionsForMigration) {
+          if (legacyInjuriesForMigration) setInjuries(legacyInjuriesForMigration);
+          if (legacyCardTallyForMigration) setCardTally(legacyCardTallyForMigration);
+          if (legacySuspensionsForMigration) setSuspensions(legacySuspensionsForMigration);
+        }
+      } catch (e) {
+        if (legacyInjuriesForMigration) setInjuries(legacyInjuriesForMigration);
+        if (legacyCardTallyForMigration) setCardTally(legacyCardTallyForMigration);
+        if (legacySuspensionsForMigration) setSuspensions(legacySuspensionsForMigration);
       }
       // Each team's own draft picks + submitted flag live under their own key too — the draft is
       // specifically designed for everyone to edit their own picks at the same time.
@@ -1150,7 +1191,7 @@ export default function EafcLeagueApp() {
         const savedAt = Date.now();
         await storage.set(
           STORAGE_KEY,
-          JSON.stringify({ fixtures, prizes, events, season, seasonHistory, activity, injuries, teamLockOverride, draftState, cupState, sponsorships, draftArchives, cardTally, suspensions, transferWindow, swapsUsed, swapOffers, savedAt }),
+          JSON.stringify({ fixtures, prizes, events, season, seasonHistory, activity, teamLockOverride, draftState, cupState, sponsorships, draftArchives, transferWindow, swapsUsed, swapOffers, savedAt }),
           true
         );
         knownSavedAtRef.current = savedAt;
@@ -1163,7 +1204,7 @@ export default function EafcLeagueApp() {
       }
     }, 300);
     return () => clearTimeout(t);
-  }, [fixtures, prizes, events, season, seasonHistory, activity, injuries, teamLockOverride, draftState, cupState, sponsorships, draftArchives, cardTally, suspensions, transferWindow, swapsUsed, swapOffers, loaded]);
+  }, [fixtures, prizes, events, season, seasonHistory, activity, teamLockOverride, draftState, cupState, sponsorships, draftArchives, transferWindow, swapsUsed, swapOffers, loaded]);
 
   // Private messages save to their own separate key, on their own quick timer — this is what
   // actually stops a message from getting silently erased if someone else's browser (with a
@@ -1572,6 +1613,124 @@ export default function EafcLeagueApp() {
           setScoutingBookmarks(incoming);
           knownScoutingBookmarksSavedAtRef.current = remoteSavedAt;
           lastSyncedScoutingBookmarksRef.current = new Map(Object.entries(incoming).map(([teamId, list]) => [teamId, JSON.stringify(list)]));
+        }
+      } catch (e) {
+        // ignore malformed payloads
+      }
+    });
+    return unsubscribe;
+  }, [loaded]);
+
+  // Injuries, card tallies, and suspensions save to their own key, merged per-team - this is what
+  // actually closes the race that let one person generating injuries for one fixture get silently
+  // overwritten by someone else generating injuries for a different fixture (or entering a result)
+  // around the same moment, which is exactly what produced things like a team showing 6 injured
+  // players for one match or a player's season total exceeding the 4-matchday cap.
+  const buildTeamMatchDataKey = (teamId) => JSON.stringify({
+    injuries: injuries[teamId] || {}, cardTally: cardTally[teamId] || {}, suspensions: suspensions[teamId] || {},
+  });
+  useEffect(() => {
+    if (!loaded) return;
+    matchDataSavingRef.current = true;
+    const t = setTimeout(async () => {
+      try {
+        let serverInjuries = {}, serverCardTally = {}, serverSuspensions = {};
+        try {
+          const fresh = await storage.get(MATCHDATA_STORAGE_KEY, true);
+          if (fresh && fresh.value) {
+            const freshData = JSON.parse(fresh.value);
+            serverInjuries = freshData.injuries || {};
+            serverCardTally = freshData.cardTally || {};
+            serverSuspensions = freshData.suspensions || {};
+          }
+        } catch (e) {
+          serverInjuries = injuries; serverCardTally = cardTally; serverSuspensions = suspensions;
+        }
+        const mergedInjuries = { ...serverInjuries }, mergedCardTally = { ...serverCardTally }, mergedSuspensions = { ...serverSuspensions };
+        const allLocalTeamIds = new Set([...Object.keys(injuries), ...Object.keys(cardTally), ...Object.keys(suspensions)]);
+        allLocalTeamIds.forEach((teamId) => {
+          const lastSynced = lastSyncedMatchDataRef.current.get(teamId);
+          const current = buildTeamMatchDataKey(teamId);
+          if (lastSynced !== current) {
+            // only this team's slice gets overwritten with the local version - every other team's
+            // data, even if this browser doesn't know about a very recent change to it, survives
+            mergedInjuries[teamId] = injuries[teamId] || {};
+            mergedCardTally[teamId] = cardTally[teamId] || {};
+            mergedSuspensions[teamId] = suspensions[teamId] || {};
+          }
+        });
+        const savedAt = Date.now();
+        await storage.set(MATCHDATA_STORAGE_KEY, JSON.stringify({ injuries: mergedInjuries, cardTally: mergedCardTally, suspensions: mergedSuspensions, savedAt }), true);
+        knownMatchDataSavedAtRef.current = savedAt;
+        const allMergedTeamIds = new Set([...Object.keys(mergedInjuries), ...Object.keys(mergedCardTally), ...Object.keys(mergedSuspensions)]);
+        lastSyncedMatchDataRef.current = new Map(
+          [...allMergedTeamIds].map((teamId) => [teamId, JSON.stringify({
+            injuries: mergedInjuries[teamId] || {}, cardTally: mergedCardTally[teamId] || {}, suspensions: mergedSuspensions[teamId] || {},
+          })])
+        );
+        if (JSON.stringify(mergedInjuries) !== JSON.stringify(injuries)) setInjuries(mergedInjuries);
+        if (JSON.stringify(mergedCardTally) !== JSON.stringify(cardTally)) setCardTally(mergedCardTally);
+        if (JSON.stringify(mergedSuspensions) !== JSON.stringify(suspensions)) setSuspensions(mergedSuspensions);
+      } catch (e) {
+        // best effort
+      } finally {
+        matchDataSavingRef.current = false;
+      }
+    }, 300);
+    return () => clearTimeout(t);
+  }, [injuries, cardTally, suspensions, loaded]);
+
+  const pullLatestMatchData = useCallback(async () => {
+    if (matchDataSavingRef.current) return;
+    try {
+      const res = await storage.get(MATCHDATA_STORAGE_KEY, true);
+      if (res && res.value) {
+        const data = JSON.parse(res.value);
+        const remoteSavedAt = data.savedAt || 0;
+        if (remoteSavedAt > knownMatchDataSavedAtRef.current) {
+          const incomingInjuries = data.injuries || {}, incomingCardTally = data.cardTally || {}, incomingSuspensions = data.suspensions || {};
+          setInjuries(incomingInjuries);
+          setCardTally(incomingCardTally);
+          setSuspensions(incomingSuspensions);
+          knownMatchDataSavedAtRef.current = remoteSavedAt;
+          const allTeamIds = new Set([...Object.keys(incomingInjuries), ...Object.keys(incomingCardTally), ...Object.keys(incomingSuspensions)]);
+          lastSyncedMatchDataRef.current = new Map(
+            [...allTeamIds].map((teamId) => [teamId, JSON.stringify({
+              injuries: incomingInjuries[teamId] || {}, cardTally: incomingCardTally[teamId] || {}, suspensions: incomingSuspensions[teamId] || {},
+            })])
+          );
+        }
+      }
+    } catch (e) {
+      // best effort
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!loaded) return;
+    const t = setInterval(() => pullLatestMatchData(), SYNC_POLL_MS);
+    return () => clearInterval(t);
+  }, [loaded, pullLatestMatchData]);
+
+  useEffect(() => {
+    if (!loaded) return;
+    const unsubscribe = subscribeToKey(MATCHDATA_STORAGE_KEY, (row) => {
+      if (!row || !row.value) return;
+      try {
+        const data = JSON.parse(row.value);
+        const remoteSavedAt = data.savedAt || 0;
+        if (remoteSavedAt > knownMatchDataSavedAtRef.current && !matchDataSavingRef.current) {
+          const incomingInjuries = data.injuries || {}, incomingCardTally = data.cardTally || {}, incomingSuspensions = data.suspensions || {};
+          setInjuries(incomingInjuries);
+          setCardTally(incomingCardTally);
+          setSuspensions(incomingSuspensions);
+          knownMatchDataSavedAtRef.current = remoteSavedAt;
+          const allTeamIds = new Set([...Object.keys(incomingInjuries), ...Object.keys(incomingCardTally), ...Object.keys(incomingSuspensions)]);
+          lastSyncedMatchDataRef.current = new Map(
+            [...allTeamIds].map((teamId) => [teamId, JSON.stringify({
+              injuries: incomingInjuries[teamId] || {}, cardTally: incomingCardTally[teamId] || {}, suspensions: incomingSuspensions[teamId] || {},
+            })])
+          );
         }
       } catch (e) {
         // ignore malformed payloads
@@ -2747,7 +2906,7 @@ export default function EafcLeagueApp() {
   // Randomly sidelines 0-3 players per team for this fixture (mostly 1-3 matchdays, rarely 4).
   // One-time per fixture — either team can trigger it, and it has to happen before a result can
   // be entered, so injured players are correctly excluded from the match stats player list.
-  const generateInjuries = (fixture) => {
+  const generateInjuries = async (fixture) => {
     if (fixture.injuriesGenerated) return "Injuries have already been generated for this fixture.";
     const pickDuration = () => {
       const r = Math.random();
@@ -2757,8 +2916,24 @@ export default function EafcLeagueApp() {
       return 4; // rare
     };
 
+    // Fresh read straight from storage before computing anything - this is what actually prevents
+    // two people generating injuries for two different fixtures around the same moment from each
+    // working off a stale local copy of who's already injured, which was letting the same player
+    // get independently re-injured by both, or a team's true "already out this matchday" count
+    // being miscounted, producing things like 6 injured players for one team in one match.
+    let baseInjuries = injuries;
+    try {
+      const fresh = await storage.get(MATCHDATA_STORAGE_KEY, true);
+      if (fresh && fresh.value) {
+        const freshData = JSON.parse(fresh.value);
+        if (freshData.injuries) baseInjuries = freshData.injuries;
+      }
+    } catch (e) {
+      // fall back to local state if the fresh read fails
+    }
+
     const newlyInjuredByTeam = {};
-    const nextInjuries = { ...injuries };
+    const nextInjuries = { ...baseInjuries };
     [fixture.team1, fixture.team2].forEach((teamId) => {
       const squadPlayers = [...(squads[teamId]?.starters || []), ...(squads[teamId]?.reserves || [])].filter(Boolean);
       const teamInjuries = { ...(nextInjuries[teamId] || {}) };
@@ -2773,7 +2948,16 @@ export default function EafcLeagueApp() {
         const usedUpAllowance = (rec.totalDays || 0) >= MAX_INJURY_MATCHDAYS_PER_SEASON;
         return !currentlyOut && !usedUpAllowance;
       });
-      const count = Math.floor(Math.random() * 4); // 0, 1, 2, or 3
+      // How many players are already carrying an injury into this specific matchday, from an
+      // earlier fixture that hasn't expired yet - the max of 3 unavailable per team applies to the
+      // TOTAL for this match, not just how many are newly generated here, so that total (carryover
+      // + new) should never exceed 3.
+      const alreadyOutThisMatchday = squadPlayers.filter((p) => {
+        const rec = teamInjuries[p.name];
+        return rec && rec.until >= fixture.matchday;
+      }).length;
+      const maxNewInjuries = Math.max(0, 3 - alreadyOutThisMatchday);
+      const count = Math.floor(Math.random() * (maxNewInjuries + 1)); // 0 up to maxNewInjuries
       const shuffled = [...eligible].sort(() => Math.random() - 0.5).slice(0, count);
       newlyInjuredByTeam[teamId] = shuffled.map((p) => p.name);
       shuffled.forEach((p) => {
