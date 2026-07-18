@@ -354,7 +354,7 @@ function Select(props) {
 
 // Type a name, get matches from the imported player database (Sofifa), pick one to
 // auto-fill position/rating/club/age/wage/value on whatever form it's plugged into.
-function PlayerAutocomplete({ value, onChange, onSelect, playerDatabase, placeholder }) {
+function PlayerAutocomplete({ value, onChange, onSelect, playerDatabase, placeholder, takenNames }) {
   const [open, setOpen] = useState(false);
   const [dropdownRect, setDropdownRect] = useState(null);
   const boxRef = useRef(null);
@@ -407,14 +407,17 @@ function PlayerAutocomplete({ value, onChange, onSelect, playerDatabase, placeho
           background: C.panel, border: `1px solid ${C.border}`, borderRadius: 8,
           maxHeight: 220, overflowY: "auto", boxShadow: "0 8px 20px rgba(0,0,0,0.4)",
         }}>
-          {matches.map((p) => (
-            <button key={`${p.name}::${p.club}`} onClick={() => { onSelect(p); setOpen(false); }}
-              className="flex items-center justify-between"
-              style={{ width: "100%", textAlign: "left", background: "transparent", border: "none", borderBottom: `1px solid ${C.border}33`, padding: "8px 10px", cursor: "pointer", color: C.text, fontSize: 12.5 }}>
-              <span>{p.name}</span>
-              <span style={{ color: C.muted, fontSize: 11 }}>{p.position} · {p.rating} OVR{p.club ? ` · ${p.club}` : ""}</span>
-            </button>
-          ))}
+          {matches.map((p) => {
+            const isTaken = takenNames && takenNames.has(p.name);
+            return (
+              <button key={`${p.name}::${p.club}`} onClick={() => { onSelect(p); setOpen(false); }}
+                className="flex items-center justify-between"
+                style={{ width: "100%", textAlign: "left", background: "transparent", border: "none", borderBottom: `1px solid ${C.border}33`, padding: "8px 10px", cursor: "pointer", color: isTaken ? C.red : C.text, fontSize: 12.5 }}>
+                <span>{p.name}{isTaken && <span style={{ fontSize: 10.5, marginLeft: 6 }}>(already in a squad)</span>}</span>
+                <span style={{ color: isTaken ? C.red : C.muted, fontSize: 11 }}>{p.position} · {p.rating} OVR{p.club ? ` · ${p.club}` : ""}</span>
+              </button>
+            );
+          })}
         </div>,
         document.body
       )}
@@ -6787,6 +6790,17 @@ function DraftTab({ teams, squads, squadStats, myTeamId, playerDatabase, draftSt
   }, []);
 
   const myTeam = teams.find((t) => t.id === myTeamId);
+  // Every player currently in ANY team's squad, however they got there (draft, transfer, blind bid,
+  // admin placement) - used to warn if someone about to be drafted is actually already taken.
+  const takenPlayerNames = useMemo(() => {
+    const names = new Set();
+    teams.forEach((t) => {
+      [...(squads[t.id]?.starters || []), ...(squads[t.id]?.reserves || [])].forEach((p) => {
+        if (p) names.add(p.name);
+      });
+    });
+    return names;
+  }, [teams, squads]);
   // Always exactly DRAFT_SLOTS_UI entries, however the underlying data is shaped — an empty array
   // is truthy in JS, so a plain "|| fallback" doesn't catch a team whose picks were saved as []
   // before they'd chosen anyone, which was silently collapsing the whole pick list to zero rows.
@@ -6938,6 +6952,7 @@ function DraftTab({ teams, squads, squadStats, myTeamId, playerDatabase, draftSt
                         onChange={(text) => setSlotText(i, text)}
                         playerDatabase={playerDatabase}
                         onSelect={(picked) => pickSlot(i, picked)}
+                        takenNames={takenPlayerNames}
                       />
                     )}
                     {pickErrors[i] && (
