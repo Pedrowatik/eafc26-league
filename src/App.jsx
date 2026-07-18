@@ -7035,14 +7035,12 @@ function TransfersTab({ teams, squads, transfers, logTransfer, logAdminReward, s
 }
 
 /* -------------------------------- Fixtures ---------------------------------- */
-function MatchStatsPanel({ team1Name, team2Name, team1Players, team2Players, team1Injured, team2Injured, resultForm, togglePlayed, updateStat, setMotm, error }) {
-  const playedList = (side, players) => players.filter((p) => resultForm[side][p.name]?.played);
-  const motmOptions = [
-    ...playedList("team1Stats", team1Players).map((p) => ({ name: p.name, team: team1Name })),
-    ...playedList("team2Stats", team2Players).map((p) => ({ name: p.name, team: team2Name })),
-  ];
-
-  const TeamStatBlock = ({ side, teamName, players }) => (
+// Pulled out to module level deliberately - this used to be defined inside MatchStatsPanel's own
+// render body, which meant React saw a brand new component type every single render (every
+// keystroke, every checkbox toggle) and remounted the whole scrollable player list from scratch,
+// resetting scroll position to the top each time. Being a stable, top-level component fixes that.
+function TeamStatBlock({ side, teamName, players, resultForm, togglePlayed, updateStat }) {
+  return (
     <div>
       <div style={{ color: C.gold, fontWeight: 700, fontSize: 12.5, marginBottom: 6 }}>{teamName}</div>
       <div style={{ maxHeight: 220, overflowY: "auto", border: `1px solid ${C.border}`, borderRadius: 8 }}>
@@ -7090,6 +7088,14 @@ function MatchStatsPanel({ team1Name, team2Name, team1Players, team2Players, tea
       </div>
     </div>
   );
+}
+
+function MatchStatsPanel({ team1Name, team2Name, team1Players, team2Players, team1Injured, team2Injured, resultForm, togglePlayed, updateStat, setMotm, error }) {
+  const playedList = (side, players) => players.filter((p) => resultForm[side][p.name]?.played);
+  const motmOptions = [
+    ...playedList("team1Stats", team1Players).map((p) => ({ name: p.name, team: team1Name })),
+    ...playedList("team2Stats", team2Players).map((p) => ({ name: p.name, team: team2Name })),
+  ];
 
   return (
     <div style={{ background: C.panelAlt, border: `1px solid ${C.gold}55`, borderRadius: 10, padding: 14, marginTop: 6 }}>
@@ -7102,8 +7108,8 @@ function MatchStatsPanel({ team1Name, team2Name, team1Players, team2Players, tea
         </div>
       )}
       <div className="grid gap-3 stack-on-mobile" style={{ gridTemplateColumns: "1fr 1fr" }}>
-        <TeamStatBlock side="team1Stats" teamName={team1Name} players={team1Players} />
-        <TeamStatBlock side="team2Stats" teamName={team2Name} players={team2Players} />
+        <TeamStatBlock side="team1Stats" teamName={team1Name} players={team1Players} resultForm={resultForm} togglePlayed={togglePlayed} updateStat={updateStat} />
+        <TeamStatBlock side="team2Stats" teamName={team2Name} players={team2Players} resultForm={resultForm} togglePlayed={togglePlayed} updateStat={updateStat} />
       </div>
       <div style={{ marginTop: 12 }}>
         <Field label="Man of the Match">
@@ -7249,7 +7255,7 @@ function FixturesTab({ teams, fixtures, setFixtures, logActivity, myTeamId, squa
     return parts.join("  ·  ");
   };
 
-  const saveResult = (f) => {
+  const saveResult = async (f) => {
     if (resultForm.score1 === "" || resultForm.score2 === "") { setResultError("Enter both scores."); return; }
     const team1Played = Object.entries(resultForm.team1Stats).filter(([, s]) => s.played);
     const team2Played = Object.entries(resultForm.team2Stats).filter(([, s]) => s.played);
@@ -7263,6 +7269,26 @@ function FixturesTab({ teams, fixtures, setFixtures, logActivity, myTeamId, squa
       motm: resultForm.motm || null,
     };
     setFixtures((all) => all.map((x) => (x.id === f.id ? { ...x, score1: resultForm.score1, score2: resultForm.score2, stats } : x)));
+
+    // Direct, targeted write straight to storage for just this fixture's result, merged against a
+    // fresh read of everything else - this is what actually prevents two people saving results (or
+    // any other main-blob change) around the same moment from clobbering each other, which is
+    // exactly what was making a just-submitted result silently vanish.
+    try {
+      const fresh = await storage.get(STORAGE_KEY, true);
+      if (fresh && fresh.value) {
+        const freshData = JSON.parse(fresh.value);
+        const freshFixtures = (freshData.fixtures || []).map((x) =>
+          x.id === f.id ? { ...x, score1: resultForm.score1, score2: resultForm.score2, stats } : x
+        );
+        const savedAt = Date.now();
+        await storage.set(STORAGE_KEY, JSON.stringify({ ...freshData, fixtures: freshFixtures, savedAt }), true);
+        knownSavedAtRef.current = savedAt;
+        setLastSyncedAt(savedAt);
+      }
+    } catch (e) {
+      // best effort — the regular autosave will still pick this up if this direct write fails
+    }
 
     // Suspensions aren't tied to matchday order — a ban is served the next time this specific team
     // completes ANY fixture, whichever one that happens to be. So: first, anyone currently
