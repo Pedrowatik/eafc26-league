@@ -4309,6 +4309,86 @@ export default function EafcLeagueApp() {
     return null;
   };
 
+  // For a single team joining/drafting late, after everyone else's draft has already been fully
+  // resolved - signs just this one team's submitted picks directly. Deliberately doesn't touch
+  // draftState, any other team's squad, budget, or transfer history, and doesn't use the
+  // contested-pick/blind-bid machinery at all, since with everyone else already settled there's
+  // no genuine competition left to resolve - it just needs a straightforward direct check that
+  // nothing they picked is already taken, then a normal signing for each one.
+  const resolveSingleTeamDraft = (pinAttempt, teamId) => {
+    if (pinAttempt !== adminPin) return "Incorrect PIN.";
+    const team = teams.find((t) => t.id === teamId);
+    if (!team) return "Team not found.";
+    if (!draftSubmitted[teamId]) return `${team.name} hasn't submitted their draft yet.`;
+    const picks = (draftPicks[teamId] || []).filter(Boolean);
+    if (picks.length === 0) return "No picks to resolve.";
+
+    // Confirm none of these picks are already sitting in ANY team's current squad - with everyone
+    // else already resolved, this is the one thing that genuinely needs checking, since the normal
+    // contested-pick logic (which handles two teams wanting the same player) never runs here.
+    const takenNames = new Set();
+    teams.forEach((t) => {
+      [...(squads[t.id]?.starters || []), ...(squads[t.id]?.reserves || [])].forEach((p) => {
+        if (p) takenNames.add(p.name);
+      });
+    });
+    const alreadyTaken = picks.filter((p) => takenNames.has(p.name));
+    if (alreadyTaken.length > 0) {
+      return `${alreadyTaken.map((p) => p.name).join(", ")} ${alreadyTaken.length === 1 ? "is" : "are"} already signed to another team's squad — remove from the draft before resolving.`;
+    }
+
+    // Same value/wage freshness check as the full resolveDraft - a pick only ever stored a
+    // snapshot from when it was selected, so pull the current database entry if it still exists.
+    const currentPlayerLookup = new Map(playerDatabase.map((p) => [`${p.name}::${p.club || ""}`, p]));
+    const freshPicks = picks.map((p) => {
+      const current = currentPlayerLookup.get(`${p.name}::${p.club || ""}`);
+      return current ? { ...p, value: current.value, wage: current.wage, rating: current.rating } : p;
+    });
+
+    const totalCost = freshPicks.reduce((s, p) => {
+      const value = roundUpTo250k(Number(p.value) || 0);
+      const tax = value > 0 ? Math.max(value * 0.1, 0.25) : 0;
+      return s + value + tax;
+    }, 0);
+    if (totalCost > (team.budget || 0)) {
+      return `Total cost including tax (${money(totalCost)}) is more than ${team.name}'s budget (${money(team.budget || 0)}).`;
+    }
+
+    setSquads((all) => {
+      let teamSquad = all[teamId];
+      freshPicks.forEach((p) => {
+        const slot = firstFreeSlot(teamSquad);
+        if (!slot) return; // shouldn't happen with 21 picks vs 21 starter slots, but don't crash if it does
+        const playerObj = {
+          name: p.name, position: p.position, rating: Number(p.rating) || 0,
+          club: p.club, age: Number(p.age) || 0, value: roundUpTo250k(Number(p.value) || 0), wage: Number(p.wage) || 0,
+        };
+        teamSquad = { ...teamSquad, [slot.group]: [...teamSquad[slot.group]] };
+        teamSquad[slot.group][slot.idx] = playerObj;
+      });
+      return { ...all, [teamId]: teamSquad };
+    });
+    setTeams((ts) => ts.map((t) => (t.id === teamId ? { ...t, budget: (t.budget || 0) - totalCost } : t)));
+
+    const draftTransferRecords = freshPicks.map((p) => {
+      const value = roundUpTo250k(Number(p.value) || 0);
+      const tax = value > 0 ? Math.max(value * 0.1, 0.25) : 0;
+      return {
+        id: uid(), date: todayISO(), player: p.name, position: p.position,
+        rating: Number(p.rating) || 0, club: p.club, age: Number(p.age) || 0,
+        wage: Number(p.wage) || 0, from: "FA", to: teamId, price: value,
+        tax: +tax.toFixed(3), finalCost: +(value + tax).toFixed(3),
+        notes: "Uncontested draft signing (late individual draft)", createdAt: Date.now(),
+        sellerProcessed: true, buyerProcessed: true, instant: true,
+        buyerAlreadyPaidDirectly: true,
+      };
+    });
+    setTransfers((tx) => [...draftTransferRecords, ...tx]);
+
+    logActivity(`${team.name}'s individual draft was resolved — ${freshPicks.length} player${freshPicks.length === 1 ? "" : "s"} signed. No other team was affected.`, "transfer");
+    return null;
+  };
+
   // Submits a sealed bid — amounts stay hidden from other teams until everyone eligible has gone
   // in, at which point it resolves immediately and the highest bidder wins outright (no live
   // bidding war, no waiting on a countdown once everyone's actually submitted).
@@ -4854,7 +4934,7 @@ export default function EafcLeagueApp() {
             transferWindow={transferWindow} setTransferWindowDates={setTransferWindowDates} clearTransferWindow={clearTransferWindow}
             addPrize={addPrize} exportPlayerDatabaseCSV={exportPlayerDatabaseCSV} adminRemoveCaptain={adminRemoveCaptain}
             draftPicks={draftPicks} draftSubmitted={draftSubmitted} clearSquadsAndTransfers={clearSquadsAndTransfers}
-            applyNewBudgetAndWageCap={applyNewBudgetAndWageCap} resetTeamDraft={resetTeamDraft}
+            applyNewBudgetAndWageCap={applyNewBudgetAndWageCap} resetTeamDraft={resetTeamDraft} resolveSingleTeamDraft={resolveSingleTeamDraft}
             reopenDraftKeepPicks={reopenDraftKeepPicks} clearBlindBids={clearBlindBids} blindBids={blindBids}
             assignSponsorships={assignSponsorships} transfers={activeTransfers} removePlayerFromSquad={removePlayerFromSquad} deleteTransfer={deleteTransfer} forceMarkBlindBidResolved={forceMarkBlindBidResolved}
             archiveDraft={archiveDraft} draftArchives={draftArchives} addPlayerToSquad={addPlayerToSquad} forceRatifyTransfer={forceRatifyTransfer}
@@ -8808,7 +8888,7 @@ function RulesTab({ teams, standings }) {
   );
 }
 
-function DraftSubmissionsTools({ teams, draftPicks, draftSubmitted, adminPin, resetTeamDraft, reopenDraftKeepPicks, clearBlindBids, blindBids, forceMarkBlindBidResolved, archiveDraft, draftArchives }) {
+function DraftSubmissionsTools({ teams, draftPicks, draftSubmitted, adminPin, resetTeamDraft, resolveSingleTeamDraft, reopenDraftKeepPicks, clearBlindBids, blindBids, forceMarkBlindBidResolved, archiveDraft, draftArchives }) {
   const submittedTeams = teams.filter((t) => draftSubmitted[t.id]);
   const [pin, setPin] = useState("");
   const [resetTeamId, setResetTeamId] = useState(teams[0]?.id || "");
@@ -8831,6 +8911,18 @@ function DraftSubmissionsTools({ teams, draftPicks, draftSubmitted, adminPin, re
     setPin("");
     if (err) setMsg({ text: err, tone: "red" });
     else setMsg({ text: `${teams.find((t) => t.id === resetTeamId)?.name}'s draft has been reset — they can redraft.`, tone: "green" });
+  };
+
+  const [resolveTeamId, setResolveTeamId] = useState(teams[0]?.id || "");
+  const [resolvePin, setResolvePin] = useState("");
+  const [resolveMsg, setResolveMsg] = useState(null);
+  const doResolveSingleTeam = () => {
+    const teamName = teams.find((t) => t.id === resolveTeamId)?.name || resolveTeamId;
+    if (!window.confirm(`Sign ${teamName}'s submitted draft picks now? This only affects ${teamName} — no other team's squad or budget is touched.`)) return;
+    const err = resolveSingleTeamDraft(resolvePin, resolveTeamId);
+    setResolvePin("");
+    if (err) setResolveMsg({ text: err, tone: "red" });
+    else setResolveMsg({ text: `${teamName}'s draft picks have been signed.`, tone: "green" });
   };
 
   const buildCsv = () => {
@@ -8954,6 +9046,28 @@ function DraftSubmissionsTools({ teams, draftPicks, draftSubmitted, adminPin, re
           <Btn variant="danger" onClick={doReset}>Reset Draft</Btn>
         </div>
         {msg && <div style={{ color: msg.tone === "green" ? C.green : C.red, fontSize: 12, marginTop: 8 }}>{msg.text}</div>}
+      </div>
+
+      <div style={{ marginTop: 18, paddingTop: 14, borderTop: `1px solid ${C.border}` }}>
+        <div style={{ color: C.text, fontWeight: 700, fontSize: 13, marginBottom: 6 }}>Resolve One Team's Draft Individually</div>
+        <div style={{ color: C.muted, fontSize: 11.5, marginBottom: 10 }}>
+          For a team drafting late, after everyone else's draft is already fully resolved and playing — signs just
+          this team's submitted picks directly. Doesn't touch draft status, or any other team's squad, budget, or
+          transfers at all. The team needs to have submitted their picks first (Reset their draft above, reopen the
+          draft below so they can pick, have them submit, then use this).
+        </div>
+        <div className="flex items-end gap-2 flex-wrap">
+          <Field label="Team">
+            <Select value={resolveTeamId} onChange={(e) => setResolveTeamId(e.target.value)}>
+              {teams.map((t) => <option key={t.id} value={t.id}>{t.name}{draftSubmitted[t.id] ? " (submitted)" : " (not submitted yet)"}</option>)}
+            </Select>
+          </Field>
+          <Field label="Admin PIN">
+            <TextInput type="password" value={resolvePin} onChange={(e) => setResolvePin(e.target.value)} style={{ width: 130 }} />
+          </Field>
+          <Btn onClick={doResolveSingleTeam}>Resolve This Team's Draft</Btn>
+        </div>
+        {resolveMsg && <div style={{ color: resolveMsg.tone === "green" ? C.green : C.red, fontSize: 12, marginTop: 8 }}>{resolveMsg.text}</div>}
       </div>
 
       <div style={{ marginTop: 18, paddingTop: 14, borderTop: `1px solid ${C.border}` }}>
@@ -9094,7 +9208,7 @@ function AddPrizeTools({ teams, addPrize }) {
   );
 }
 
-function AdminTab({ teams, squads, myTeamId, playerDatabase, adminPin, logAdminReward, resetAll, changeAdminPin, addFundsToTeam, addEarned86Slot, exportBackup, restoreBackup, restoreFromNightlyBackup, endSeason, season, seasonHistory, standings, importPlayerDatabase, clearPlayerDatabase, teamLockOverride, toggleTeamLockOverride, clearChat, resetTeamPassword, squadStats, transferWindow, setTransferWindowDates, clearTransferWindow, addPrize, exportPlayerDatabaseCSV, adminRemoveCaptain, draftPicks, draftSubmitted, clearSquadsAndTransfers, applyNewBudgetAndWageCap, resetTeamDraft, reopenDraftKeepPicks, clearBlindBids, blindBids, assignSponsorships, transfers, removePlayerFromSquad, deleteTransfer, forceMarkBlindBidResolved, archiveDraft, draftArchives, addPlayerToSquad, forceRatifyTransfer, clearInjuriesAndSuspensions }) {
+function AdminTab({ teams, squads, myTeamId, playerDatabase, adminPin, logAdminReward, resetAll, changeAdminPin, addFundsToTeam, addEarned86Slot, exportBackup, restoreBackup, restoreFromNightlyBackup, endSeason, season, seasonHistory, standings, importPlayerDatabase, clearPlayerDatabase, teamLockOverride, toggleTeamLockOverride, clearChat, resetTeamPassword, squadStats, transferWindow, setTransferWindowDates, clearTransferWindow, addPrize, exportPlayerDatabaseCSV, adminRemoveCaptain, draftPicks, draftSubmitted, clearSquadsAndTransfers, applyNewBudgetAndWageCap, resetTeamDraft, resolveSingleTeamDraft, reopenDraftKeepPicks, clearBlindBids, blindBids, assignSponsorships, transfers, removePlayerFromSquad, deleteTransfer, forceMarkBlindBidResolved, archiveDraft, draftArchives, addPlayerToSquad, forceRatifyTransfer, clearInjuriesAndSuspensions }) {
   const [unlocked, setUnlocked] = useState(false);
   const [pinInput, setPinInput] = useState("");
   const [err, setErr] = useState("");
@@ -9126,7 +9240,7 @@ function AdminTab({ teams, squads, myTeamId, playerDatabase, adminPin, logAdminR
     <div className="grid gap-4">
       <AdminPlayerRewards teams={teams} squads={squads} logAdminReward={logAdminReward} myTeamId={myTeamId} playerDatabase={playerDatabase} squadStats={squadStats} />
 
-      <DraftSubmissionsTools teams={teams} draftPicks={draftPicks} draftSubmitted={draftSubmitted} adminPin={adminPin} resetTeamDraft={resetTeamDraft} reopenDraftKeepPicks={reopenDraftKeepPicks} clearBlindBids={clearBlindBids} blindBids={blindBids} forceMarkBlindBidResolved={forceMarkBlindBidResolved} archiveDraft={archiveDraft} draftArchives={draftArchives} />
+      <DraftSubmissionsTools teams={teams} draftPicks={draftPicks} draftSubmitted={draftSubmitted} adminPin={adminPin} resetTeamDraft={resetTeamDraft} resolveSingleTeamDraft={resolveSingleTeamDraft} reopenDraftKeepPicks={reopenDraftKeepPicks} clearBlindBids={clearBlindBids} blindBids={blindBids} forceMarkBlindBidResolved={forceMarkBlindBidResolved} archiveDraft={archiveDraft} draftArchives={draftArchives} />
 
       <AddPrizeTools teams={teams} addPrize={addPrize} />
 
