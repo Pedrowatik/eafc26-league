@@ -7055,8 +7055,8 @@ function TransfersTab({ teams, squads, transfers, logTransfer, logAdminReward, s
   const [deletingId, setDeletingId] = useState(null);
   const [deleteErr, setDeleteErr] = useState("");
 
-  const confirmDelete = () => {
-    const err = deleteTransfer(adminPin, deletingId);
+  const confirmDelete = async () => {
+    const err = await deleteTransfer(adminPin, deletingId);
     if (err) setDeleteErr(err);
     else { setDeletingId(null); setDeleteErr(""); }
   };
@@ -10325,9 +10325,9 @@ function BlindBidDamageDiagnostic({ teams, squads, transfers, adminPin, removePl
     setMsg(err ? { text: err, tone: "red" } : { text: "Removed.", tone: "green" });
   };
 
-  const doDeleteDuplicateTransfer = (txId) => {
+  const doDeleteDuplicateTransfer = async (txId) => {
     if (!window.confirm("Delete this duplicate transfer record? Only do this once you've refunded the team via Add Funds. This can't be undone.")) return;
-    const err = deleteTransfer(pin, txId);
+    const err = await deleteTransfer(pin, txId);
     setMsg(err ? { text: err, tone: "red" } : { text: "Duplicate record deleted.", tone: "green" });
   };
 
