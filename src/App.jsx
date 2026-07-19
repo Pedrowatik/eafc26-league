@@ -2833,7 +2833,7 @@ export default function EafcLeagueApp() {
     const player = sq[fromGroup][index];
     if (!player) return "No player in that slot.";
     const freeIdx = sq[toGroup].findIndex((p, i) => !p && !(toGroup === "starters" && i === CAPTAIN_SLOT_INDEX));
-    if (freeIdx === -1) return `No free slot in ${toGroup === "starters" ? "the starting squad" : "reserves"}.`;
+    if (freeIdx === -1) return `No free slot in ${toGroup === "starters" ? "the starting squad" : "reserves"} — drag their handle (⠿) onto a player in the other list to swap places instead.`;
     setSquads((all) => {
       const next = { ...all, [teamId]: { starters: [...all[teamId].starters], reserves: [...all[teamId].reserves] } };
       next[teamId][fromGroup][index] = null;
@@ -2894,16 +2894,21 @@ export default function EafcLeagueApp() {
     return null;
   };
 
-  // Drag-and-drop reorder — swaps the dragged player with whoever is in the drop-target slot.
-  // Deliberately a swap, not an insert/shift: each row is a fixed formation position (GK, LB,
-  // CB...), so shifting everyone in between would silently move other players into different
-  // positions. A swap only ever touches the two slots involved, whether they're filled or empty.
-  const movePlayerToIndex = (teamId, group, fromIndex, toIndex) => {
-    if (fromIndex === toIndex) return;
+  // Drag-and-drop swap — swaps whichever two players are involved, whether they're in the same
+  // list (reordering within Starters or Reserves) or in different ones (Starters <-> Reserves).
+  // Deliberately a swap, not an insert/shift: each Starters row is a fixed formation position
+  // (GK, LB, CB...), so shifting everyone in between would silently move other players into
+  // different positions. Because it's a swap, it also works even when the target group is full —
+  // there's no "no free slot" case, since the two players just trade places.
+  const movePlayerToIndex = (teamId, fromGroup, fromIndex, toGroup, toIndex) => {
+    if (fromGroup === toGroup && fromIndex === toIndex) return;
     setSquads((all) => {
-      const list = [...all[teamId][group]];
-      [list[fromIndex], list[toIndex]] = [list[toIndex], list[fromIndex]];
-      return { ...all, [teamId]: { ...all[teamId], [group]: list } };
+      const next = { ...all, [teamId]: { starters: [...all[teamId].starters], reserves: [...all[teamId].reserves] } };
+      const a = next[teamId][fromGroup][fromIndex];
+      const b = next[teamId][toGroup][toIndex];
+      next[teamId][fromGroup][fromIndex] = b;
+      next[teamId][toGroup][toIndex] = a;
+      return next;
     });
   };
 
@@ -5600,6 +5605,58 @@ function SquadsTab({ teams, squads, squadStats, renameTeam, setTab, movePlayerTo
     setMoveError(err || "");
   };
 
+  // Cross-table drag state, lifted up here (rather than kept inside SquadTable) so a single drag
+  // gesture can start in the Starting Squad and end in Reserves, or vice versa - swapping the two
+  // players even when the target group is completely full.
+  const [dragCursor, setDragCursor] = useState(null); // { group, index } | null
+  const [overCursor, setOverCursor] = useState(null);
+  const dragRef = useRef(null);
+  const overRef = useRef(null);
+
+  const startDrag = (group, index) => {
+    dragRef.current = { group, index };
+    overRef.current = { group, index };
+    setDragCursor({ group, index });
+    setOverCursor({ group, index });
+  };
+
+  useEffect(() => {
+    if (!dragCursor) return;
+    const handleMove = (e) => {
+      const point = e.touches && e.touches[0] ? e.touches[0] : e;
+      const el = document.elementFromPoint(point.clientX, point.clientY);
+      const row = el && el.closest && el.closest("tr[data-row-index]");
+      if (row) {
+        const idx = Number(row.getAttribute("data-row-index"));
+        const grp = row.getAttribute("data-group");
+        if (!Number.isNaN(idx) && grp && (grp !== overRef.current.group || idx !== overRef.current.index)) {
+          overRef.current = { group: grp, index: idx };
+          setOverCursor({ group: grp, index: idx });
+        }
+      }
+    };
+    const handleUp = () => {
+      const from = dragRef.current;
+      const to = overRef.current;
+      if (from && to && (from.group !== to.group || from.index !== to.index)) {
+        movePlayerToIndex(activeTeam, from.group, from.index, to.group, to.index);
+        setMoveError("");
+      }
+      dragRef.current = null;
+      overRef.current = null;
+      setDragCursor(null);
+      setOverCursor(null);
+    };
+    document.addEventListener("pointermove", handleMove);
+    document.addEventListener("pointerup", handleUp);
+    document.addEventListener("pointercancel", handleUp);
+    return () => {
+      document.removeEventListener("pointermove", handleMove);
+      document.removeEventListener("pointerup", handleUp);
+      document.removeEventListener("pointercancel", handleUp);
+    };
+  }, [dragCursor, activeTeam, movePlayerToIndex]);
+
   const doSignCaptain = () => {
     const err = signCaptain(activeTeam, captainForm);
     setCaptainError(err || "");
@@ -5696,8 +5753,10 @@ function SquadsTab({ teams, squads, squadStats, renameTeam, setTab, movePlayerTo
         <div style={{ color: C.muted, fontSize: 11.5, marginBottom: 14, lineHeight: 1.6 }}>
           Player details (name, position, rating, club, age, value, wage) are only entered once, on the Transfers
           tab. Here you can reorganize who's already signed: click a column header to sort, use the arrows to move
-          a player between the starting squad and reserves, or reorder players within a list (only available when
-          not sorted) to arrange your starting XI — the first 11 slots are shown on the formation pitch.
+          a player between the starting squad and reserves (needs a free slot in the target list), or drag the
+          handle (⠿) to swap two players directly — within a list to arrange your starting XI (updates the
+          formation pitch), or between the two lists, which works even when both are full since it's a straight
+          swap rather than needing an empty slot.
         </div>
 
         {moveError && (
@@ -5760,14 +5819,14 @@ function SquadsTab({ teams, squads, squadStats, renameTeam, setTab, movePlayerTo
               return i < 11 ? positions[i] : i + 1;
             }}
             group="starters" onMove={(index) => move("starters", index, "reserves")} moveLabel="Bench" moveIcon={ChevronDown}
-            movePlayerToIndex={(from, to) => movePlayerToIndex(activeTeam, "starters", from, to)} minWidth={600}
+            dragCursor={dragCursor} overCursor={overCursor} onDragHandlePointerDown={(index) => startDrag("starters", index)} minWidth={600}
             openPlayerStats={openPlayerStats} currentlyInjuredNames={currentlyInjuredNames} />
           <FormationPitch formation={team.formation || "4-4-2"} starters={sq.starters} openPlayerStats={openPlayerStats} />
         </div>
         <div style={{ height: 18 }} />
         <SquadTable title={`Reserves (${RESERVE_SLOTS} slots)`} players={sq.reserves} labelForIdx={(i) => `R${i + 1}`}
           group="reserves" onMove={(index) => move("reserves", index, "starters")} moveLabel="Start" moveIcon={ChevronUp}
-          movePlayerToIndex={(from, to) => movePlayerToIndex(activeTeam, "reserves", from, to)}
+          dragCursor={dragCursor} overCursor={overCursor} onDragHandlePointerDown={(index) => startDrag("reserves", index)}
           openPlayerStats={openPlayerStats} currentlyInjuredNames={currentlyInjuredNames} />
       </Panel>
     </div>
@@ -5795,13 +5854,9 @@ function DragHandleIcon() {
   );
 }
 
-function SquadTable({ title, players, labelForIdx, group, onMove, moveLabel, moveIcon: MoveIcon, movePlayerToIndex, minWidth = 780, openPlayerStats, currentlyInjuredNames }) {
+function SquadTable({ title, players, labelForIdx, group, onMove, moveLabel, moveIcon: MoveIcon, dragCursor, overCursor, onDragHandlePointerDown, minWidth = 780, openPlayerStats, currentlyInjuredNames }) {
   const [sortKey, setSortKey] = useState(null);
   const [sortDir, setSortDir] = useState(1); // 1 = asc, -1 = desc
-  const [dragIndex, setDragIndex] = useState(null);
-  const [overIndex, setOverIndex] = useState(null);
-  const dragIndexRef = useRef(null);
-  const overIndexRef = useRef(null);
 
   const indexed = players.map((p, i) => ({ player: p, index: i }));
   const sorted = sortKey
@@ -5825,46 +5880,6 @@ function SquadTable({ title, players, labelForIdx, group, onMove, moveLabel, mov
   };
 
   const canDrag = sortKey === null; // dragging only makes sense on the unsorted, real slot order
-
-  const startDrag = (index) => {
-    dragIndexRef.current = index;
-    overIndexRef.current = index;
-    setDragIndex(index);
-    setOverIndex(index);
-  };
-
-  useEffect(() => {
-    if (dragIndex === null) return;
-    const handleMove = (e) => {
-      const point = e.touches && e.touches[0] ? e.touches[0] : e;
-      const el = document.elementFromPoint(point.clientX, point.clientY);
-      const row = el && el.closest && el.closest("tr[data-row-index]");
-      if (row) {
-        const idx = Number(row.getAttribute("data-row-index"));
-        if (!Number.isNaN(idx) && idx !== overIndexRef.current) {
-          overIndexRef.current = idx;
-          setOverIndex(idx);
-        }
-      }
-    };
-    const handleUp = () => {
-      if (dragIndexRef.current !== null && overIndexRef.current !== null && overIndexRef.current !== dragIndexRef.current) {
-        movePlayerToIndex(dragIndexRef.current, overIndexRef.current);
-      }
-      dragIndexRef.current = null;
-      overIndexRef.current = null;
-      setDragIndex(null);
-      setOverIndex(null);
-    };
-    document.addEventListener("pointermove", handleMove);
-    document.addEventListener("pointerup", handleUp);
-    document.addEventListener("pointercancel", handleUp);
-    return () => {
-      document.removeEventListener("pointermove", handleMove);
-      document.removeEventListener("pointerup", handleUp);
-      document.removeEventListener("pointercancel", handleUp);
-    };
-  }, [dragIndex, movePlayerToIndex]);
 
   return (
     <div>
@@ -5890,10 +5905,11 @@ function SquadTable({ title, players, labelForIdx, group, onMove, moveLabel, mov
             {sorted.map(({ player, index }) => (
               <SquadRow key={index} label={labelForIdx(index)} player={player}
                 onMove={() => onMove(index)} moveLabel={moveLabel} moveIcon={MoveIcon}
-                rowIndex={index} canDrag={canDrag}
-                isDragging={dragIndex === index}
-                isDragOver={overIndex === index && dragIndex !== null && dragIndex !== index}
-                onDragHandlePointerDown={() => startDrag(index)} openPlayerStats={openPlayerStats}
+                rowIndex={index} group={group} canDrag={canDrag}
+                isDragging={dragCursor && dragCursor.group === group && dragCursor.index === index}
+                isDragOver={overCursor && overCursor.group === group && overCursor.index === index &&
+                  !(dragCursor && dragCursor.group === group && dragCursor.index === index)}
+                onDragHandlePointerDown={() => onDragHandlePointerDown(index)} openPlayerStats={openPlayerStats}
                 isInjured={player && currentlyInjuredNames && currentlyInjuredNames.has(player.name)} />
             ))}
           </tbody>
@@ -5901,14 +5917,14 @@ function SquadTable({ title, players, labelForIdx, group, onMove, moveLabel, mov
       </div>
       {canDrag && players.some(Boolean) && (
         <div style={{ color: C.muted, fontSize: 10.5, marginTop: 6 }}>
-          Drag the handle (⠿) onto another row to swap the two players{group === "starters" ? " — updates the formation pitch too" : ""}.
+          Drag the handle (⠿) onto another row — in this list or the other one — to swap the two players{group === "starters" ? "; changes to the Starting Squad update the formation pitch too" : ""}.
         </div>
       )}
     </div>
   );
 }
 
-function SquadRow({ label, player, onMove, moveLabel, moveIcon: MoveIcon, rowIndex, canDrag, isDragging, isDragOver, onDragHandlePointerDown, openPlayerStats, isInjured }) {
+function SquadRow({ label, player, onMove, moveLabel, moveIcon: MoveIcon, rowIndex, group, canDrag, isDragging, isDragOver, onDragHandlePointerDown, openPlayerStats, isInjured }) {
   const filled = !!player;
   const cellPad = { padding: "5px 6px", borderBottom: `1px solid ${C.border}33` };
   const highlight = filled && Number(player.rating) >= 86 ? { background: `${C.gold}1a` } : {};
@@ -5916,7 +5932,7 @@ function SquadRow({ label, player, onMove, moveLabel, moveIcon: MoveIcon, rowInd
   const dragFx = { ...(isDragging ? { opacity: 0.45 } : {}), ...(isDragOver ? { boxShadow: `inset 0 2px 0 ${C.gold}` } : {}) };
 
   const dragHandle = canDrag && filled && (
-    <button onPointerDown={onDragHandlePointerDown} title="Drag to reorder"
+    <button onPointerDown={onDragHandlePointerDown} title="Drag to swap with another slot"
       style={{ background: "transparent", border: "none", cursor: "grab", color: C.muted, padding: "4px 2px", touchAction: "none", display: "inline-flex" }}>
       <DragHandleIcon />
     </button>
@@ -5924,7 +5940,7 @@ function SquadRow({ label, player, onMove, moveLabel, moveIcon: MoveIcon, rowInd
 
   if (!filled) {
     return (
-      <tr data-row-index={rowIndex} style={highlight}>
+      <tr data-row-index={rowIndex} data-group={group} style={{ ...highlight, ...dragFx }}>
         <td style={{ ...cellPad, textAlign: "center", color: C.muted }}>{label}</td>
         <td colSpan={7} style={{ ...cellPad, ...emptyStyle }}>Empty slot</td>
         <td style={cellPad}></td>
@@ -5933,7 +5949,7 @@ function SquadRow({ label, player, onMove, moveLabel, moveIcon: MoveIcon, rowInd
   }
 
   return (
-    <tr data-row-index={rowIndex} style={{ ...highlight, ...dragFx }}>
+    <tr data-row-index={rowIndex} data-group={group} style={{ ...highlight, ...dragFx }}>
       <td style={{ ...cellPad, textAlign: "center", color: C.muted }}>{label}</td>
       <td style={{ ...cellPad, color: C.text, fontWeight: 600 }}>
         <div className="flex items-center gap-1.5">
