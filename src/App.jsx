@@ -5601,6 +5601,7 @@ function SquadsTab({ teams, squads, squadStats, renameTeam, setTab, movePlayerTo
   }, [fixtures, activeTeam]);
 
   const move = (fromGroup, index, toGroup) => {
+    if (activeTeam !== myTeamId) { setMoveError("You can only rearrange your own team's squad."); return; }
     const err = movePlayerToGroup(activeTeam, fromGroup, index, toGroup);
     setMoveError(err || "");
   };
@@ -5614,6 +5615,7 @@ function SquadsTab({ teams, squads, squadStats, renameTeam, setTab, movePlayerTo
   const overRef = useRef(null);
 
   const startDrag = (group, index) => {
+    if (activeTeam !== myTeamId) return; // can only rearrange your own team's squad
     dragRef.current = { group, index };
     overRef.current = { group, index };
     setDragCursor({ group, index });
@@ -5757,6 +5759,9 @@ function SquadsTab({ teams, squads, squadStats, renameTeam, setTab, movePlayerTo
           handle (⠿) to swap two players directly — within a list to arrange your starting XI (updates the
           formation pitch), or between the two lists, which works even when both are full since it's a straight
           swap rather than needing an empty slot.
+          {activeTeam !== myTeamId && (
+            <><br />You're viewing {team.name}'s squad — rearranging is only available for your own team.</>
+          )}
         </div>
 
         {moveError && (
@@ -5820,14 +5825,14 @@ function SquadsTab({ teams, squads, squadStats, renameTeam, setTab, movePlayerTo
             }}
             group="starters" onMove={(index) => move("starters", index, "reserves")} moveLabel="Bench" moveIcon={ChevronDown}
             dragCursor={dragCursor} overCursor={overCursor} onDragHandlePointerDown={(index) => startDrag("starters", index)} minWidth={600}
-            openPlayerStats={openPlayerStats} currentlyInjuredNames={currentlyInjuredNames} />
+            canEdit={activeTeam === myTeamId} openPlayerStats={openPlayerStats} currentlyInjuredNames={currentlyInjuredNames} />
           <FormationPitch formation={team.formation || "4-4-2"} starters={sq.starters} openPlayerStats={openPlayerStats} />
         </div>
         <div style={{ height: 18 }} />
         <SquadTable title={`Reserves (${RESERVE_SLOTS} slots)`} players={sq.reserves} labelForIdx={(i) => `R${i + 1}`}
           group="reserves" onMove={(index) => move("reserves", index, "starters")} moveLabel="Start" moveIcon={ChevronUp}
           dragCursor={dragCursor} overCursor={overCursor} onDragHandlePointerDown={(index) => startDrag("reserves", index)}
-          openPlayerStats={openPlayerStats} currentlyInjuredNames={currentlyInjuredNames} />
+          canEdit={activeTeam === myTeamId} openPlayerStats={openPlayerStats} currentlyInjuredNames={currentlyInjuredNames} />
       </Panel>
     </div>
   );
@@ -5854,7 +5859,7 @@ function DragHandleIcon() {
   );
 }
 
-function SquadTable({ title, players, labelForIdx, group, onMove, moveLabel, moveIcon: MoveIcon, dragCursor, overCursor, onDragHandlePointerDown, minWidth = 780, openPlayerStats, currentlyInjuredNames }) {
+function SquadTable({ title, players, labelForIdx, group, onMove, moveLabel, moveIcon: MoveIcon, dragCursor, overCursor, onDragHandlePointerDown, minWidth = 780, openPlayerStats, currentlyInjuredNames, canEdit }) {
   const [sortKey, setSortKey] = useState(null);
   const [sortDir, setSortDir] = useState(1); // 1 = asc, -1 = desc
 
@@ -5879,7 +5884,7 @@ function SquadTable({ title, players, labelForIdx, group, onMove, moveLabel, mov
     setSortDir(1);
   };
 
-  const canDrag = sortKey === null; // dragging only makes sense on the unsorted, real slot order
+  const canDrag = sortKey === null && canEdit; // dragging only makes sense on the unsorted, real slot order, and only for your own team
 
   return (
     <div>
@@ -5904,7 +5909,7 @@ function SquadTable({ title, players, labelForIdx, group, onMove, moveLabel, mov
           <tbody>
             {sorted.map(({ player, index }) => (
               <SquadRow key={index} label={labelForIdx(index)} player={player}
-                onMove={() => onMove(index)} moveLabel={moveLabel} moveIcon={MoveIcon}
+                onMove={() => onMove(index)} moveLabel={moveLabel} moveIcon={MoveIcon} canEdit={canEdit}
                 rowIndex={index} group={group} canDrag={canDrag}
                 isDragging={dragCursor && dragCursor.group === group && dragCursor.index === index}
                 isDragOver={overCursor && overCursor.group === group && overCursor.index === index &&
@@ -5924,7 +5929,7 @@ function SquadTable({ title, players, labelForIdx, group, onMove, moveLabel, mov
   );
 }
 
-function SquadRow({ label, player, onMove, moveLabel, moveIcon: MoveIcon, rowIndex, group, canDrag, isDragging, isDragOver, onDragHandlePointerDown, openPlayerStats, isInjured }) {
+function SquadRow({ label, player, onMove, moveLabel, moveIcon: MoveIcon, rowIndex, group, canDrag, isDragging, isDragOver, onDragHandlePointerDown, openPlayerStats, isInjured, canEdit }) {
   const filled = !!player;
   const cellPad = { padding: "5px 6px", borderBottom: `1px solid ${C.border}33` };
   const highlight = filled && Number(player.rating) >= 86 ? { background: `${C.gold}1a` } : {};
@@ -5970,8 +5975,13 @@ function SquadRow({ label, player, onMove, moveLabel, moveIcon: MoveIcon, rowInd
       <td style={{ ...cellPad, textAlign: "center" }}>
         <div className="flex items-center justify-center gap-2">
           {dragHandle}
-          <button onClick={onMove} title={`Move to ${moveLabel}`}
-            style={{ background: "transparent", border: `1px solid ${C.border}`, borderRadius: 6, padding: "3px 7px", cursor: "pointer", color: C.gold, display: "inline-flex", alignItems: "center", gap: 3, fontSize: 11 }}>
+          <button onClick={canEdit ? onMove : undefined} disabled={!canEdit}
+            title={canEdit ? `Move to ${moveLabel}` : "You can only rearrange your own team's squad"}
+            style={{
+              background: "transparent", border: `1px solid ${C.border}`, borderRadius: 6, padding: "3px 7px",
+              cursor: canEdit ? "pointer" : "not-allowed", color: canEdit ? C.gold : C.muted, opacity: canEdit ? 1 : 0.5,
+              display: "inline-flex", alignItems: "center", gap: 3, fontSize: 11,
+            }}>
             <MoveIcon size={12} /> {moveLabel}
           </button>
         </div>
