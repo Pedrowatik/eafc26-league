@@ -2894,14 +2894,15 @@ export default function EafcLeagueApp() {
     return null;
   };
 
-  // Drag-and-drop reorder — moves a player to any position in the list, shifting everyone else to
-  // make room (replaces the old up/down-arrow, adjacent-swap-only reordering).
+  // Drag-and-drop reorder — swaps the dragged player with whoever is in the drop-target slot.
+  // Deliberately a swap, not an insert/shift: each row is a fixed formation position (GK, LB,
+  // CB...), so shifting everyone in between would silently move other players into different
+  // positions. A swap only ever touches the two slots involved, whether they're filled or empty.
   const movePlayerToIndex = (teamId, group, fromIndex, toIndex) => {
     if (fromIndex === toIndex) return;
     setSquads((all) => {
       const list = [...all[teamId][group]];
-      const [moved] = list.splice(fromIndex, 1);
-      list.splice(toIndex, 0, moved);
+      [list[fromIndex], list[toIndex]] = [list[toIndex], list[fromIndex]];
       return { ...all, [teamId]: { ...all[teamId], [group]: list } };
     });
   };
@@ -5900,7 +5901,7 @@ function SquadTable({ title, players, labelForIdx, group, onMove, moveLabel, mov
       </div>
       {canDrag && players.some(Boolean) && (
         <div style={{ color: C.muted, fontSize: 10.5, marginTop: 6 }}>
-          Drag the handle (⠿) to reorder{group === "starters" ? " — updates the formation pitch too" : ""}.
+          Drag the handle (⠿) onto another row to swap the two players{group === "starters" ? " — updates the formation pitch too" : ""}.
         </div>
       )}
     </div>
