@@ -7246,6 +7246,82 @@ function MatchStatsPanel({ team1Name, team2Name, team1Players, team2Players, tea
   );
 }
 
+// Correcting an already-submitted result — deliberately smaller than MatchStatsPanel/TeamStatBlock
+// above: only the players actually recorded for this fixture are listed (not the live squad, which
+// may have changed since), there's no "played" checkbox (nobody's being added or removed from the
+// record), and Yellow/Red are shown read-only rather than as editable inputs — see the note on
+// startEditStats for why cards stay out of scope here.
+function EditStatsTeamBlock({ side, teamName, resultForm, updateStat }) {
+  const rows = Object.entries(resultForm[side]);
+  return (
+    <div>
+      <div style={{ color: C.gold, fontWeight: 700, fontSize: 12.5, marginBottom: 6 }}>{teamName}</div>
+      <div style={{ maxHeight: 220, overflowY: "auto", border: `1px solid ${C.border}`, borderRadius: 8 }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11.5 }}>
+          <thead>
+            <tr style={{ position: "sticky", top: 0, background: C.panel }}>
+              {["Player", "G", "A", "Y", "R"].map((h, i) => (
+                <th key={i} style={{ padding: "4px 6px", color: C.muted, fontSize: 10, textTransform: "uppercase", borderBottom: `1px solid ${C.border}` }}>{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map(([name, s]) => (
+              <tr key={name}>
+                <td style={{ padding: "3px 6px", color: C.text }}>{name}</td>
+                <td style={{ padding: "2px" }}>
+                  <input type="number" min={0} value={s.goals}
+                    onChange={(e) => updateStat(side, name, "goals", Number(e.target.value) || 0)}
+                    style={{ width: 34, background: C.panelAlt, color: C.text, border: `1px solid ${C.border}`, borderRadius: 4, padding: "2px 4px", textAlign: "center" }} />
+                </td>
+                <td style={{ padding: "2px" }}>
+                  <input type="number" min={0} value={s.assists}
+                    onChange={(e) => updateStat(side, name, "assists", Number(e.target.value) || 0)}
+                    style={{ width: 34, background: C.panelAlt, color: C.text, border: `1px solid ${C.border}`, borderRadius: 4, padding: "2px 4px", textAlign: "center" }} />
+                </td>
+                <td style={{ textAlign: "center", padding: "2px", color: s.yellow ? C.gold : C.muted }}>{s.yellow ? "🟨" : "—"}</td>
+                <td style={{ textAlign: "center", padding: "2px", color: s.red ? C.red : C.muted }}>{s.red ? "🟥" : "—"}</td>
+              </tr>
+            ))}
+            {rows.length === 0 && (
+              <tr><td colSpan={5} style={{ padding: 10, color: C.muted, textAlign: "center" }}>No stats recorded.</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function EditStatsPanel({ team1Name, team2Name, resultForm, updateStat, setMotm, error }) {
+  const motmOptions = [
+    ...Object.keys(resultForm.team1Stats).map((name) => ({ name, team: team1Name })),
+    ...Object.keys(resultForm.team2Stats).map((name) => ({ name, team: team2Name })),
+  ];
+  return (
+    <div style={{ background: C.panelAlt, border: `1px solid ${C.gold}55`, borderRadius: 10, padding: 14, marginTop: 6 }}>
+      <div style={{ color: C.text, fontWeight: 700, fontSize: 13, marginBottom: 4 }}>Edit Result</div>
+      <div style={{ color: C.muted, fontSize: 11, marginBottom: 10, lineHeight: 1.5 }}>
+        Fixing goals, assists, MOTM, or the score — cards aren't editable here since they feed suspensions,
+        which aren't safe to retroactively recalculate.
+      </div>
+      <div className="grid gap-3 stack-on-mobile" style={{ gridTemplateColumns: "1fr 1fr" }}>
+        <EditStatsTeamBlock side="team1Stats" teamName={team1Name} resultForm={resultForm} updateStat={updateStat} />
+        <EditStatsTeamBlock side="team2Stats" teamName={team2Name} resultForm={resultForm} updateStat={updateStat} />
+      </div>
+      <div style={{ marginTop: 12 }}>
+        <Field label="Man of the Match">
+          <Select value={resultForm.motm} onChange={(e) => setMotm(e.target.value)} style={{ maxWidth: 260 }}>
+            <option value="">No MOTM</option>
+            {motmOptions.map((p) => <option key={p.name} value={p.name}>{p.name} ({p.team})</option>)}
+          </Select>
+        </Field>
+      </div>
+      {error && <div className="flex items-center gap-2" style={{ marginTop: 10, color: C.red, fontSize: 12 }}><AlertTriangle size={13} /> {error}</div>}
+    </div>
+  );
+}
+
 // Standard "circle method" round-robin: everyone plays everyone once per leg, home/away
 // alternating fairly. doubleRound repeats it with fixtures reversed for a second half.
 function generateRoundRobin(teamIds, doubleRound) {
@@ -7282,6 +7358,7 @@ function FixturesTab({ teams, fixtures, setFixtures, logActivity, myTeamId, squa
   const [enteringResultFor, setEnteringResultFor] = useState(null); // fixture id
   const [resultForm, setResultForm] = useState(null); // { score1, score2, team1Stats, team2Stats, motm }
   const [resultError, setResultError] = useState("");
+  const [editingStatsFor, setEditingStatsFor] = useState(null); // fixture id — correcting an already-submitted result
 
   const add = () => {
     if (form.team1 === form.team2) { setWarning("Team 1 and Team 2 can't be the same."); return; }
@@ -7445,6 +7522,55 @@ function FixturesTab({ teams, fixtures, setFixtures, logActivity, myTeamId, squa
     setResultForm(null);
   };
 
+  // Correcting an already-submitted result (e.g. a typo'd assist) — deliberately narrower than
+  // startResult/saveResult above. It seeds the form from the players actually recorded in f.stats
+  // (not the current squad/eligiblePlayersFor), since squads and injuries may have changed since
+  // the match was played, and it never touches yellow/red cards: goals, assists, MOTM, and the
+  // score all feed straight into reactive useMemo's (standings, top scorers/assisters, MOTM
+  // count), so correcting them here is safe. Cards feed a cumulative, non-reactive suspension
+  // tally instead — retroactively editing those would risk silently un-serving or double-applying
+  // a ban from some other match, so that stays out of scope for this editor.
+  const startEditStats = (f) => {
+    if (!window.confirm("This result has already been counted in standings and season stats. Continue editing it?")) return;
+    setEditingStatsFor(f.id);
+    setResultError("");
+    const seed = (list) => Object.fromEntries((list || []).map((p) => [p.name, { ...p, played: true }]));
+    setResultForm({
+      score1: f.score1, score2: f.score2,
+      team1Stats: seed(f.stats.team1), team2Stats: seed(f.stats.team2),
+      motm: f.stats.motm || "",
+    });
+  };
+
+  const saveEditedStats = async (f) => {
+    if (resultForm.score1 === "" || resultForm.score2 === "") { setResultError("Enter both scores."); return; }
+    const stats = {
+      team1: Object.entries(resultForm.team1Stats).map(([name, s]) => ({ name, played: true, goals: s.goals, assists: s.assists, yellow: s.yellow, red: s.red })),
+      team2: Object.entries(resultForm.team2Stats).map(([name, s]) => ({ name, played: true, goals: s.goals, assists: s.assists, yellow: s.yellow, red: s.red })),
+      motm: resultForm.motm || null,
+    };
+    setFixtures((all) => all.map((x) => (x.id === f.id ? { ...x, score1: resultForm.score1, score2: resultForm.score2, stats } : x)));
+    try {
+      const fresh = await storage.get(STORAGE_KEY, true);
+      if (fresh && fresh.value) {
+        const freshData = JSON.parse(fresh.value);
+        const freshFixtures = (freshData.fixtures || []).map((x) =>
+          x.id === f.id ? { ...x, score1: resultForm.score1, score2: resultForm.score2, stats } : x
+        );
+        const savedAt = Date.now();
+        await storage.set(STORAGE_KEY, JSON.stringify({ ...freshData, fixtures: freshFixtures, savedAt }), true);
+        knownSavedAtRef.current = savedAt;
+        setLastSyncedAt(savedAt);
+      }
+    } catch (e) {
+      // best effort — the regular autosave will still pick this up if this direct write fails
+    }
+    const t1 = teams.find((t) => t.id === f.team1)?.name, t2 = teams.find((t) => t.id === f.team2)?.name;
+    logActivity(`Result corrected: ${buildResultSummary(t1, t2, resultForm.score1, resultForm.score2, f.matchday, stats)}`, "fixture");
+    setEditingStatsFor(null);
+    setResultForm(null);
+  };
+
   const removeFixture = async (f) => {
     if (f.hasProofImage) {
       try { await storage.delete(PROOF_KEY(f.id), true); } catch (e) { /* already gone, fine */ }
@@ -7570,13 +7696,14 @@ function FixturesTab({ teams, fixtures, setFixtures, logActivity, myTeamId, squa
                 const played = f.score1 !== "" && f.score2 !== "" && f.score1 != null && f.score2 != null;
                 const uploading = uploadingId === f.id;
                 const enteringResult = enteringResultFor === f.id;
+                const editingStats = editingStatsFor === f.id;
                 return (
                   <Fragment key={f.id}>
                   <tr style={{ background: i % 2 ? C.panelAlt : "transparent" }}>
                     <td style={{ textAlign: "center", color: C.text, padding: "7px 8px", borderBottom: `1px solid ${C.border}33` }}>{f.matchday}</td>
                     <td style={{ textAlign: "left", color: C.text, padding: "7px 8px", borderBottom: `1px solid ${C.border}33` }}>{t1}</td>
                     <td style={{ textAlign: "center", color: C.text, padding: "7px 8px", borderBottom: `1px solid ${C.border}33` }}>
-                      {enteringResult ? (
+                      {enteringResult || editingStats ? (
                         <div className="flex items-center justify-center gap-1">
                           <TextInput type="number" min={0} value={resultForm.score1}
                             onChange={(e) => setResultForm((r) => ({ ...r, score1: e.target.value }))}
@@ -7616,12 +7743,23 @@ function FixturesTab({ teams, fixtures, setFixtures, logActivity, myTeamId, squa
                             <button onClick={() => saveResult(f)} title="Save result" style={{ background: "transparent", border: "none", cursor: "pointer", color: C.green }}><Check size={15} /></button>
                             <button onClick={() => { setEnteringResultFor(null); setResultForm(null); }} title="Cancel" style={{ background: "transparent", border: "none", cursor: "pointer", color: C.muted }}><X size={15} /></button>
                           </>
+                        ) : editingStats ? (
+                          <>
+                            <button onClick={() => saveEditedStats(f)} title="Save correction" style={{ background: "transparent", border: "none", cursor: "pointer", color: C.green }}><Check size={15} /></button>
+                            <button onClick={() => { setEditingStatsFor(null); setResultForm(null); setResultError(""); }} title="Cancel" style={{ background: "transparent", border: "none", cursor: "pointer", color: C.muted }}><X size={15} /></button>
+                          </>
                         ) : !played && !f.injuriesGenerated ? (
                           <Btn size="sm" variant="outline" onClick={() => generateInjuries(f)}>Generate Injuries</Btn>
                         ) : !played ? (
                           <Btn size="sm" variant="outline" onClick={() => startResult(f)}>Add Result</Btn>
                         ) : f.stats ? (
-                          <Pill tone="gold">Stats logged</Pill>
+                          <>
+                            <Pill tone="gold">Stats logged</Pill>
+                            <button onClick={() => startEditStats(f)} title="Fix goals, assists, MOTM, or score"
+                              style={{ background: "transparent", border: `1px solid ${C.border}`, borderRadius: 6, padding: "4px 8px", cursor: "pointer", color: C.muted, display: "inline-flex", alignItems: "center", gap: 4 }}>
+                              <Pencil size={12} /> Edit
+                            </button>
+                          </>
                         ) : null}
                         <button onClick={() => removeFixture(f)} style={{ background: "transparent", border: "none", cursor: "pointer", color: C.red }}>
                           <Trash2 size={14} />
@@ -7637,6 +7775,18 @@ function FixturesTab({ teams, fixtures, setFixtures, logActivity, myTeamId, squa
                           team1Players={eligiblePlayersFor(f, f.team1)} team2Players={eligiblePlayersFor(f, f.team2)}
                           team1Injured={[...injuredNamesFor(f, f.team1), ...suspendedNamesFor(f.team1)]} team2Injured={[...injuredNamesFor(f, f.team2), ...suspendedNamesFor(f.team2)]}
                           resultForm={resultForm} togglePlayed={togglePlayed} updateStat={updateStat}
+                          setMotm={(name) => setResultForm((r) => ({ ...r, motm: name }))}
+                          error={resultError}
+                        />
+                      </td>
+                    </tr>
+                  )}
+                  {editingStats && (
+                    <tr>
+                      <td colSpan={8} style={{ padding: "0 8px 14px" }}>
+                        <EditStatsPanel
+                          team1Name={t1} team2Name={t2}
+                          resultForm={resultForm} updateStat={updateStat}
                           setMotm={(name) => setResultForm((r) => ({ ...r, motm: name }))}
                           error={resultError}
                         />
