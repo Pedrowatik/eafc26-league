@@ -3224,11 +3224,14 @@ export default function EafcLeagueApp() {
     return null;
   };
 
-  const respondToAuction = (auctionId, accept) => {
+  const respondToAuction = (auctionId, accept, requestingTeamId, pinAttempt) => {
     let err = null;
     setAuctions((all) => all.map((a) => {
       if (a.id !== auctionId) return a;
       if (a.status !== "pending") { err = "This auction isn't waiting for a decision."; return a; }
+      const isOwner = requestingTeamId && requestingTeamId === a.seller;
+      const isAdmin = pinAttempt && pinAttempt === adminPin;
+      if (!isOwner && !isAdmin) { err = "Only the owning team (or an admin) can accept or decline this bid."; return a; }
       if (!accept) { return { ...a, status: "declined" }; }
       return { ...a, status: "open", deadline: Date.now() + AUCTION_DURATION_MS };
     }));
@@ -6505,7 +6508,7 @@ function AuctionsPanel({ teams, squads, auctions, createAuction, placeBid, final
           <div style={{ color: C.gold, fontWeight: 700, fontSize: 13, marginBottom: 10 }}>My Auctions ({myAuctions.length})</div>
           <div className="grid gap-3">
             {myPending.map((a) => (
-              <PendingAuctionCard key={a.id} auction={a} teams={teams} respondToAuction={respondToAuction} />
+              <PendingAuctionCard key={a.id} auction={a} teams={teams} respondToAuction={respondToAuction} myTeamId={myTeamId} adminPin={adminPin} adminViewUnlocked={adminViewUnlocked} />
             ))}
             {myOpen.map((a) => (
               <AuctionCard key={a.id} auction={a} teams={teams} now={now} placeBid={placeBid} finalizeAuction={finalizeAuction} deleteBid={deleteBid} cancelAuction={cancelAuction} myTeamId={myTeamId} squadStats={squadStats} adminPin={adminPin} adminViewUnlocked={adminViewUnlocked} setAdminViewUnlocked={setAdminViewUnlocked} />
@@ -6519,7 +6522,7 @@ function AuctionsPanel({ teams, squads, auctions, createAuction, placeBid, final
           <div style={{ color: C.gold, fontWeight: 700, fontSize: 13, marginBottom: 10 }}>Awaiting Team Approval ({pending.length})</div>
           <div className="grid gap-3">
             {pending.map((a) => (
-              <PendingAuctionCard key={a.id} auction={a} teams={teams} respondToAuction={respondToAuction} />
+              <PendingAuctionCard key={a.id} auction={a} teams={teams} respondToAuction={respondToAuction} myTeamId={myTeamId} adminPin={adminPin} adminViewUnlocked={adminViewUnlocked} />
             ))}
           </div>
         </div>
@@ -6560,9 +6563,10 @@ function AuctionsPanel({ teams, squads, auctions, createAuction, placeBid, final
   );
 }
 
-function PendingAuctionCard({ auction, teams, respondToAuction }) {
+function PendingAuctionCard({ auction, teams, respondToAuction, myTeamId, adminPin, adminViewUnlocked }) {
   const sellerName = teams.find((t) => t.id === auction.seller)?.name || auction.seller;
   const bidderName = teams.find((t) => t.id === auction.currentBidder)?.name || auction.currentBidder;
+  const canRespond = myTeamId === auction.seller || adminViewUnlocked;
   return (
     <div style={{ background: C.panelAlt, border: `1px solid ${C.gold}55`, borderRadius: 10, padding: 14 }}>
       <div className="flex items-center justify-between flex-wrap gap-2" style={{ marginBottom: 8 }}>
@@ -6580,10 +6584,14 @@ function PendingAuctionCard({ auction, teams, respondToAuction }) {
         <b style={{ color: C.text }}>{money(auction.currentBid)}</b>
         <span style={{ color: C.gold }}> from {bidderName}</span>
       </div>
-      <div className="flex items-center gap-2">
-        <Btn onClick={() => respondToAuction(auction.id, true)}>Accept — start 24h auction</Btn>
-        <Btn variant="danger" onClick={() => respondToAuction(auction.id, false)}>Decline</Btn>
-      </div>
+      {canRespond ? (
+        <div className="flex items-center gap-2">
+          <Btn onClick={() => respondToAuction(auction.id, true, myTeamId, adminPin)}>Accept — start 24h auction</Btn>
+          <Btn variant="danger" onClick={() => respondToAuction(auction.id, false, myTeamId, adminPin)}>Decline</Btn>
+        </div>
+      ) : (
+        <div style={{ color: C.muted, fontSize: 11.5, fontStyle: "italic" }}>Only {sellerName} can accept or decline this bid.</div>
+      )}
     </div>
   );
 }
