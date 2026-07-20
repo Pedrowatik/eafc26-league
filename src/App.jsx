@@ -3,7 +3,7 @@ import { createPortal } from "react-dom";
 import {
   Home, Users, Wallet, Repeat, Trophy, Swords, Coins, BookOpen,
   Plus, Trash2, Save, RotateCcw, AlertTriangle, CheckCircle2, X, ChevronRight, ChevronUp, ChevronDown, Lock, Unlock, KeyRound,
-  Upload, Eye, Loader2, Pencil, Check, Download, MessageCircle, Search, UserCircle2, Send, CalendarClock
+  Upload, Eye, Loader2, Pencil, Check, Download, MessageCircle, Search, UserCircle2, Send, CalendarClock, FileText
 } from "lucide-react";
 import { storage, subscribeToKey, supabaseUrl, supabaseAnonKey, listByPrefix } from "./storage.js";
 
@@ -724,6 +724,13 @@ export default function EafcLeagueApp() {
   const [swapOffers, setSwapOffers] = useState([]); // pending/accepted/declined player-for-player swap proposals
   const [cardTally, setCardTally] = useState({}); // { [teamId]: { [playerName]: seasonYellowCount } }
   const [suspensions, setSuspensions] = useState({}); // { [teamId]: { [playerName]: true } } — cleared once that team completes one more fixture
+  // Permanent record of every significant action — unlike `activity` below (a short-lived ticker
+  // that auto-expires after 3h and is capped at 200), this never expires on its own, so it's what
+  // backs the Admin audit log viewer for actually tracking down who changed what.
+  const [auditLog, setAuditLog] = useState([]);
+  const [loanOffers, setLoanOffers] = useState([]); // pending loan proposals awaiting the other team's accept/decline
+  const [activeLoans, setActiveLoans] = useState([]); // currently active loans - the player physically sits in the borrowing team's squad while this exists
+  const [rivalries, setRivalries] = useState([]); // manager-declared rivalries between two teams, shown with a head-to-head record
   const [transferListings, setTransferListings] = useState([]); // players a team has put up for sale
   const [wantedListings, setWantedListings] = useState([]); // "looking for" ads posted by a team
   const [privateMessages, setPrivateMessages] = useState([]); // { id, conversationId, fromTeamId, toTeamId, text, time }
@@ -852,6 +859,10 @@ export default function EafcLeagueApp() {
     if (data.transferWindow) setTransferWindow(data.transferWindow);
     if (data.swapsUsed) setSwapsUsed(data.swapsUsed);
     if (data.swapOffers) setSwapOffers(data.swapOffers);
+    if (data.auditLog) setAuditLog(data.auditLog);
+    if (data.loanOffers) setLoanOffers(data.loanOffers);
+    if (data.activeLoans) setActiveLoans(data.activeLoans);
+    if (data.rivalries) setRivalries(data.rivalries);
   }, []);
 
   // load once
@@ -1194,7 +1205,7 @@ export default function EafcLeagueApp() {
         const savedAt = Date.now();
         await storage.set(
           STORAGE_KEY,
-          JSON.stringify({ fixtures, prizes, events, season, seasonHistory, activity, teamLockOverride, draftState, cupState, sponsorships, draftArchives, transferWindow, swapsUsed, swapOffers, savedAt }),
+          JSON.stringify({ fixtures, prizes, events, season, seasonHistory, activity, teamLockOverride, draftState, cupState, sponsorships, draftArchives, transferWindow, swapsUsed, swapOffers, auditLog, loanOffers, activeLoans, rivalries, savedAt }),
           true
         );
         knownSavedAtRef.current = savedAt;
@@ -1207,7 +1218,7 @@ export default function EafcLeagueApp() {
       }
     }, 300);
     return () => clearTimeout(t);
-  }, [fixtures, prizes, events, season, seasonHistory, activity, teamLockOverride, draftState, cupState, sponsorships, draftArchives, transferWindow, swapsUsed, swapOffers, loaded]);
+  }, [fixtures, prizes, events, season, seasonHistory, activity, teamLockOverride, draftState, cupState, sponsorships, draftArchives, transferWindow, swapsUsed, swapOffers, auditLog, loanOffers, activeLoans, rivalries, loaded]);
 
   // Private messages save to their own separate key, on their own quick timer — this is what
   // actually stops a message from getting silently erased if someone else's browser (with a
@@ -2444,9 +2455,11 @@ export default function EafcLeagueApp() {
   // ticker never ends up stuck showing stale news from ages ago.
   const ACTIVITY_MAX_AGE_MS = 3 * 60 * 60 * 1000;
   const logActivity = useCallback((text, type = "info") => {
-    setActivity((a) => [{ id: uid(), text, type, time: Date.now() }, ...a]
+    const entry = { id: uid(), text, type, time: Date.now() };
+    setActivity((a) => [entry, ...a]
       .filter((item) => Date.now() - item.time < ACTIVITY_MAX_AGE_MS)
       .slice(0, 200));
+    setAuditLog((a) => [entry, ...a].slice(0, 3000));
   }, []);
 
   const teamById = useMemo(() => Object.fromEntries(teams.map((t) => [t.id, t])), [teams]);
@@ -2891,6 +2904,113 @@ export default function EafcLeagueApp() {
       } };
       return next;
     });
+    return null;
+  };
+
+  // Rivalries are declared by a manager between their own team and any other — deliberately not
+  // admin-only, since these are meant to be a fun, manager-driven thing. Order-independent (A-vs-B
+  // is the same rivalry as B-vs-A) so declaring one from either side just surfaces the same entry.
+  const declareRivalry = (declaringTeamId, otherTeamId, note) => {
+    if (!declaringTeamId) return "Pick your team first (top right) before declaring a rivalry.";
+    if (!otherTeamId || otherTeamId === declaringTeamId) return "Choose a different team to rival.";
+    const exists = rivalries.some((r) =>
+      (r.teamA === declaringTeamId && r.teamB === otherTeamId) || (r.teamA === otherTeamId && r.teamB === declaringTeamId)
+    );
+    if (exists) return "This rivalry already exists.";
+    setRivalries((rs) => [{ id: uid(), teamA: declaringTeamId, teamB: otherTeamId, note: (note || "").trim(), declaredBy: declaringTeamId, createdAt: Date.now() }, ...rs]);
+    return null;
+  };
+
+  // Either side of the rivalry (or an admin) can remove it - matches how most other two-sided
+  // arrangements in this app work (e.g. swap offers can be walked back by either party).
+  const removeRivalry = (rivalryId, requestingTeamId, pinAttempt) => {
+    const r = rivalries.find((x) => x.id === rivalryId);
+    if (!r) return "Rivalry not found.";
+    const isParty = requestingTeamId && (requestingTeamId === r.teamA || requestingTeamId === r.teamB);
+    const isAdmin = pinAttempt && pinAttempt === adminPin;
+    if (!isParty && !isAdmin) return "Only one of the two teams involved (or an admin) can remove this rivalry.";
+    setRivalries((rs) => rs.filter((x) => x.id !== rivalryId));
+    return null;
+  };
+
+  // Loans only exist to shuffle squad depth around during an active window — same spirit as every
+  // other squad-affecting transfer action being window-gated. The player's wage and stats simply
+  // follow them to whichever squad they're currently sitting in (same as any other squad move), so
+  // there's no separate wage-split bookkeeping to maintain — see the note on why this stays simple.
+  const sendLoanOffer = (fromTeamId, toTeamId, playerName) => {
+    if (!transferWindowOpen) return "Loans can only be arranged while the transfer window is open.";
+    if (!fromTeamId) return "Pick your team first (top right) before offering a loan.";
+    if (!toTeamId || fromTeamId === toTeamId) return "Choose a different team to loan to.";
+    const fromSquad = squads[fromTeamId];
+    const player = [...fromSquad.starters, ...fromSquad.reserves].find((p) => p && p.name === playerName);
+    if (!player) return "Player not found in that squad.";
+    if (player.onLoan) return `${playerName} is already out on loan from another club and can't be re-loaned.`;
+    if (player.isCaptain) return "The Captain can't be loaned out.";
+    const alreadyPending = loanOffers.some((o) => o.status === "pending" && o.fromTeamId === fromTeamId && o.playerName === playerName);
+    if (alreadyPending) return `There's already a pending loan offer out for ${playerName}.`;
+    setLoanOffers((os) => [{ id: uid(), fromTeamId, toTeamId, playerName, status: "pending", createdAt: Date.now() }, ...os]);
+    logActivity(`${teamById[fromTeamId]?.name} offered ${playerName} on loan to ${teamById[toTeamId]?.name}.`, "loan");
+    return null;
+  };
+
+  const respondToLoanOffer = (offerId, accept, requestingTeamId) => {
+    const offer = loanOffers.find((o) => o.id === offerId);
+    if (!offer) return "Offer not found.";
+    if (offer.status !== "pending") return "This offer has already been responded to.";
+    if (requestingTeamId !== offer.fromTeamId && requestingTeamId !== offer.toTeamId) {
+      return "Only the two teams involved in this loan offer can respond to it.";
+    }
+    if (!accept) {
+      setLoanOffers((os) => os.map((o) => (o.id === offerId ? { ...o, status: "declined" } : o)));
+      logActivity(requestingTeamId === offer.fromTeamId
+        ? `${teamById[offer.fromTeamId]?.name} withdrew their loan offer for ${offer.playerName}.`
+        : `${teamById[offer.toTeamId]?.name} declined the loan offer for ${offer.playerName}.`, "loan");
+      return null;
+    }
+    if (requestingTeamId !== offer.toTeamId) return "Only the receiving team can accept a loan offer.";
+    if (!transferWindowOpen) return "The transfer window has closed since this offer was made — it can no longer be accepted.";
+
+    // Re-validated fresh against the current squads (not whatever the squad looked like when the
+    // offer was sent), same pattern as movePlayerToGroup - the squad may well have moved on since.
+    const fromSquad = squads[offer.fromTeamId];
+    const toSquad = squads[offer.toTeamId];
+    const fromStarterIdx = fromSquad.starters.findIndex((p) => p && p.name === offer.playerName && !p.onLoan);
+    const fromReserveIdx = fromStarterIdx === -1 ? fromSquad.reserves.findIndex((p) => p && p.name === offer.playerName && !p.onLoan) : -1;
+    if (fromStarterIdx === -1 && fromReserveIdx === -1) return `${offer.playerName} is no longer available in ${teamById[offer.fromTeamId]?.name}'s squad.`;
+    const player = fromStarterIdx !== -1 ? fromSquad.starters[fromStarterIdx] : fromSquad.reserves[fromReserveIdx];
+
+    const toFreeStarterIdx = toSquad.starters.findIndex((p, i) => !p && i !== CAPTAIN_SLOT_INDEX);
+    const toFreeReserveIdx = toFreeStarterIdx === -1 ? toSquad.reserves.findIndex((p) => !p) : -1;
+    if (toFreeStarterIdx === -1 && toFreeReserveIdx === -1) return `${teamById[offer.toTeamId]?.name}'s squad is full — they need a free slot before this loan can be accepted.`;
+
+    const loanId = uid();
+    const loanedPlayer = { ...player, onLoan: true, loanFromTeamId: offer.fromTeamId, loanId };
+    setSquads((all) => {
+      const fromSq = { starters: [...all[offer.fromTeamId].starters], reserves: [...all[offer.fromTeamId].reserves] };
+      if (fromStarterIdx !== -1) fromSq.starters[fromStarterIdx] = null; else fromSq.reserves[fromReserveIdx] = null;
+      const toSq = { starters: [...all[offer.toTeamId].starters], reserves: [...all[offer.toTeamId].reserves] };
+      if (toFreeStarterIdx !== -1) toSq.starters[toFreeStarterIdx] = loanedPlayer; else toSq.reserves[toFreeReserveIdx] = loanedPlayer;
+      return { ...all, [offer.fromTeamId]: fromSq, [offer.toTeamId]: toSq };
+    });
+    setLoanOffers((os) => os.map((o) => (o.id === offerId ? { ...o, status: "accepted" } : o)));
+    setActiveLoans((ls) => [{ id: loanId, playerName: offer.playerName, fromTeamId: offer.fromTeamId, toTeamId: offer.toTeamId, startedAt: Date.now(), season }, ...ls]);
+    logActivity(`${teamById[offer.toTeamId]?.name} signed ${offer.playerName} on loan from ${teamById[offer.fromTeamId]?.name}.`, "loan");
+    return null;
+  };
+
+  // The lending club can recall their own player at any time (no need to wait for the window to
+  // reopen — it's their player). An admin can also step in, same as everywhere else in this app.
+  const recallLoan = (loanId, requestingTeamId, pinAttempt) => {
+    const loan = activeLoans.find((l) => l.id === loanId);
+    if (!loan) return "Loan not found.";
+    const isLender = requestingTeamId && requestingTeamId === loan.fromTeamId;
+    const isAdmin = pinAttempt && pinAttempt === adminPin;
+    if (!isLender && !isAdmin) return "Only the lending club (or an admin) can recall this loan.";
+    const result = computeLoanReturn(squads, loan);
+    if (result.error) return result.error;
+    setSquads(result.nextSquads);
+    setActiveLoans((ls) => ls.filter((l) => l.id !== loanId));
+    logActivity(`${teamById[loan.fromTeamId]?.name} recalled ${loan.playerName} from loan at ${teamById[loan.toTeamId]?.name}.`, "loan");
     return null;
   };
 
@@ -3409,8 +3529,22 @@ export default function EafcLeagueApp() {
     if (liveAuctions.length > 0) {
       return `Resolve ${liveAuctions.length} live auction${liveAuctions.length === 1 ? "" : "s"} first (finalize or let the seller decline) before ending the season.`;
     }
+    // Loans run for (at most) one season, same as everything else here being season-scoped — every
+    // active loan gets auto-recalled to its parent club before the new season begins. Checked here,
+    // before the confirm dialog, so a squad that's too full to take its player back surfaces as a
+    // clear blocker rather than after the admin's already confirmed.
+    let squadsAfterRecalls = squads;
+    const recallFailures = [];
+    activeLoans.forEach((loan) => {
+      const result = computeLoanReturn(squadsAfterRecalls, loan);
+      if (result.error) recallFailures.push(`${loan.playerName} (${teamById[loan.fromTeamId]?.name || loan.fromTeamId}): ${result.error}`);
+      else squadsAfterRecalls = result.nextSquads;
+    });
+    if (recallFailures.length > 0) {
+      return `Can't end the season yet — some loaned players can't be auto-recalled: ${recallFailures.join("; ")}. Free up the affected squad(s) first.`;
+    }
     if (!window.confirm(
-      `End Season ${season} and start Season ${season + 1}? This locks in final standings, tops up each team's leftover budget by position (£${SEASON_BOOST_MAX}M for 1st down to £${SEASON_BOOST_MIN}M for last), adds a wage cap bonus on top of each team's current cap by position (+£${SEASON_WAGE_BONUS_MAX * 1000}k for 1st down to +£${SEASON_WAGE_BONUS_MIN * 1000}k for last), pays out any sponsorship bonuses earned, and archives this season's fixtures/transfers/prizes. Squads carry over unchanged.`
+      `End Season ${season} and start Season ${season + 1}? This locks in final standings, tops up each team's leftover budget by position (£${SEASON_BOOST_MAX}M for 1st down to £${SEASON_BOOST_MIN}M for last), adds a wage cap bonus on top of each team's current cap by position (+£${SEASON_WAGE_BONUS_MAX * 1000}k for 1st down to +£${SEASON_WAGE_BONUS_MIN * 1000}k for last), pays out any sponsorship bonuses earned, recalls any active loans back to their parent clubs, and archives this season's fixtures/transfers/prizes. Squads otherwise carry over unchanged.`
     )) return null;
 
     const finalStandings = standings.map((r) => ({
@@ -3446,6 +3580,9 @@ export default function EafcLeagueApp() {
       };
     }));
     setSponsorships({}); // fresh deals get assigned at the halfway point of the new season
+    setSquads(squadsAfterRecalls);
+    setActiveLoans([]);
+    setLoanOffers((os) => os.filter((o) => o.status !== "pending")); // pending offers don't carry into a new season either
 
     setFixtures([]);
     setTransfers([]);
@@ -4864,7 +5001,8 @@ export default function EafcLeagueApp() {
         {tab === "dashboard" && (
           <Dashboard teams={teams} squads={squads} standings={standings} budgetStats={budgetStats} prizeTotal={prizeTotal}
             taxCollected={taxCollected} events={events} setEvents={setEvents} setTab={setTab}
-            activity={activity} myTeamId={myTeamId} season={season} />
+            activity={activity} myTeamId={myTeamId} season={season} fixtures={fixtures}
+            rivalries={rivalries} declareRivalry={declareRivalry} removeRivalry={removeRivalry} adminPin={adminPin} />
         )}
         {tab === "squads" && (
           <SquadsTab teams={teams} squads={squads} squadStats={squadStats} renameTeam={renameTeam}
@@ -4887,7 +5025,8 @@ export default function EafcLeagueApp() {
             addWantedListing={addWantedListing} removeWantedListing={removeWantedListing}
             sendMarketMessage={sendMarketMessage} transferWindow={transferWindow} transferWindowOpen={transferWindowOpen}
             season={season} swapOffers={swapOffers} offerSwap={offerSwap} respondToSwapOffer={respondToSwapOffer}
-            hasUsedSwapThisWindow={hasUsedSwapThisWindow} adminPin={adminPin} adminViewUnlocked={adminViewUnlocked} setAdminViewUnlocked={setAdminViewUnlocked} />
+            hasUsedSwapThisWindow={hasUsedSwapThisWindow} adminPin={adminPin} adminViewUnlocked={adminViewUnlocked} setAdminViewUnlocked={setAdminViewUnlocked}
+            loanOffers={loanOffers} activeLoans={activeLoans} sendLoanOffer={sendLoanOffer} respondToLoanOffer={respondToLoanOffer} recallLoan={recallLoan} />
         )}
         {tab === "draft" && (
           <DraftTab teams={teams} squads={squads} squadStats={squadStats} myTeamId={myTeamId}
@@ -4947,7 +5086,7 @@ export default function EafcLeagueApp() {
             reopenDraftKeepPicks={reopenDraftKeepPicks} clearBlindBids={clearBlindBids} blindBids={blindBids}
             assignSponsorships={assignSponsorships} transfers={activeTransfers} removePlayerFromSquad={removePlayerFromSquad} deleteTransfer={deleteTransfer} forceMarkBlindBidResolved={forceMarkBlindBidResolved}
             archiveDraft={archiveDraft} draftArchives={draftArchives} addPlayerToSquad={addPlayerToSquad} forceRatifyTransfer={forceRatifyTransfer}
-            clearInjuriesAndSuspensions={clearInjuriesAndSuspensions} />
+            clearInjuriesAndSuspensions={clearInjuriesAndSuspensions} auditLog={auditLog} />
         )}
 
         {tab === "scouting" && (
@@ -5112,7 +5251,90 @@ function HudStatChip({ label, value, tone }) {
   );
 }
 
-function Dashboard({ teams, squads, standings, budgetStats, prizeTotal, taxCollected, events, setEvents, setTab, activity, myTeamId, season }) {
+// Head-to-head record is computed fresh from fixtures each render (not stored), so it's always
+// accurate even if a past result between these two teams gets corrected later.
+function headToHead(teamA, teamB, fixtures) {
+  const rec = { aWins: 0, bWins: 0, draws: 0, aGoals: 0, bGoals: 0, played: 0 };
+  fixtures.forEach((f) => {
+    const involvesBoth = (f.team1 === teamA && f.team2 === teamB) || (f.team1 === teamB && f.team2 === teamA);
+    if (!involvesBoth) return;
+    if (f.score1 === "" || f.score2 === "" || f.score1 == null || f.score2 == null) return;
+    const s1 = Number(f.score1), s2 = Number(f.score2);
+    const aIsTeam1 = f.team1 === teamA;
+    const aScore = aIsTeam1 ? s1 : s2, bScore = aIsTeam1 ? s2 : s1;
+    rec.played++;
+    rec.aGoals += aScore; rec.bGoals += bScore;
+    if (aScore > bScore) rec.aWins++;
+    else if (bScore > aScore) rec.bWins++;
+    else rec.draws++;
+  });
+  return rec;
+}
+
+function RivalriesPanel({ teams, fixtures, rivalries, myTeamId, declareRivalry, removeRivalry, adminPin }) {
+  const [otherTeam, setOtherTeam] = useState("");
+  const [note, setNote] = useState("");
+  const [err, setErr] = useState("");
+  const teamById = useMemo(() => Object.fromEntries(teams.map((t) => [t.id, t])), [teams]);
+
+  const doDeclare = () => {
+    const e = declareRivalry(myTeamId, otherTeam, note);
+    if (e) { setErr(e); return; }
+    setErr(""); setOtherTeam(""); setNote("");
+  };
+
+  return (
+    <Panel>
+      <SectionTitle icon={Swords}>Rivalries</SectionTitle>
+      {rivalries.length === 0 ? (
+        <div style={{ color: C.muted, fontSize: 12.5, marginBottom: 12 }}>No rivalries declared yet.</div>
+      ) : (
+        <div className="grid gap-2" style={{ marginBottom: 14 }}>
+          {rivalries.map((r) => {
+            const teamA = teamById[r.teamA], teamB = teamById[r.teamB];
+            if (!teamA || !teamB) return null;
+            const h2h = headToHead(r.teamA, r.teamB, fixtures);
+            const canRemove = myTeamId === r.teamA || myTeamId === r.teamB;
+            return (
+              <div key={r.id} style={{ background: C.panelAlt, border: `1px solid ${C.border}`, borderRadius: 8, padding: 10 }}>
+                <div className="flex items-center justify-between flex-wrap gap-2">
+                  <div style={{ color: C.text, fontWeight: 700, fontSize: 13 }}>
+                    {teamA.name} <span style={{ color: C.gold }}>vs</span> {teamB.name}
+                  </div>
+                  <div style={{ color: C.muted, fontSize: 11.5 }}>
+                    {h2h.played === 0 ? "Never played" : `${h2h.aWins}-${h2h.draws}-${h2h.bWins} (${h2h.aGoals}-${h2h.bGoals} goals), ${h2h.played} played`}
+                  </div>
+                </div>
+                {r.note && <div style={{ color: C.muted, fontSize: 11.5, marginTop: 4, fontStyle: "italic" }}>{r.note}</div>}
+                {canRemove && (
+                  <button onClick={() => removeRivalry(r.id, myTeamId, adminPin)}
+                    style={{ background: "transparent", border: "none", cursor: "pointer", color: C.red, fontSize: 10.5, marginTop: 6, padding: 0 }}>
+                    Remove
+                  </button>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+      {myTeamId ? (
+        <div className="flex items-center gap-2 flex-wrap">
+          <Select value={otherTeam} onChange={(e) => setOtherTeam(e.target.value)} style={{ maxWidth: 180 }}>
+            <option value="">Declare a rivalry with…</option>
+            {teams.filter((t) => t.id !== myTeamId).map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+          </Select>
+          <TextInput placeholder="Optional note" value={note} onChange={(e) => setNote(e.target.value)} style={{ maxWidth: 200 }} />
+          <Btn size="sm" onClick={doDeclare}>Declare</Btn>
+          {err && <span style={{ color: C.red, fontSize: 11.5 }}>{err}</span>}
+        </div>
+      ) : (
+        <div style={{ color: C.muted, fontSize: 11.5 }}>Pick your team (top right) to declare a rivalry.</div>
+      )}
+    </Panel>
+  );
+}
+
+function Dashboard({ teams, squads, standings, budgetStats, prizeTotal, taxCollected, events, setEvents, setTab, activity, myTeamId, season, fixtures, rivalries, declareRivalry, removeRivalry, adminPin }) {
   const [newEvent, setNewEvent] = useState({ title: "", type: "League", date: "" });
   const leader = standings[0];
   const leaderTeam = teams.find((t) => t.id === leader?.id);
@@ -5176,6 +5398,9 @@ function Dashboard({ teams, squads, standings, budgetStats, prizeTotal, taxColle
             </div>
           </Panel>
         )}
+
+        <RivalriesPanel teams={teams} fixtures={fixtures} rivalries={rivalries} myTeamId={myTeamId}
+          declareRivalry={declareRivalry} removeRivalry={removeRivalry} adminPin={adminPin} />
 
         <div className="grid gap-4 stack-on-mobile" style={{ gridTemplateColumns: "2fr 1fr" }}>
           <Panel>
@@ -5964,6 +6189,7 @@ function SquadRow({ label, player, onMove, moveLabel, moveIcon: MoveIcon, rowInd
             {player.name}
           </button>
           {isInjured && <span title="Currently injured" style={{ color: C.red, fontSize: 11 }}>🤕</span>}
+          {player.onLoan && <Pill tone="muted">On Loan</Pill>}
         </div>
       </td>
       <td style={{ ...cellPad, textAlign: "center", color: C.text }}>{player.position}</td>
@@ -6035,6 +6261,118 @@ function formatCountdown(ms) {
   if (h >= 1) return `${h}h ${m}m left`;
   const s = Math.floor((ms % 60000) / 1000);
   return `${m}m ${s}s left`;
+}
+
+// Loans only ever propose/accept while the transfer window is open — the form and offer buttons
+// disable themselves the moment it closes, mirroring the swap/market tools right next to them.
+// Recalling a loan already in progress is deliberately NOT window-gated though: it's the lending
+// club taking back their own player, not a new signing, so there's no reason to make them wait.
+function LoansPanel({ teams, squads, myTeamId, transferWindowOpen, loanOffers, activeLoans, sendLoanOffer, respondToLoanOffer, recallLoan, adminPin, adminViewUnlocked, setAdminViewUnlocked }) {
+  const [targetTeam, setTargetTeam] = useState("");
+  const [playerName, setPlayerName] = useState("");
+  const [err, setErr] = useState("");
+  const teamById = useMemo(() => Object.fromEntries(teams.map((t) => [t.id, t])), [teams]);
+
+  const myPlayers = useMemo(() => {
+    if (!myTeamId || !squads[myTeamId]) return [];
+    return [...squads[myTeamId].starters, ...squads[myTeamId].reserves].filter((p) => p && !p.onLoan && !p.isCaptain);
+  }, [squads, myTeamId]);
+
+  const doSend = () => {
+    const e = sendLoanOffer(myTeamId, targetTeam, playerName);
+    if (e) { setErr(e); return; }
+    setErr(""); setTargetTeam(""); setPlayerName("");
+  };
+
+  const incoming = loanOffers.filter((o) => o.status === "pending" && o.toTeamId === myTeamId);
+  const outgoing = loanOffers.filter((o) => o.status === "pending" && o.fromTeamId === myTeamId);
+
+  return (
+    <Panel style={{ padding: 18 }}>
+      <SectionTitle icon={Repeat}>Loans</SectionTitle>
+      <div style={{ color: C.muted, fontSize: 11.5, marginBottom: 14, lineHeight: 1.6 }}>
+        Send a squad player out on loan to another team, or recall one of yours at any time. Wages and stats simply
+        follow the player to whichever squad they're currently in. New loan offers can only be sent or accepted
+        while the transfer window is open{!transferWindowOpen && " — it's currently closed"}.
+      </div>
+
+      {myTeamId && (
+        <div className="flex flex-wrap items-center gap-2" style={{ marginBottom: 16 }}>
+          <Select value={playerName} onChange={(e) => setPlayerName(e.target.value)} disabled={!transferWindowOpen} style={{ maxWidth: 200 }}>
+            <option value="">Loan out which player…</option>
+            {myPlayers.map((p) => <option key={p.name} value={p.name}>{p.name} ({p.position}, {p.rating})</option>)}
+          </Select>
+          <Select value={targetTeam} onChange={(e) => setTargetTeam(e.target.value)} disabled={!transferWindowOpen} style={{ maxWidth: 180 }}>
+            <option value="">To which team…</option>
+            {teams.filter((t) => t.id !== myTeamId).map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+          </Select>
+          <Btn size="sm" onClick={doSend} disabled={!transferWindowOpen || !playerName || !targetTeam}>Send Loan Offer</Btn>
+          {err && <span style={{ color: C.red, fontSize: 11.5 }}>{err}</span>}
+        </div>
+      )}
+
+      {incoming.length > 0 && (
+        <div style={{ marginBottom: 14 }}>
+          <div style={{ color: C.gold, fontWeight: 700, fontSize: 12.5, marginBottom: 6 }}>Offers for your squad</div>
+          <div className="grid gap-2">
+            {incoming.map((o) => (
+              <div key={o.id} className="flex items-center justify-between flex-wrap gap-2" style={{ background: C.panelAlt, border: `1px solid ${C.border}`, borderRadius: 8, padding: 10 }}>
+                <div style={{ color: C.text, fontSize: 12.5 }}>
+                  <b>{teamById[o.fromTeamId]?.name}</b> offers <b>{o.playerName}</b> on loan
+                </div>
+                <div className="flex items-center gap-2">
+                  <Btn size="sm" onClick={() => respondToLoanOffer(o.id, true, myTeamId)}>Accept</Btn>
+                  <Btn size="sm" variant="outline" onClick={() => respondToLoanOffer(o.id, false, myTeamId)}>Decline</Btn>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {outgoing.length > 0 && (
+        <div style={{ marginBottom: 14 }}>
+          <div style={{ color: C.gold, fontWeight: 700, fontSize: 12.5, marginBottom: 6 }}>Your pending offers</div>
+          <div className="grid gap-2">
+            {outgoing.map((o) => (
+              <div key={o.id} className="flex items-center justify-between flex-wrap gap-2" style={{ background: C.panelAlt, border: `1px solid ${C.border}`, borderRadius: 8, padding: 10 }}>
+                <div style={{ color: C.text, fontSize: 12.5 }}>
+                  <b>{o.playerName}</b> offered to <b>{teamById[o.toTeamId]?.name}</b> — awaiting response
+                </div>
+                <Btn size="sm" variant="outline" onClick={() => respondToLoanOffer(o.id, false, myTeamId)}>Withdraw</Btn>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div>
+        <div className="flex items-center justify-between" style={{ marginBottom: 6 }}>
+          <div style={{ color: C.gold, fontWeight: 700, fontSize: 12.5 }}>Active Loans</div>
+          <AdminGate adminPin={adminPin} adminViewUnlocked={adminViewUnlocked} setAdminViewUnlocked={setAdminViewUnlocked}><span /></AdminGate>
+        </div>
+        {activeLoans.length === 0 ? (
+          <div style={{ color: C.muted, fontSize: 12 }}>No players currently out on loan.</div>
+        ) : (
+          <div className="grid gap-2">
+            {activeLoans.map((l) => {
+              const canRecall = myTeamId === l.fromTeamId || adminViewUnlocked;
+              return (
+                <div key={l.id} className="flex items-center justify-between flex-wrap gap-2" style={{ background: C.panelAlt, border: `1px solid ${C.border}`, borderRadius: 8, padding: 10 }}>
+                  <div style={{ color: C.text, fontSize: 12.5 }}>
+                    <b>{l.playerName}</b> — on loan at <b>{teamById[l.toTeamId]?.name}</b> from <b>{teamById[l.fromTeamId]?.name}</b>
+                  </div>
+                  {canRecall && (
+                    <Btn size="sm" variant="outline" onClick={() => recallLoan(l.id, myTeamId, adminPin)}>Recall</Btn>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    </Panel>
+  );
 }
 
 function AuctionsPanel({ teams, squads, auctions, createAuction, placeBid, finalizeAuction, respondToAuction, deleteBid, cancelAuction, myTeamId, playerDatabase, squadStats, adminPin, adminViewUnlocked, setAdminViewUnlocked }) {
@@ -7078,7 +7416,7 @@ function DraftTab({ teams, squads, squadStats, myTeamId, playerDatabase, draftSt
   );
 }
 
-function TransfersTab({ teams, squads, transfers, logTransfer, logAdminReward, setTransfers, auctions, createAuction, placeBid, finalizeAuction, respondToAuction, deleteBid, cancelAuction, deleteTransfer, nowTick, myTeamId, playerDatabase, squadStats, transferListings, wantedListings, addTransferListing, removeTransferListing, addWantedListing, removeWantedListing, sendMarketMessage, transferWindow, transferWindowOpen, season, swapOffers, offerSwap, respondToSwapOffer, hasUsedSwapThisWindow, adminPin, adminViewUnlocked, setAdminViewUnlocked }) {
+function TransfersTab({ teams, squads, transfers, logTransfer, logAdminReward, setTransfers, auctions, createAuction, placeBid, finalizeAuction, respondToAuction, deleteBid, cancelAuction, deleteTransfer, nowTick, myTeamId, playerDatabase, squadStats, transferListings, wantedListings, addTransferListing, removeTransferListing, addWantedListing, removeWantedListing, sendMarketMessage, transferWindow, transferWindowOpen, season, swapOffers, offerSwap, respondToSwapOffer, hasUsedSwapThisWindow, adminPin, adminViewUnlocked, setAdminViewUnlocked, loanOffers, activeLoans, sendLoanOffer, respondToLoanOffer, recallLoan }) {
   const [deletingId, setDeletingId] = useState(null);
   const [deleteErr, setDeleteErr] = useState("");
 
@@ -7103,6 +7441,11 @@ function TransfersTab({ teams, squads, transfers, logTransfer, logAdminReward, s
         addWantedListing={addWantedListing} removeWantedListing={removeWantedListing}
         sendMarketMessage={sendMarketMessage} season={season} swapOffers={swapOffers}
         offerSwap={offerSwap} respondToSwapOffer={respondToSwapOffer} hasUsedSwapThisWindow={hasUsedSwapThisWindow} />
+
+      <LoansPanel teams={teams} squads={squads} myTeamId={myTeamId} transferWindowOpen={transferWindowOpen}
+        loanOffers={loanOffers} activeLoans={activeLoans}
+        sendLoanOffer={sendLoanOffer} respondToLoanOffer={respondToLoanOffer} recallLoan={recallLoan}
+        adminPin={adminPin} adminViewUnlocked={adminViewUnlocked} setAdminViewUnlocked={setAdminViewUnlocked} />
 
       <Panel style={{ padding: 18 }}>
         <div className="flex items-center justify-between flex-wrap gap-2" style={{ marginBottom: 4 }}>
@@ -7322,8 +7665,88 @@ function EditStatsPanel({ team1Name, team2Name, resultForm, updateStat, setMotm,
   );
 }
 
+// Each manager can only write/edit their own side's quote (myTeamId check) — the other team's
+// quote, if any, shows read-only. Quotes live directly on the fixture object (f.pressQuotes),
+// same pattern as proof photos, rather than a separate top-level collection.
+function PressConferencePanel({ f, t1Name, t2Name, myTeamId, drafts, setDrafts, onSave }) {
+  const side = (teamId, teamName, roleKey) => {
+    const isMine = teamId === myTeamId;
+    const existing = f.pressQuotes && f.pressQuotes[teamId];
+    return (
+      <div>
+        <div style={{ color: C.gold, fontWeight: 700, fontSize: 12.5, marginBottom: 6 }}>{teamName}</div>
+        {isMine ? (
+          <>
+            <textarea value={drafts[roleKey] || ""} onChange={(e) => setDrafts((d) => ({ ...d, [roleKey]: e.target.value }))}
+              placeholder="Say something for the press…" rows={3} maxLength={400}
+              style={{ width: "100%", background: C.panelAlt, color: C.text, border: `1px solid ${C.border}`, borderRadius: 6, padding: "6px 8px", fontSize: 12.5, fontFamily: "inherit", resize: "vertical" }} />
+            <div style={{ marginTop: 6 }}>
+              <Btn size="sm" onClick={() => onSave(teamId)}>Save Quote</Btn>
+            </div>
+          </>
+        ) : existing ? (
+          <div style={{ color: C.text, fontSize: 12.5, fontStyle: "italic", padding: "6px 8px", background: C.panelAlt, borderRadius: 6, border: `1px solid ${C.border}` }}>
+            "{existing.text}"
+          </div>
+        ) : (
+          <div style={{ color: C.muted, fontSize: 12, fontStyle: "italic" }}>No comment yet.</div>
+        )}
+      </div>
+    );
+  };
+  return (
+    <div style={{ background: C.panelAlt, border: `1px solid ${C.gold}55`, borderRadius: 10, padding: 14, marginTop: 6 }}>
+      <div style={{ color: C.text, fontWeight: 700, fontSize: 13, marginBottom: 10 }}>Press Conference</div>
+      <div className="grid gap-3 stack-on-mobile" style={{ gridTemplateColumns: "1fr 1fr" }}>
+        {side(f.team1, t1Name, "team1")}
+        {side(f.team2, t2Name, "team2")}
+      </div>
+    </div>
+  );
+}
+
 // Standard "circle method" round-robin: everyone plays everyone once per leg, home/away
 // alternating fairly. doubleRound repeats it with fixtures reversed for a second half.
+// Pure — computes what squads would look like after returning one loaned player to their parent
+// club, without touching any state itself. Shared by both a manual recall and the automatic
+// end-of-season sweep below, so the two can't drift out of sync with each other.
+function computeLoanReturn(squads, loan) {
+  const borrower = squads[loan.toTeamId];
+  const parent = squads[loan.fromTeamId];
+  if (!borrower || !parent) return { error: "One of the teams in this loan no longer exists." };
+
+  let idx = borrower.starters.findIndex((p) => p && p.loanId === loan.id);
+  let fromGroup = "starters";
+  if (idx === -1) { idx = borrower.reserves.findIndex((p) => p && p.loanId === loan.id); fromGroup = "reserves"; }
+  if (idx === -1) return { error: `${loan.playerName} wasn't found in the borrowing team's squad — they may already have been moved manually.` };
+
+  const player = borrower[fromGroup][idx];
+  const clean = { ...player };
+  delete clean.onLoan; delete clean.loanFromTeamId; delete clean.loanId;
+
+  const freeStarterIdx = parent.starters.findIndex((p, i) => !p && i !== CAPTAIN_SLOT_INDEX);
+  const freeReserveIdx = freeStarterIdx === -1 ? parent.reserves.findIndex((p) => !p) : -1;
+  if (freeStarterIdx === -1 && freeReserveIdx === -1) {
+    return { error: `${loan.playerName}'s parent club squad is full — free a slot there before recalling them.` };
+  }
+
+  const nextBorrowerGroup = [...borrower[fromGroup]];
+  nextBorrowerGroup[idx] = null;
+  const nextParentStarters = [...parent.starters];
+  const nextParentReserves = [...parent.reserves];
+  if (freeStarterIdx !== -1) nextParentStarters[freeStarterIdx] = clean;
+  else nextParentReserves[freeReserveIdx] = clean;
+
+  return {
+    error: null,
+    nextSquads: {
+      ...squads,
+      [loan.toTeamId]: { ...borrower, [fromGroup]: nextBorrowerGroup },
+      [loan.fromTeamId]: { starters: nextParentStarters, reserves: nextParentReserves },
+    },
+  };
+}
+
 function generateRoundRobin(teamIds, doubleRound) {
   let arr = [...teamIds];
   if (arr.length % 2 !== 0) arr.push(null); // odd team count gets a "bye" each round
@@ -7359,6 +7782,22 @@ function FixturesTab({ teams, fixtures, setFixtures, logActivity, myTeamId, squa
   const [resultForm, setResultForm] = useState(null); // { score1, score2, team1Stats, team2Stats, motm }
   const [resultError, setResultError] = useState("");
   const [editingStatsFor, setEditingStatsFor] = useState(null); // fixture id — correcting an already-submitted result
+  const [pressOpenFor, setPressOpenFor] = useState(null); // fixture id — press conference panel expanded
+  const [pressDrafts, setPressDrafts] = useState({}); // { [teamId]: text } — in-progress edits before saving
+
+  const savePressQuote = (f, teamId, text) => {
+    if (teamId !== myTeamId) return; // can only speak for your own team
+    const trimmed = text.trim();
+    setFixtures((all) => all.map((x) => {
+      if (x.id !== f.id) return x;
+      const nextQuotes = { ...(x.pressQuotes || {}) };
+      if (trimmed) nextQuotes[teamId] = { text: trimmed, time: Date.now() };
+      else delete nextQuotes[teamId]; // saving empty clears it
+      return { ...x, pressQuotes: nextQuotes };
+    }));
+    const teamName = teams.find((t) => t.id === teamId)?.name || teamId;
+    logActivity(trimmed ? `${teamName} press conference (MD${f.matchday}): "${trimmed.slice(0, 100)}${trimmed.length > 100 ? "…" : ""}"` : `${teamName} removed their press conference quote (MD${f.matchday}).`, "press");
+  };
 
   const add = () => {
     if (form.team1 === form.team2) { setWarning("Team 1 and Team 2 can't be the same."); return; }
@@ -7697,6 +8136,7 @@ function FixturesTab({ teams, fixtures, setFixtures, logActivity, myTeamId, squa
                 const uploading = uploadingId === f.id;
                 const enteringResult = enteringResultFor === f.id;
                 const editingStats = editingStatsFor === f.id;
+                const pressOpen = pressOpenFor === f.id;
                 return (
                   <Fragment key={f.id}>
                   <tr style={{ background: i % 2 ? C.panelAlt : "transparent" }}>
@@ -7761,6 +8201,14 @@ function FixturesTab({ teams, fixtures, setFixtures, logActivity, myTeamId, squa
                             </button>
                           </>
                         ) : null}
+                        <button onClick={() => {
+                          if (pressOpen) { setPressOpenFor(null); return; }
+                          setPressOpenFor(f.id);
+                          setPressDrafts({ team1: (f.pressQuotes && f.pressQuotes[f.team1]?.text) || "", team2: (f.pressQuotes && f.pressQuotes[f.team2]?.text) || "" });
+                        }} title="Press conference"
+                          style={{ background: pressOpen ? `${C.gold}22` : "transparent", border: `1px solid ${pressOpen ? C.gold : C.border}`, borderRadius: 6, padding: "4px 8px", cursor: "pointer", color: pressOpen ? C.gold : C.muted, display: "inline-flex", alignItems: "center", gap: 4 }}>
+                          <MessageCircle size={12} /> Press
+                        </button>
                         <button onClick={() => removeFixture(f)} style={{ background: "transparent", border: "none", cursor: "pointer", color: C.red }}>
                           <Trash2 size={14} />
                         </button>
@@ -7789,6 +8237,17 @@ function FixturesTab({ teams, fixtures, setFixtures, logActivity, myTeamId, squa
                           resultForm={resultForm} updateStat={updateStat}
                           setMotm={(name) => setResultForm((r) => ({ ...r, motm: name }))}
                           error={resultError}
+                        />
+                      </td>
+                    </tr>
+                  )}
+                  {pressOpen && (
+                    <tr>
+                      <td colSpan={8} style={{ padding: "0 8px 14px" }}>
+                        <PressConferencePanel
+                          f={f} t1Name={t1} t2Name={t2} myTeamId={myTeamId}
+                          drafts={pressDrafts} setDrafts={setPressDrafts}
+                          onSave={(teamId) => savePressQuote(f, teamId, teamId === f.team1 ? pressDrafts.team1 : pressDrafts.team2)}
                         />
                       </td>
                     </tr>
@@ -9400,7 +9859,60 @@ function AddPrizeTools({ teams, addPrize }) {
   );
 }
 
-function AdminTab({ teams, squads, myTeamId, playerDatabase, adminPin, logAdminReward, resetAll, changeAdminPin, addFundsToTeam, addEarned86Slot, exportBackup, restoreBackup, restoreFromNightlyBackup, endSeason, season, seasonHistory, standings, importPlayerDatabase, clearPlayerDatabase, teamLockOverride, toggleTeamLockOverride, clearChat, resetTeamPassword, squadStats, transferWindow, setTransferWindowDates, clearTransferWindow, addPrize, exportPlayerDatabaseCSV, adminRemoveCaptain, draftPicks, draftSubmitted, clearSquadsAndTransfers, applyNewBudgetAndWageCap, resetTeamDraft, resolveSingleTeamDraft, reopenDraftKeepPicks, clearBlindBids, blindBids, assignSponsorships, transfers, removePlayerFromSquad, deleteTransfer, forceMarkBlindBidResolved, archiveDraft, draftArchives, addPlayerToSquad, forceRatifyTransfer, clearInjuriesAndSuspensions }) {
+// Permanent, filterable record of every significant action — separate from the short-lived
+// dashboard ticker (which drops entries after 3h). This is the thing to check when someone's
+// trying to figure out who changed what, and when — e.g. tracking down a mis-entered stat.
+function AuditLogPanel({ auditLog, teams }) {
+  const [query, setQuery] = useState("");
+  const [typeFilter, setTypeFilter] = useState("all");
+  const [teamFilter, setTeamFilter] = useState("all");
+
+  const types = useMemo(() => ["all", ...new Set((auditLog || []).map((e) => e.type))], [auditLog]);
+
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    const team = teams.find((t) => t.id === teamFilter);
+    return (auditLog || []).filter((e) => {
+      if (typeFilter !== "all" && e.type !== typeFilter) return false;
+      if (q && !e.text.toLowerCase().includes(q)) return false;
+      if (team && !e.text.toLowerCase().includes(team.name.toLowerCase())) return false;
+      return true;
+    });
+  }, [auditLog, query, typeFilter, teamFilter, teams]);
+
+  return (
+    <Panel style={{ padding: 18 }}>
+      <SectionTitle icon={FileText}>Audit Log ({(auditLog || []).length} total)</SectionTitle>
+      <div className="flex flex-wrap gap-2" style={{ marginBottom: 12 }}>
+        <TextInput placeholder="Search text…" value={query} onChange={(e) => setQuery(e.target.value)} style={{ maxWidth: 220 }} />
+        <Select value={typeFilter} onChange={(e) => setTypeFilter(e.target.value)} style={{ maxWidth: 150 }}>
+          {types.map((t) => <option key={t} value={t}>{t === "all" ? "All types" : t}</option>)}
+        </Select>
+        <Select value={teamFilter} onChange={(e) => setTeamFilter(e.target.value)} style={{ maxWidth: 180 }}>
+          <option value="all">All teams</option>
+          {teams.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+        </Select>
+      </div>
+      <div style={{ maxHeight: 360, overflowY: "auto", border: `1px solid ${C.border}`, borderRadius: 8 }}>
+        {filtered.length === 0 ? (
+          <div style={{ padding: 16, color: C.muted, fontSize: 12.5, textAlign: "center" }}>No matching entries.</div>
+        ) : (
+          filtered.map((e) => (
+            <div key={e.id} style={{ padding: "8px 12px", borderBottom: `1px solid ${C.border}33`, fontSize: 12 }}>
+              <div className="flex items-center gap-2" style={{ marginBottom: 2 }}>
+                <Pill tone="muted">{e.type}</Pill>
+                <span style={{ color: C.muted, fontSize: 10.5 }}>{new Date(e.time).toLocaleString()}</span>
+              </div>
+              <div style={{ color: C.text }}>{e.text}</div>
+            </div>
+          ))
+        )}
+      </div>
+    </Panel>
+  );
+}
+
+function AdminTab({ teams, squads, myTeamId, playerDatabase, adminPin, logAdminReward, resetAll, changeAdminPin, addFundsToTeam, addEarned86Slot, exportBackup, restoreBackup, restoreFromNightlyBackup, endSeason, season, seasonHistory, standings, importPlayerDatabase, clearPlayerDatabase, teamLockOverride, toggleTeamLockOverride, clearChat, resetTeamPassword, squadStats, transferWindow, setTransferWindowDates, clearTransferWindow, addPrize, exportPlayerDatabaseCSV, adminRemoveCaptain, draftPicks, draftSubmitted, clearSquadsAndTransfers, applyNewBudgetAndWageCap, resetTeamDraft, resolveSingleTeamDraft, reopenDraftKeepPicks, clearBlindBids, blindBids, assignSponsorships, transfers, removePlayerFromSquad, deleteTransfer, forceMarkBlindBidResolved, archiveDraft, draftArchives, addPlayerToSquad, forceRatifyTransfer, clearInjuriesAndSuspensions, auditLog }) {
   const [unlocked, setUnlocked] = useState(false);
   const [pinInput, setPinInput] = useState("");
   const [err, setErr] = useState("");
@@ -9430,6 +9942,8 @@ function AdminTab({ teams, squads, myTeamId, playerDatabase, adminPin, logAdminR
 
   return (
     <div className="grid gap-4">
+      <AuditLogPanel auditLog={auditLog} teams={teams} />
+
       <AdminPlayerRewards teams={teams} squads={squads} logAdminReward={logAdminReward} myTeamId={myTeamId} playerDatabase={playerDatabase} squadStats={squadStats} />
 
       <DraftSubmissionsTools teams={teams} draftPicks={draftPicks} draftSubmitted={draftSubmitted} adminPin={adminPin} resetTeamDraft={resetTeamDraft} resolveSingleTeamDraft={resolveSingleTeamDraft} reopenDraftKeepPicks={reopenDraftKeepPicks} clearBlindBids={clearBlindBids} blindBids={blindBids} forceMarkBlindBidResolved={forceMarkBlindBidResolved} archiveDraft={archiveDraft} draftArchives={draftArchives} />
