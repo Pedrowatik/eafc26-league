@@ -5608,16 +5608,25 @@ function ActivityTicker({ activity, clearActivity, adminPin, adminViewUnlocked, 
   // of activity happened to be in the window. No upper limit here on purpose: the more there is to
   // read, the longer a full pass should take, so speed stays constant instead of the ticker
   // speeding back up whenever the window is fullest — which is exactly when it needs to be slowest.
-  const duration = Math.max(tickerText.length * 0.2, 16);
+  const duration = Math.max(tickerText.length * 0.3, 20);
 
   return (
     <div style={{ background: "#050a13", borderTop: `1px solid rgba(231,197,104,0.25)` }}>
+      {/* Defined here (not relying on a global "ticker-scroll" class) so this component fully
+          controls its own animation — a page-wide stylesheet rule with the same name, a fixed
+          duration, or an !important could otherwise silently override the duration below. */}
+      <style>{`
+        @keyframes eafc-ticker-scroll-v2 {
+          0% { transform: translateX(0); }
+          100% { transform: translateX(-100%); }
+        }
+      `}</style>
       <div className="flex items-center gap-3" style={{ maxWidth: 1180, margin: "0 auto", padding: "0 18px", height: 34 }}>
         <span className="hud-font" style={{ color: C.gold, fontSize: 10.5, fontWeight: 600, letterSpacing: "0.14em", textTransform: "uppercase", flexShrink: 0 }}>
           Live
         </span>
         <div style={{ flex: 1, overflow: "hidden", whiteSpace: "nowrap" }}>
-          <div style={{ display: "inline-block", paddingLeft: "100%", animation: `ticker-scroll ${duration}s linear infinite` }}>
+          <div style={{ display: "inline-block", paddingLeft: "100%", animation: `eafc-ticker-scroll-v2 ${duration}s linear infinite` }}>
             <span className="hud-font" style={{ color: "rgba(255,255,255,0.75)", fontSize: 12.5 }}>{tickerText}</span>
           </div>
         </div>
