@@ -5602,7 +5602,12 @@ function ActivityTicker({ activity, clearActivity, adminPin, adminViewUnlocked, 
   const tickerText = items.length > 0
     ? items.map((a) => a.text).join("     •     ")
     : "Nothing in the last 3 hours — actions across the league will show up here.";
-  const duration = Math.max(items.length * 6, 14);
+  // Duration is based on how much text there actually is, not how many items make it up - a
+  // handful of long press-conference quotes has just as much text to read as a dozen short "X
+  // signed Y" lines, so item count alone made the scroll speed swing wildly depending on what kind
+  // of activity happened to be in the window. ~0.12s per character keeps reading speed consistent;
+  // clamped so it's never too fast to read or so slow it feels stuck.
+  const duration = Math.min(Math.max(tickerText.length * 0.12, 14), 200);
 
   return (
     <div style={{ background: "#050a13", borderTop: `1px solid rgba(231,197,104,0.25)` }}>
