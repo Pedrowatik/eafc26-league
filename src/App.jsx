@@ -5605,9 +5605,10 @@ function ActivityTicker({ activity, clearActivity, adminPin, adminViewUnlocked, 
   // Duration is based on how much text there actually is, not how many items make it up - a
   // handful of long press-conference quotes has just as much text to read as a dozen short "X
   // signed Y" lines, so item count alone made the scroll speed swing wildly depending on what kind
-  // of activity happened to be in the window. ~0.12s per character keeps reading speed consistent;
-  // clamped so it's never too fast to read or so slow it feels stuck.
-  const duration = Math.min(Math.max(tickerText.length * 0.12, 14), 200);
+  // of activity happened to be in the window. No upper limit here on purpose: the more there is to
+  // read, the longer a full pass should take, so speed stays constant instead of the ticker
+  // speeding back up whenever the window is fullest — which is exactly when it needs to be slowest.
+  const duration = Math.max(tickerText.length * 0.2, 16);
 
   return (
     <div style={{ background: "#050a13", borderTop: `1px solid rgba(231,197,104,0.25)` }}>
