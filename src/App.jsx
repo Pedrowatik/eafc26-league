@@ -5042,7 +5042,8 @@ export default function EafcLeagueApp() {
         {tab === "fixtures" && (
           <FixturesTab teams={teams} fixtures={fixtures} setFixtures={setFixtures} logActivity={logActivity}
             myTeamId={myTeamId} squads={squads} injuries={injuries} generateInjuries={generateInjuries}
-            cardTally={cardTally} setCardTally={setCardTally} suspensions={suspensions} setSuspensions={setSuspensions} />
+            cardTally={cardTally} setCardTally={setCardTally} suspensions={suspensions} setSuspensions={setSuspensions}
+            rivalries={rivalries} standings={standings} transfers={activeTransfers} />
         )}
         {tab === "standings" && (
           <StandingsTab teams={teams} standings={standings} fixtures={fixtures} sponsorships={sponsorships} squads={squads} />
@@ -7673,38 +7674,73 @@ function EditStatsPanel({ team1Name, team2Name, resultForm, updateStat, setMotm,
   );
 }
 
-// Each manager can only write/edit their own side's quote (myTeamId check) — the other team's
-// quote, if any, shows read-only. Quotes live directly on the fixture object (f.pressQuotes),
-// same pattern as proof photos, rather than a separate top-level collection.
-function PressConferencePanel({ f, t1Name, t2Name, myTeamId, drafts, setDrafts, onSave }) {
+// Each manager can only answer for their own side (myTeamId check) — the other team's answers, if
+// any, show read-only. Answers live directly on the fixture object (f.pressQuotes), same pattern
+// as proof photos, rather than a separate top-level collection.
+function PressConferencePanel({ f, t1Name, t2Name, myTeamId, drafts, setDrafts, onSave, onFeature, rivalries, standings, teamById, transfers }) {
   const side = (teamId, teamName, roleKey) => {
     const isMine = teamId === myTeamId;
-    const existing = f.pressQuotes && f.pressQuotes[teamId];
+    const questions = generatePressQuestions(f, teamId, { rivalries, standings, teamById, transfers });
+    const saved = f.pressQuotes && f.pressQuotes[teamId];
+    // Legacy data from before this feature had a single free-text quote instead of 3 Q&As — still
+    // shown, just without a "question" line above it or the ability to feature it further.
+    const savedAnswers = saved?.answers || (saved?.text ? [{ question: null, answer: saved.text }] : []);
+    const draftArr = drafts[roleKey] || ["", "", ""];
+
     return (
       <div>
         <div style={{ color: C.gold, fontWeight: 700, fontSize: 12.5, marginBottom: 6 }}>{teamName}</div>
-        {isMine ? (
-          <>
-            <textarea value={drafts[roleKey] || ""} onChange={(e) => setDrafts((d) => ({ ...d, [roleKey]: e.target.value }))}
-              placeholder="Say something for the press…" rows={3} maxLength={400}
-              style={{ width: "100%", background: C.panelAlt, color: C.text, border: `1px solid ${C.border}`, borderRadius: 6, padding: "6px 8px", fontSize: 12.5, fontFamily: "inherit", resize: "vertical" }} />
-            <div style={{ marginTop: 6 }}>
-              <Btn size="sm" onClick={() => onSave(teamId)}>Save Quote</Btn>
+        {isMine && (
+          <div className="grid gap-2" style={{ marginBottom: 8 }}>
+            {questions.map((q, i) => (
+              <div key={i}>
+                <div style={{ color: C.muted, fontSize: 11, fontStyle: "italic", marginBottom: 3 }}>Q{i + 1}. {q}</div>
+                <textarea value={draftArr[i] || ""}
+                  onChange={(e) => setDrafts((d) => {
+                    const arr = [...(d[roleKey] || ["", "", ""])];
+                    arr[i] = e.target.value;
+                    return { ...d, [roleKey]: arr };
+                  })}
+                  placeholder="Your answer…" rows={2} maxLength={280}
+                  style={{ width: "100%", background: C.panelAlt, color: C.text, border: `1px solid ${C.border}`, borderRadius: 6, padding: "6px 8px", fontSize: 12.5, fontFamily: "inherit", resize: "vertical" }} />
+              </div>
+            ))}
+            <div>
+              <Btn size="sm" onClick={() => onSave(teamId, questions)}>Save Answers</Btn>
             </div>
-          </>
-        ) : existing ? (
-          <div style={{ color: C.text, fontSize: 12.5, fontStyle: "italic", padding: "6px 8px", background: C.panelAlt, borderRadius: 6, border: `1px solid ${C.border}` }}>
-            "{existing.text}"
           </div>
-        ) : (
-          <div style={{ color: C.muted, fontSize: 12, fontStyle: "italic" }}>No comment yet.</div>
         )}
+        {savedAnswers.length > 0 ? (
+          <div className="grid gap-2">
+            {savedAnswers.map((qa, i) => (
+              <div key={i} style={{ padding: "6px 8px", background: C.panelAlt, borderRadius: 6, border: `1px solid ${C.border}` }}>
+                {qa.question && <div style={{ color: C.muted, fontSize: 10, fontStyle: "italic", marginBottom: 2 }}>Q: {qa.question}</div>}
+                <div style={{ color: C.text, fontSize: 12.5 }}>"{qa.answer}"</div>
+                {isMine && (
+                  qa.featured ? (
+                    <div style={{ color: C.gold, fontSize: 10.5, marginTop: 3 }}>✓ On news ticker</div>
+                  ) : (
+                    <button onClick={() => onFeature(teamId, i)}
+                      style={{ background: "transparent", border: "none", cursor: "pointer", color: C.gold, fontSize: 10.5, padding: 0, marginTop: 4 }}>
+                      📰 Send to news ticker
+                    </button>
+                  )
+                )}
+              </div>
+            ))}
+          </div>
+        ) : !isMine ? (
+          <div style={{ color: C.muted, fontSize: 12, fontStyle: "italic" }}>No comment yet.</div>
+        ) : null}
       </div>
     );
   };
   return (
     <div style={{ background: C.panelAlt, border: `1px solid ${C.gold}55`, borderRadius: 10, padding: 14, marginTop: 6 }}>
-      <div style={{ color: C.text, fontWeight: 700, fontSize: 13, marginBottom: 10 }}>Press Conference</div>
+      <div style={{ color: C.text, fontWeight: 700, fontSize: 13, marginBottom: 4 }}>Press Conference</div>
+      <div style={{ color: C.muted, fontSize: 11, marginBottom: 10 }}>
+        3 quick questions from the press, shaped by the result, your rivalry with the opponent (if any), and your spot in the table.
+      </div>
       <div className="grid gap-3 stack-on-mobile" style={{ gridTemplateColumns: "1fr 1fr" }}>
         {side(f.team1, t1Name, "team1")}
         {side(f.team2, t2Name, "team2")}
@@ -7755,6 +7791,73 @@ function computeLoanReturn(squads, loan) {
   };
 }
 
+// Deterministic per fixture+team (no Math.random) so re-opening the panel later shows the same
+// questions rather than shuffling them - a hash of the fixture+team id picks the generic filler
+// question instead. Exactly 3 questions: one always tied to this fixture's result, one tied to a
+// rivalry with the opponent if one's been declared, else the team's most recent transfer business
+// if there is any, else their current table position; and one general filler (which itself
+// sometimes leans on transfers too, so it isn't only ever the priority slot referencing them).
+function generatePressQuestions(f, teamId, { rivalries, standings, teamById, transfers }) {
+  const opponentId = f.team1 === teamId ? f.team2 : f.team1;
+  const opponentName = teamById[opponentId]?.name || "the opponents";
+  const played = f.score1 !== "" && f.score2 !== "" && f.score1 != null && f.score2 != null;
+  const myScore = f.team1 === teamId ? Number(f.score1) : Number(f.score2);
+  const oppScore = f.team1 === teamId ? Number(f.score2) : Number(f.score1);
+
+  const questions = [];
+
+  if (!played) {
+    questions.push(`This one's still to be played against ${opponentName} — how are you approaching it?`);
+  } else if (myScore > oppScore) {
+    questions.push(`A win here against ${opponentName} — talk us through how that felt.`);
+  } else if (myScore < oppScore) {
+    questions.push(`That result against ${opponentName} will sting — what went wrong out there?`);
+  } else {
+    questions.push(`A draw against ${opponentName} — happy with a point, or do you feel like two got away?`);
+  }
+
+  const isRival = rivalries.some((r) => (r.teamA === teamId && r.teamB === opponentId) || (r.teamA === opponentId && r.teamB === teamId));
+  const recentTransfer = (transfers || [])
+    .filter((tx) => !tx.cancelled && (tx.from === teamId || tx.to === teamId) && tx.from !== "AUCTION_LOSS")
+    .sort((a, b) => new Date(b.date) - new Date(a.date))[0];
+
+  if (isRival) {
+    questions.push(`There's some needle to this one given your rivalry with ${opponentName} — did that add extra edge?`);
+  } else if (recentTransfer) {
+    if (recentTransfer.to === teamId) {
+      questions.push(`You brought in ${recentTransfer.player} for ${money(recentTransfer.finalCost ?? recentTransfer.price)} — how do you see them fitting into the squad?`);
+    } else {
+      const boughtBy = recentTransfer.to === "FA" ? "the market" : (teamById[recentTransfer.to]?.name || "another club");
+      questions.push(`You let ${recentTransfer.player} leave for ${boughtBy} — was that a tough call?`);
+    }
+  } else {
+    const row = standings.find((r) => r.id === teamId);
+    if (row && row.position <= 3) {
+      questions.push(`You're up near the top of the table right now — is the pressure of chasing top spot getting to the squad?`);
+    } else if (row && row.position >= standings.length - 2) {
+      questions.push(`Results haven't been kind lately and you're in the bottom reaches of the table — what's the plan to turn things around?`);
+    } else {
+      questions.push(`How would you assess the season so far?`);
+    }
+  }
+
+  const genericPool = [
+    "Any words for the fans after this one?",
+    "What's the mood like in the camp heading into the next fixture?",
+    "Anything you want to flag about team news or squad rotation?",
+    "How's the title race looking from where you're sitting?",
+    "What's been the standout individual performance for you this season?",
+    "Any incomings you're chasing before the transfer window shuts?",
+    "How would you rate your business in the transfer market so far this season?",
+  ];
+  let h = 0;
+  const seed = `${f.id}:${teamId}`;
+  for (let i = 0; i < seed.length; i++) h = (h * 31 + seed.charCodeAt(i)) >>> 0;
+  questions.push(genericPool[h % genericPool.length]);
+
+  return questions;
+}
+
 function generateRoundRobin(teamIds, doubleRound) {
   let arr = [...teamIds];
   if (arr.length % 2 !== 0) arr.push(null); // odd team count gets a "bye" each round
@@ -7778,7 +7881,8 @@ function generateRoundRobin(teamIds, doubleRound) {
   return legs;
 }
 
-function FixturesTab({ teams, fixtures, setFixtures, logActivity, myTeamId, squads, injuries, generateInjuries, cardTally, setCardTally, suspensions, setSuspensions }) {
+function FixturesTab({ teams, fixtures, setFixtures, logActivity, myTeamId, squads, injuries, generateInjuries, cardTally, setCardTally, suspensions, setSuspensions, rivalries, standings, transfers }) {
+  const teamById = useMemo(() => Object.fromEntries(teams.map((t) => [t.id, t])), [teams]);
   const teamById = useMemo(() => Object.fromEntries(teams.map((t) => [t.id, t])), [teams]);
   const blank = { matchday: 1, team1: myTeamId || teams[0].id, team2: teams.find((t) => t.id !== myTeamId)?.id || teams[1].id, date: todayISO(), proof: "" };
   const [form, setForm] = useState(blank);
@@ -7791,20 +7895,41 @@ function FixturesTab({ teams, fixtures, setFixtures, logActivity, myTeamId, squa
   const [resultError, setResultError] = useState("");
   const [editingStatsFor, setEditingStatsFor] = useState(null); // fixture id — correcting an already-submitted result
   const [pressOpenFor, setPressOpenFor] = useState(null); // fixture id — press conference panel expanded
-  const [pressDrafts, setPressDrafts] = useState({}); // { [teamId]: text } — in-progress edits before saving
+  const [pressDrafts, setPressDrafts] = useState({}); // { [teamId]: [answer1, answer2, answer3] } — in-progress edits before saving
 
-  const savePressQuote = (f, teamId, text) => {
+  // Saves all 3 answers as a set (skips any left blank). Overwrites whatever was there before for
+  // this team on this fixture - re-saving after editing an answer just replaces the old set.
+  const savePressAnswers = (f, teamId, questions, answers) => {
     if (teamId !== myTeamId) return; // can only speak for your own team
-    const trimmed = text.trim();
+    const qa = questions.map((q, i) => ({ question: q, answer: (answers[i] || "").trim() })).filter((x) => x.answer);
     setFixtures((all) => all.map((x) => {
       if (x.id !== f.id) return x;
       const nextQuotes = { ...(x.pressQuotes || {}) };
-      if (trimmed) nextQuotes[teamId] = { text: trimmed, time: Date.now() };
-      else delete nextQuotes[teamId]; // saving empty clears it
+      if (qa.length > 0) nextQuotes[teamId] = { answers: qa, time: Date.now() };
+      else delete nextQuotes[teamId];
       return { ...x, pressQuotes: nextQuotes };
     }));
     const teamName = teams.find((t) => t.id === teamId)?.name || teamId;
-    logActivity(trimmed ? `${teamName} press conference (MD${f.matchday}): "${trimmed.slice(0, 100)}${trimmed.length > 100 ? "…" : ""}"` : `${teamName} removed their press conference quote (MD${f.matchday}).`, "press");
+    logActivity(qa.length > 0 ? `${teamName} faced the press after MD${f.matchday}.` : `${teamName} cleared their press conference answers (MD${f.matchday}).`, "press");
+  };
+
+  // Explicit, manager-controlled promotion to the news ticker (rather than trying to auto-judge
+  // what's "interesting") - only your own answers can be featured, and each one can only go out once.
+  const featurePressAnswer = (f, teamId, answerIndex) => {
+    if (teamId !== myTeamId) return;
+    const entry = f.pressQuotes && f.pressQuotes[teamId];
+    if (!entry || !entry.answers[answerIndex] || entry.answers[answerIndex].featured) return;
+    const { question, answer } = entry.answers[answerIndex];
+    const teamName = teams.find((t) => t.id === teamId)?.name || teamId;
+    logActivity(`📰 ${teamName}: "${answer.slice(0, 140)}${answer.length > 140 ? "…" : ""}" (asked: "${question}")`, "press");
+    setFixtures((all) => all.map((x) => {
+      if (x.id !== f.id) return x;
+      const nextQuotes = { ...(x.pressQuotes || {}) };
+      const teamEntry = nextQuotes[teamId];
+      if (!teamEntry) return x;
+      nextQuotes[teamId] = { ...teamEntry, answers: teamEntry.answers.map((a, i) => (i === answerIndex ? { ...a, featured: true } : a)) };
+      return { ...x, pressQuotes: nextQuotes };
+    }));
   };
 
   const add = () => {
@@ -8212,7 +8337,13 @@ function FixturesTab({ teams, fixtures, setFixtures, logActivity, myTeamId, squa
                         <button onClick={() => {
                           if (pressOpen) { setPressOpenFor(null); return; }
                           setPressOpenFor(f.id);
-                          setPressDrafts({ team1: (f.pressQuotes && f.pressQuotes[f.team1]?.text) || "", team2: (f.pressQuotes && f.pressQuotes[f.team2]?.text) || "" });
+                          const seedFor = (teamId) => {
+                            const saved = f.pressQuotes && f.pressQuotes[teamId];
+                            if (saved && saved.answers) return saved.answers.map((a) => a.answer);
+                            if (saved && saved.text) return [saved.text, "", ""]; // legacy single-quote data from before this feature
+                            return ["", "", ""];
+                          };
+                          setPressDrafts({ team1: seedFor(f.team1), team2: seedFor(f.team2) });
                         }} title="Press conference"
                           style={{ background: pressOpen ? `${C.gold}22` : "transparent", border: `1px solid ${pressOpen ? C.gold : C.border}`, borderRadius: 6, padding: "4px 8px", cursor: "pointer", color: pressOpen ? C.gold : C.muted, display: "inline-flex", alignItems: "center", gap: 4 }}>
                           <MessageCircle size={12} /> Press
@@ -8255,7 +8386,9 @@ function FixturesTab({ teams, fixtures, setFixtures, logActivity, myTeamId, squa
                         <PressConferencePanel
                           f={f} t1Name={t1} t2Name={t2} myTeamId={myTeamId}
                           drafts={pressDrafts} setDrafts={setPressDrafts}
-                          onSave={(teamId) => savePressQuote(f, teamId, teamId === f.team1 ? pressDrafts.team1 : pressDrafts.team2)}
+                          onSave={(teamId, questions) => savePressAnswers(f, teamId, questions, teamId === f.team1 ? pressDrafts.team1 : pressDrafts.team2)}
+                          onFeature={(teamId, idx) => featurePressAnswer(f, teamId, idx)}
+                          rivalries={rivalries} standings={standings} teamById={teamById} transfers={transfers}
                         />
                       </td>
                     </tr>
