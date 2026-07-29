@@ -230,6 +230,7 @@ const TAB_KEY = "eafc26-active-tab"; // personal, per-device — remembers which
 const CHAT_SEEN_KEY = "eafc26-chat-last-seen"; // personal — for the unread-mentions badge
 const DM_SEEN_KEY = "eafc26-dm-last-seen"; // personal — per-conversation read timestamps
 const NIGHTLY_BACKUP_PREFIX = "eafc26-nightly-backup-"; // written by the scheduled Edge Function
+const LAST_AUTO_BACKUP_KEY = "eafc26-last-auto-backup-v1"; // tracks when a full backup was last auto-downloaded, shared across every device so it isn't re-triggered redundantly just because a different admin's browser hasn't seen one yet
 
 /* ------------------------------- small UI -------------------------------- */
 function Panel({ children, style, accent, ...rest }) {
@@ -748,6 +749,7 @@ export default function EafcLeagueApp() {
   // stays that way across all of them until explicitly hidden again, rather than re-prompting for
   // the PIN every single time.
   const [adminViewUnlocked, setAdminViewUnlocked] = useState(false);
+
   const [loaded, setLoaded] = useState(false);
   // True only when a genuine fetch failure hit one of the truly critical pieces of data (main
   // league data, squads, or teams) during initial load - as opposed to those simply not existing
@@ -755,6 +757,17 @@ export default function EafcLeagueApp() {
   // screen instead of proceeding - loading anyway would let this session's incomplete, empty
   // fallback state get written straight over everyone else's real data the moment autosave fires.
   const [loadError, setLoadError] = useState(false);
+
+  // Fires the moment the admin actually opens the Admin tab (not just on every render) - checks
+  // whether a real backup download is overdue and triggers one automatically if so.
+  useEffect(() => {
+    if (!loaded) return;
+    if (tab === "admin" && adminViewUnlocked) {
+      maybeAutoBackup();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab, adminViewUnlocked, loaded]);
+
   const [saveState, setSaveState] = useState("idle"); // idle | saving | saved
   const [syncState, setSyncState] = useState("idle"); // idle | checking | updated
   const [lastSyncedAt, setLastSyncedAt] = useState(null);
@@ -3881,6 +3894,35 @@ export default function EafcLeagueApp() {
     URL.revokeObjectURL(url);
   };
 
+  const AUTO_BACKUP_INTERVAL_HOURS = 20; // a little under a day, so it doesn't slip if the admin opens the app around a similar time each day
+
+  // Triggers a genuine backup download automatically, the moment the admin opens the Admin tab,
+  // if it's been too long since the last one - no clicking required. The "last backup" timestamp
+  // is shared server-side, not per-browser, so it isn't retriggered redundantly for every admin
+  // device separately. If the check itself can't be completed, this errs toward backing up anyway
+  // rather than silently skipping it - an extra download is a minor annoyance, a missed one is not.
+  const maybeAutoBackup = async () => {
+    let shouldBackup = true;
+    try {
+      const res = await storage.get(LAST_AUTO_BACKUP_KEY, true);
+      if (res && res.value) {
+        const lastBackupAt = JSON.parse(res.value).at || 0;
+        const hoursSince = (Date.now() - lastBackupAt) / (1000 * 60 * 60);
+        if (hoursSince < AUTO_BACKUP_INTERVAL_HOURS) shouldBackup = false;
+      }
+    } catch (e) {
+      // couldn't check - proceed with the backup anyway, see reasoning above
+    }
+    if (!shouldBackup) return;
+    exportBackup();
+    try {
+      await storage.set(LAST_AUTO_BACKUP_KEY, JSON.stringify({ at: Date.now() }), true);
+    } catch (e) {
+      // best effort — worst case this triggers again next time, which is harmless
+    }
+  };
+
+
   // Exports the whole imported player database (autocomplete list) as a CSV — same column format
   // the paste/upload importer expects, so it can be re-imported elsewhere or just kept as a record.
   const exportPlayerDatabaseCSV = () => {
@@ -5012,6 +5054,7 @@ export default function EafcLeagueApp() {
   const TABS = [
     { id: "dashboard", label: "Dashboard", icon: Home },
     { id: "squads", label: "Squad List", icon: Users },
+    { id: "contracts", label: "Contracts", icon: CalendarClock },
     { id: "budgets", label: "Budgets & Wages", icon: Wallet },
     { id: "transfers", label: "Transfers", icon: Repeat },
     { id: "draft", label: "Draft", icon: Users },
@@ -5154,7 +5197,11 @@ export default function EafcLeagueApp() {
             setTab={setTab} movePlayerToGroup={movePlayerToGroup}
             movePlayerToIndex={movePlayerToIndex} assignPlayerToSlot={assignPlayerToSlot} myTeamId={myTeamId}
             signCaptain={signCaptain} playerDatabase={playerDatabase} openPlayerStats={openPlayerStats}
-            injuries={injuries} fixtures={fixtures} renewPlayerContract={renewPlayerContract} getRenewalQuote={getRenewalQuote} />
+            injuries={injuries} fixtures={fixtures} />
+        )}
+        {tab === "contracts" && (
+          <ContractsTab teams={teams} squads={squads} myTeamId={myTeamId}
+            renewPlayerContract={renewPlayerContract} getRenewalQuote={getRenewalQuote} poachExpiringPlayer={poachExpiringPlayer} />
         )}
         {tab === "budgets" && (
           <BudgetsTab teams={teams} budgetStats={budgetStats} renameTeam={renameTeam} />
@@ -5234,7 +5281,7 @@ export default function EafcLeagueApp() {
         )}
 
         {tab === "scouting" && (
-          <ScoutingTab playerDatabase={playerDatabase} openPlayerStats={openPlayerStats} myTeamId={myTeamId} teams={teams} squads={squads} budgetStats={budgetStats} scoutingBookmarks={scoutingBookmarks} toggleScoutingBookmark={toggleScoutingBookmark} poachExpiringPlayer={poachExpiringPlayer} />
+          <ScoutingTab playerDatabase={playerDatabase} openPlayerStats={openPlayerStats} myTeamId={myTeamId} teams={teams} squads={squads} budgetStats={budgetStats} scoutingBookmarks={scoutingBookmarks} toggleScoutingBookmark={toggleScoutingBookmark} />
         )}
       </div>
 
@@ -5858,7 +5905,7 @@ function FormationPitch({ formation, starters, openPlayerStats }) {
   );
 }
 
-function SquadsTab({ teams, squads, squadStats, renameTeam, setTab, movePlayerToGroup, movePlayerToIndex, assignPlayerToSlot, myTeamId, signCaptain, playerDatabase, openPlayerStats, injuries, fixtures, renewPlayerContract, getRenewalQuote }) {
+function SquadsTab({ teams, squads, squadStats, renameTeam, setTab, movePlayerToGroup, movePlayerToIndex, assignPlayerToSlot, myTeamId, signCaptain, playerDatabase, openPlayerStats, injuries, fixtures }) {
   const [activeTeam, setActiveTeam] = useState(myTeamId || teams[0].id);
   const [moveError, setMoveError] = useState("");
   const [captainForm, setCaptainForm] = useState({ name: "", position: "CM", rating: 75, club: "", age: 25 });
@@ -6040,9 +6087,6 @@ function SquadsTab({ teams, squads, squadStats, renameTeam, setTab, movePlayerTo
             <div style={{ color: C.muted, fontSize: 12.5 }}>No Captain signed yet.</div>
           )}
         </div>
-
-        <ContractStatusPanel team={team} squad={sq} teamId={activeTeam}
-          renewPlayerContract={renewPlayerContract} getRenewalQuote={getRenewalQuote} />
 
         <div className="grid gap-4 stack-on-mobile" style={{ gridTemplateColumns: "1.7fr 1fr", alignItems: "start" }}>
           <FormationSlotSelector team={team} squad={sq} teamId={activeTeam}
@@ -6252,6 +6296,86 @@ function ContractStatusPanel({ team, squad, teamId, renewPlayerContract, getRene
         })}
       </div>
       {msg && <div style={{ color: msg.tone === "green" ? C.green : C.red, fontSize: 12, marginTop: 10 }}>{msg.text}</div>}
+    </div>
+  );
+}
+
+function ContractsTab({ teams, squads, myTeamId, renewPlayerContract, getRenewalQuote, poachExpiringPlayer }) {
+  const [viewTeamId, setViewTeamId] = useState(myTeamId || teams[0]?.id || "");
+  const viewTeam = teams.find((t) => t.id === viewTeamId);
+  const viewSquad = squads[viewTeamId];
+
+  const hasAnyExpiring = viewSquad && [...(viewSquad.starters || []), ...(viewSquad.reserves || [])]
+    .some((p) => p && (p.contractYearsRemaining ?? 1) <= 1);
+
+  // Every player, on any OTHER team's squad, whose contract has run down to its final year and
+  // hasn't been renewed - these are the only players eligible to be poached on a pre-contract deal.
+  const expiringElsewhere = useMemo(() => {
+    if (!myTeamId) return [];
+    const entries = [];
+    teams.forEach((t) => {
+      if (t.id === myTeamId) return;
+      const sq = squads[t.id];
+      if (!sq) return;
+      [...(sq.starters || []).map((p, i) => ({ p, group: "starters", i })), ...(sq.reserves || []).map((p, i) => ({ p, group: "reserves", i }))].forEach(({ p, group, i }) => {
+        if (p && (p.contractYearsRemaining ?? 1) <= 1) entries.push({ player: p, teamId: t.id, teamName: t.name, group, index: i });
+      });
+    });
+    return entries;
+  }, [teams, squads, myTeamId]);
+
+  const [poachMsg, setPoachMsg] = useState(null);
+  const doPoach = (entry) => {
+    if (!window.confirm(`Sign ${entry.player.name} from ${entry.teamName} on a pre-contract deal now? Their contract was about to run out unrenewed.`)) return;
+    const err = poachExpiringPlayer(myTeamId, entry.teamId, entry.group, entry.index);
+    setPoachMsg(err ? { text: err, tone: "red" } : { text: `${entry.player.name} signed on a pre-contract deal.`, tone: "green" });
+  };
+
+  return (
+    <div className="stack gap-4">
+      <Panel>
+        <SectionTitle>Contracts</SectionTitle>
+        <div style={{ marginBottom: 16 }}>
+          <Field label="View team's contracts">
+            <Select value={viewTeamId} onChange={(e) => setViewTeamId(e.target.value)} style={{ maxWidth: 280 }}>
+              {teams.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+            </Select>
+          </Field>
+        </div>
+        {viewSquad && hasAnyExpiring ? (
+          <ContractStatusPanel team={viewTeam} squad={viewSquad} teamId={viewTeamId}
+            renewPlayerContract={renewPlayerContract} getRenewalQuote={getRenewalQuote} />
+        ) : (
+          <div style={{ color: C.muted, fontSize: 12.5 }}>
+            No contracts due for renewal on {viewTeam?.name || "this team"} right now — everyone's contract still has time left.
+          </div>
+        )}
+      </Panel>
+
+      {myTeamId && (
+        <Panel>
+          <SectionTitle>Expiring Contracts Elsewhere</SectionTitle>
+          <div style={{ color: C.muted, fontSize: 11.5, marginBottom: 10 }}>
+            These players are in the final year of their contract on another team's squad. Sign them now on a
+            reduced pre-contract deal, before their own team renews them or they run out for good.
+          </div>
+          {expiringElsewhere.length === 0 ? (
+            <div style={{ color: C.muted, fontSize: 12.5 }}>Nobody league-wide is currently in the final year of their contract.</div>
+          ) : (
+            <div style={{ display: "grid", gap: 6 }}>
+              {expiringElsewhere.map((entry) => (
+                <div key={`${entry.teamId}-${entry.player.name}`} className="flex items-center justify-between flex-wrap gap-2" style={{ background: C.panelAlt, borderRadius: 8, padding: "8px 10px", fontSize: 12 }}>
+                  <span style={{ color: C.text }}>
+                    {entry.player.name} <span style={{ color: C.muted }}>— {entry.player.position}, {entry.player.rating} OVR, currently at {entry.teamName}</span>
+                  </span>
+                  <Btn size="sm" variant="outline" onClick={() => doPoach(entry)}>Sign Pre-Contract</Btn>
+                </div>
+              ))}
+            </div>
+          )}
+          {poachMsg && <div style={{ color: poachMsg.tone === "green" ? C.green : C.red, fontSize: 12, marginTop: 8 }}>{poachMsg.text}</div>}
+        </Panel>
+      )}
     </div>
   );
 }
@@ -8775,7 +8899,7 @@ function StatComparisonChart({ refPlayer, candidate, onClose }) {
   );
 }
 
-function ScoutingTab({ playerDatabase, openPlayerStats, myTeamId, teams, squads, budgetStats, scoutingBookmarks, toggleScoutingBookmark, poachExpiringPlayer }) {
+function ScoutingTab({ playerDatabase, openPlayerStats, myTeamId, teams, squads, budgetStats, scoutingBookmarks, toggleScoutingBookmark }) {
   const [refQuery, setRefQuery] = useState("");
   const [refPlayer, setRefPlayer] = useState(null);
   const [expanded, setExpanded] = useState({}); // playerKey -> bool, full breakdown toggle
@@ -8785,29 +8909,6 @@ function ScoutingTab({ playerDatabase, openPlayerStats, myTeamId, teams, squads,
 
   const myTeam = myTeamId ? teams.find((t) => t.id === myTeamId) : null;
   const myBudget = myTeamId && budgetStats[myTeamId] ? budgetStats[myTeamId] : null;
-
-  // Every player, on any OTHER team's squad, whose contract has run down to its final year and
-  // hasn't been renewed - these are the only players eligible to be poached on a pre-contract deal.
-  const expiringElsewhere = useMemo(() => {
-    if (!myTeamId) return [];
-    const entries = [];
-    teams.forEach((t) => {
-      if (t.id === myTeamId) return;
-      const sq = squads[t.id];
-      if (!sq) return;
-      [...(sq.starters || []).map((p, i) => ({ p, group: "starters", i })), ...(sq.reserves || []).map((p, i) => ({ p, group: "reserves", i }))].forEach(({ p, group, i }) => {
-        if (p && (p.contractYearsRemaining ?? 1) <= 1) entries.push({ player: p, teamId: t.id, teamName: t.name, group, index: i });
-      });
-    });
-    return entries;
-  }, [teams, squads, myTeamId]);
-
-  const [poachMsg, setPoachMsg] = useState(null);
-  const doPoach = (entry) => {
-    if (!window.confirm(`Sign ${entry.player.name} from ${entry.teamName} on a pre-contract deal now? Their contract was about to run out unrenewed.`)) return;
-    const err = poachExpiringPlayer(myTeamId, entry.teamId, entry.group, entry.index);
-    setPoachMsg(err ? { text: err, tone: "red" } : { text: `${entry.player.name} signed on a pre-contract deal.`, tone: "green" });
-  };
 
   const results = useMemo(() => {
     if (!refPlayer) return null;
@@ -8979,29 +9080,6 @@ function ScoutingTab({ playerDatabase, openPlayerStats, myTeamId, teams, squads,
           ) : (
             <div>{results.established.map(renderMatchRow)}</div>
           )}
-        </div>
-      )}
-
-      {myTeamId && expiringElsewhere.length > 0 && (
-        <div style={{ marginTop: 24, paddingTop: 16, borderTop: `1px solid ${C.border}` }}>
-          <div style={{ color: C.gold, fontWeight: 700, fontSize: 13, marginBottom: 4 }}>
-            ⏳ Expiring Contracts Elsewhere ({expiringElsewhere.length})
-          </div>
-          <div style={{ color: C.muted, fontSize: 11, marginBottom: 8 }}>
-            These players are in the final year of their contract on another team's squad. Sign them now on a
-            reduced pre-contract deal, before their own team renews them or they run out for good.
-          </div>
-          <div style={{ display: "grid", gap: 6 }}>
-            {expiringElsewhere.map((entry) => (
-              <div key={`${entry.teamId}-${entry.player.name}`} className="flex items-center justify-between flex-wrap gap-2" style={{ background: C.panelAlt, borderRadius: 8, padding: "8px 10px", fontSize: 12 }}>
-                <span style={{ color: C.text }}>
-                  {entry.player.name} <span style={{ color: C.muted }}>— {entry.player.position}, {entry.player.rating} OVR, currently at {entry.teamName}</span>
-                </span>
-                <Btn size="sm" variant="outline" onClick={() => doPoach(entry)}>Sign Pre-Contract</Btn>
-              </div>
-            ))}
-          </div>
-          {poachMsg && <div style={{ color: poachMsg.tone === "green" ? C.green : C.red, fontSize: 12, marginTop: 8 }}>{poachMsg.text}</div>}
         </div>
       )}
 
