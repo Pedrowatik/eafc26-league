@@ -2629,6 +2629,7 @@ export default function EafcLeagueApp() {
             const playerObj = {
               name: tx.player, position: tx.position, rating: tx.rating,
               club: tx.club, age: tx.age, value: tx.price, wage: tx.wage,
+              contractYearsRemaining: 1, seasonsAtClub: 0,
             };
             squad = { ...squad, [targetGroup]: [...squad[targetGroup]] };
             squad[targetGroup][idx] = playerObj;
@@ -2928,6 +2929,100 @@ export default function EafcLeagueApp() {
     });
   };
 
+  const RENEWAL_BASE_MULTIPLIER = 10; // per the league's own rule: 10x annual wage per year renewed
+  const RENEWAL_LOYALTY_DISCOUNT_PER_SEASON = 0.05; // 5% off per season already at the club
+  const RENEWAL_LOYALTY_DISCOUNT_MAX = 0.30; // capped so renewals never become nearly free
+  const RENEWAL_MULTI_YEAR_MULTIPLIER = { 1: 1, 2: 1.8, 3: 2.5 }; // total-cost multiplier vs paying for 1 year at a time
+
+  // How many goals this player has scored FOR THIS TEAM across fixtures already played this
+  // season - used purely to size the performance premium on their renewal cost, nothing else.
+  const goalsThisSeasonFor = (teamId, playerName) => {
+    let goals = 0;
+    fixtures.forEach((f) => {
+      if (!f.stats) return;
+      if (f.team1 === teamId) goals += (f.stats.team1 || []).filter((p) => p.name === playerName).reduce((s, p) => s + (p.goals || 0), 0);
+      if (f.team2 === teamId) goals += (f.stats.team2 || []).filter((p) => p.name === playerName).reduce((s, p) => s + (p.goals || 0), 0);
+    });
+    return goals;
+  };
+
+  // The full breakdown behind a renewal's price - exposed separately so the UI can show the
+  // player exactly why it costs what it does before they commit to paying it.
+  const getRenewalQuote = (teamId, player, years) => {
+    const baseAnnual = RENEWAL_BASE_MULTIPLIER * ((Number(player.wage) || 0) / 1000);
+    const seasonsAtClub = player.seasonsAtClub ?? 0;
+    const loyaltyDiscount = Math.min(RENEWAL_LOYALTY_DISCOUNT_MAX, seasonsAtClub * RENEWAL_LOYALTY_DISCOUNT_PER_SEASON);
+    const goals = goalsThisSeasonFor(teamId, player.name);
+    const performancePremium = goals >= 20 ? 1.0 : goals >= 10 ? 0.5 : 0;
+    const perYearCost = baseAnnual * (1 - loyaltyDiscount) * (1 + performancePremium);
+    const multiYearMultiplier = RENEWAL_MULTI_YEAR_MULTIPLIER[years] || years; // no discount beyond 3 years
+    const totalCost = +(perYearCost * multiYearMultiplier).toFixed(3);
+    return { baseAnnual, loyaltyDiscount, goals, performancePremium, perYearCost, totalCost, years };
+  };
+
+  const renewPlayerContract = (teamId, group, slotIndex, years) => {
+    const team = teams.find((t) => t.id === teamId);
+    if (!team) return "Team not found.";
+    const player = squads[teamId]?.[group]?.[slotIndex];
+    if (!player) return "No player in that slot.";
+    if ((player.contractYearsRemaining ?? 1) > 1) {
+      return `${player.name} isn't up for renewal yet — they've still got ${player.contractYearsRemaining} year${player.contractYearsRemaining === 1 ? "" : "s"} left on their current deal.`;
+    }
+    const quote = getRenewalQuote(teamId, player, years);
+    if (quote.totalCost > (team.budget || 0)) {
+      return `Renewing ${player.name} for ${years} year${years === 1 ? "" : "s"} costs ${money(quote.totalCost)}, more than ${team.name}'s available budget (${money(team.budget || 0)}).`;
+    }
+    setSquads((all) => {
+      const list = [...all[teamId][group]];
+      list[slotIndex] = { ...player, contractYearsRemaining: (player.contractYearsRemaining ?? 1) + years };
+      return { ...all, [teamId]: { ...all[teamId], [group]: list } };
+    });
+    setTeams((ts) => ts.map((t) => (t.id === teamId ? { ...t, budget: +((t.budget || 0) - quote.totalCost).toFixed(3) } : t)));
+    logActivity(`${team.name} renewed ${player.name} for ${years} more year${years === 1 ? "" : "s"} (${money(quote.totalCost)}).`, "transfer");
+    return null;
+  };
+
+  // For a player whose contract is down to its final year and hasn't been renewed by their
+  // current team - lets ANOTHER team sign them now, on a reduced pre-contract fee, rather than
+  // waiting for them to expire into nothing at season end. Meant to reward paying attention to
+  // who's out of contract, and to give expiring players somewhere to go if their own team lets
+  // them lapse. The current team loses them immediately (their slot frees up right away, not at
+  // season end) - this is the risk of not renewing in time.
+  const poachExpiringPlayer = (poachingTeamId, currentTeamId, group, slotIndex) => {
+    const poachingTeam = teams.find((t) => t.id === poachingTeamId);
+    const currentTeam = teams.find((t) => t.id === currentTeamId);
+    if (!poachingTeam || !currentTeam) return "Team not found.";
+    if (poachingTeamId === currentTeamId) return "Can't poach your own player.";
+    const player = squads[currentTeamId]?.[group]?.[slotIndex];
+    if (!player) return "No player in that slot.";
+    if ((player.contractYearsRemaining ?? 1) > 1) {
+      return `${player.name} isn't out of contract soon — they've still got ${player.contractYearsRemaining} year${player.contractYearsRemaining === 1 ? "" : "s"} left.`;
+    }
+    const slot = firstFreeSlot(squads[poachingTeamId]);
+    if (!slot) return `${poachingTeam.name}'s squad is full — no free slot to place them in.`;
+    // Reduced pre-contract fee, reflecting that this player was going to leave for free anyway -
+    // half their normal value, no tax, since this isn't a transfer between two willing sellers.
+    const fee = +(roundUpTo250k(Number(player.value) || 0) * 0.5).toFixed(3);
+    if (fee > (poachingTeam.budget || 0)) {
+      return `Pre-contract fee (${money(fee)}) is more than ${poachingTeam.name}'s available budget (${money(poachingTeam.budget || 0)}).`;
+    }
+    setSquads((all) => {
+      const currentList = [...all[currentTeamId][group]];
+      currentList[slotIndex] = null;
+      const poachingList = [...all[poachingTeamId][slot.group]];
+      poachingList[slot.idx] = { ...player, value: fee, contractYearsRemaining: 1, seasonsAtClub: 0 };
+      return {
+        ...all,
+        [currentTeamId]: { ...all[currentTeamId], [group]: currentList },
+        [poachingTeamId]: { ...all[poachingTeamId], [slot.group]: poachingList },
+      };
+    });
+    setTeams((ts) => ts.map((t) => (t.id === poachingTeamId ? { ...t, budget: +((t.budget || 0) - fee).toFixed(3) } : t)));
+    logActivity(`${poachingTeam.name} poached ${player.name} from ${currentTeam.name} on a pre-contract deal (${money(fee)}) — their contract was about to run out unrenewed.`, "transfer");
+    return null;
+  };
+
+
   // Randomly sidelines 0-3 players per team for this fixture (mostly 1-3 matchdays, rarely 4).
   // One-time per fixture — either team can trigger it, and it has to happen before a result can
   // be entered, so injured players are correctly excluded from the match stats player list.
@@ -3054,7 +3149,7 @@ export default function EafcLeagueApp() {
           const group = si !== -1 ? "starters" : (team.reserves.findIndex((p) => !p) !== -1 ? "reserves" : null);
           if (group) {
             const idx = group === "starters" ? si : team.reserves.findIndex((p) => !p);
-            const playerObj = { name: form.name, position: form.position, rating: Number(form.rating) || 0, club: form.club, age: Number(form.age) || 0, value: price, wage: Number(form.wage) || 0 };
+            const playerObj = { name: form.name, position: form.position, rating: Number(form.rating) || 0, club: form.club, age: Number(form.age) || 0, value: price, wage: Number(form.wage) || 0, contractYearsRemaining: 1, seasonsAtClub: 0 };
             next = { ...next, [form.to]: { ...next[form.to], [group]: [...next[form.to][group]] } };
             next[form.to][group][idx] = playerObj;
           }
@@ -3462,6 +3557,33 @@ export default function EafcLeagueApp() {
       };
     }));
     setSponsorships({}); // fresh deals get assigned at the halfway point of the new season
+
+    // Contracts run down by exactly one year at the turn of every season. Anyone who hits zero
+    // without being renewed during the season just played has genuinely run out of contract and
+    // leaves - their slot (and the wage/value they were taking up) frees up automatically, since
+    // this flows straight into the same squadStats/budget calculation everything else already uses.
+    // Everyone who's still got time left banks another season of loyalty toward a future discount.
+    let expiredPlayers = [];
+    setSquads((all) => {
+      const next = {};
+      Object.keys(all).forEach((teamId) => {
+        const team = all[teamId];
+        const processGroup = (group) => group.map((p) => {
+          if (!p) return p;
+          const yearsRemaining = (p.contractYearsRemaining ?? 1) - 1;
+          if (yearsRemaining <= 0) {
+            expiredPlayers.push({ teamId, name: p.name });
+            return null;
+          }
+          return { ...p, contractYearsRemaining: yearsRemaining, seasonsAtClub: (p.seasonsAtClub ?? 0) + 1 };
+        });
+        next[teamId] = { starters: processGroup(team.starters), reserves: processGroup(team.reserves) };
+      });
+      return next;
+    });
+    if (expiredPlayers.length > 0) {
+      logActivity(`${expiredPlayers.length} player contract${expiredPlayers.length === 1 ? "" : "s"} expired at season end and left as a free agent: ${expiredPlayers.map((p) => `${p.name} (${teamById[p.teamId]?.name || p.teamId})`).join(", ")}.`, "transfer");
+    }
 
     setFixtures([]);
     setTransfers([]);
@@ -3991,6 +4113,7 @@ export default function EafcLeagueApp() {
     const playerObj = {
       name: player.name, position: player.position, rating: Number(player.rating) || 0,
       club: player.club, age: Number(player.age) || 0, value, wage,
+      contractYearsRemaining: 1, seasonsAtClub: 0,
     };
     setSquads((all) => {
       const next = { ...all[teamId], [slot.group]: [...all[teamId][slot.group]] };
@@ -4290,6 +4413,7 @@ export default function EafcLeagueApp() {
         const playerObj = {
           name: player.name, position: player.position, rating: Number(player.rating) || 0,
           club: player.club, age: Number(player.age) || 0, value: roundUpTo250k(Number(player.value) || 0), wage: Number(player.wage) || 0,
+          contractYearsRemaining: 1, seasonsAtClub: 0,
         };
         next = { ...next, [teamId]: { ...next[teamId], [slot.group]: [...next[teamId][slot.group]] } };
         next[teamId][slot.group][slot.idx] = playerObj;
@@ -4331,6 +4455,30 @@ export default function EafcLeagueApp() {
     setDraftState((d) => ({ ...d, status: "closed" }));
     logActivity(`Draft resolved — ${instantAssignments.length} uncontested signing${instantAssignments.length === 1 ? "" : "s"}, ${newBlindBids.length} player${newBlindBids.length === 1 ? "" : "s"} going to a blind bid.`, "transfer");
     resolvingDraftRef.current = false;
+    return null;
+  };
+
+  // Pure flavor, no gameplay effect at all - picks a random player who isn't currently signed to
+  // any fantasy squad and posts a fun, randomly-templated "rumor" about them to League Chat.
+  const RUMOR_TEMPLATES = [
+    (name) => `🗞️ TRANSFER RUMOR: Sources close to ${name} suggest he's "assessing his options" this window. Make of that what you will.`,
+    (name) => `👀 Whispers in the boot room: ${name} has reportedly been "keeping his options open." Nothing concrete, but the tea leaves are talking.`,
+    (name) => `📰 Gossip column: an "insider" claims ${name} would be "open to discussions" with the right project. Standard agent-speak, or something more?`,
+    (name) => `🔍 Transfer sleuths have spotted ${name} liking a suspicious number of posts online. Draw your own conclusions.`,
+    (name) => `☕️ Word around the league: ${name}'s camp has been "fielding calls." Whether that means anything is anyone's guess.`,
+    (name) => `📸 Paparazzi shot of the week: ${name} spotted having a "casual coffee" with persons unknown. The rumor mill churns on.`,
+    (name) => `🎙️ Podcast circuit buzzing about ${name} — described by one pundit as "a name to watch this window." No further details, naturally.`,
+  ];
+  const generateTransferRumor = () => {
+    const signedNames = new Set();
+    teams.forEach((t) => {
+      [...(squads[t.id]?.starters || []), ...(squads[t.id]?.reserves || [])].forEach((p) => { if (p) signedNames.add(p.name); });
+    });
+    const available = playerDatabase.filter((p) => !signedNames.has(p.name) && Number(p.rating) >= 75);
+    if (available.length === 0) return "No suitable players available for a rumor right now.";
+    const player = available[Math.floor(Math.random() * available.length)];
+    const template = RUMOR_TEMPLATES[Math.floor(Math.random() * RUMOR_TEMPLATES.length)];
+    setChat((c) => [...c, { id: uid(), author: "Transfer Rumors", text: template(player.name), time: Date.now(), taggedTeam: null }]);
     return null;
   };
 
@@ -4387,6 +4535,7 @@ export default function EafcLeagueApp() {
         const playerObj = {
           name: p.name, position: p.position, rating: Number(p.rating) || 0,
           club: p.club, age: Number(p.age) || 0, value: roundUpTo250k(Number(p.value) || 0), wage: Number(p.wage) || 0,
+          contractYearsRemaining: 1, seasonsAtClub: 0,
         };
         teamSquad = { ...teamSquad, [slot.group]: [...teamSquad[slot.group]] };
         teamSquad[slot.group][slot.idx] = playerObj;
@@ -4534,6 +4683,7 @@ export default function EafcLeagueApp() {
     const playerObj = {
       name: bb.player.name, position: bb.player.position, rating: bb.player.rating,
       club: bb.player.club, age: bb.player.age, value: roundUpTo250k(winningBid), wage: bb.player.wage,
+      contractYearsRemaining: 1, seasonsAtClub: 0,
     };
     const updatedSquad = { ...winnerSquad, [slot.group]: [...winnerSquad[slot.group]] };
     updatedSquad[slot.group][slot.idx] = playerObj;
@@ -4887,7 +5037,7 @@ export default function EafcLeagueApp() {
             setTab={setTab} movePlayerToGroup={movePlayerToGroup}
             movePlayerToIndex={movePlayerToIndex} assignPlayerToSlot={assignPlayerToSlot} myTeamId={myTeamId}
             signCaptain={signCaptain} playerDatabase={playerDatabase} openPlayerStats={openPlayerStats}
-            injuries={injuries} fixtures={fixtures} />
+            injuries={injuries} fixtures={fixtures} renewPlayerContract={renewPlayerContract} getRenewalQuote={getRenewalQuote} />
         )}
         {tab === "budgets" && (
           <BudgetsTab teams={teams} budgetStats={budgetStats} renameTeam={renameTeam} />
@@ -4933,7 +5083,7 @@ export default function EafcLeagueApp() {
             teams={teams} />
         )}
         {tab === "chat" && (
-          <ChatTab chat={chat} setChat={setChat} teams={teams} myTeamId={myTeamId} markChatSeen={markChatSeen} />
+          <ChatTab chat={chat} setChat={setChat} teams={teams} myTeamId={myTeamId} markChatSeen={markChatSeen} generateTransferRumor={generateTransferRumor} />
         )}
         {tab === "messages" && (
           <MessagesTab teams={teams} myTeamId={myTeamId} privateMessages={privateMessages}
@@ -4967,7 +5117,7 @@ export default function EafcLeagueApp() {
         )}
 
         {tab === "scouting" && (
-          <ScoutingTab playerDatabase={playerDatabase} openPlayerStats={openPlayerStats} myTeamId={myTeamId} teams={teams} budgetStats={budgetStats} scoutingBookmarks={scoutingBookmarks} toggleScoutingBookmark={toggleScoutingBookmark} />
+          <ScoutingTab playerDatabase={playerDatabase} openPlayerStats={openPlayerStats} myTeamId={myTeamId} teams={teams} squads={squads} budgetStats={budgetStats} scoutingBookmarks={scoutingBookmarks} toggleScoutingBookmark={toggleScoutingBookmark} poachExpiringPlayer={poachExpiringPlayer} />
         )}
       </div>
 
@@ -5591,7 +5741,7 @@ function FormationPitch({ formation, starters, openPlayerStats }) {
   );
 }
 
-function SquadsTab({ teams, squads, squadStats, renameTeam, setTab, movePlayerToGroup, movePlayerToIndex, assignPlayerToSlot, myTeamId, signCaptain, playerDatabase, openPlayerStats, injuries, fixtures }) {
+function SquadsTab({ teams, squads, squadStats, renameTeam, setTab, movePlayerToGroup, movePlayerToIndex, assignPlayerToSlot, myTeamId, signCaptain, playerDatabase, openPlayerStats, injuries, fixtures, renewPlayerContract, getRenewalQuote }) {
   const [activeTeam, setActiveTeam] = useState(myTeamId || teams[0].id);
   const [moveError, setMoveError] = useState("");
   const [captainForm, setCaptainForm] = useState({ name: "", position: "CM", rating: 75, club: "", age: 25 });
@@ -5774,6 +5924,9 @@ function SquadsTab({ teams, squads, squadStats, renameTeam, setTab, movePlayerTo
           )}
         </div>
 
+        <ContractStatusPanel team={team} squad={sq} teamId={activeTeam}
+          renewPlayerContract={renewPlayerContract} getRenewalQuote={getRenewalQuote} />
+
         <div className="grid gap-4 stack-on-mobile" style={{ gridTemplateColumns: "1.7fr 1fr", alignItems: "start" }}>
           <FormationSlotSelector team={team} squad={sq} teamId={activeTeam}
             assignPlayerToSlot={assignPlayerToSlot}
@@ -5897,6 +6050,91 @@ function FormationSlotSelector({ team, squad, teamId, assignPlayerToSlot, openPl
           );
         })}
       </div>
+    </div>
+  );
+}
+
+// Shows every squad player whose contract has run down to its final year, with a renewal option
+// right there showing the exact price breakdown (base cost, loyalty discount, any performance
+// premium, and the multi-year total) before committing to anything. Doesn't touch anyone whose
+// contract still has time left - they just don't need any decision yet.
+function ContractStatusPanel({ team, squad, teamId, renewPlayerContract, getRenewalQuote }) {
+  const [renewingKey, setRenewingKey] = useState(null); // `${group}-${index}` currently expanded
+  const [selectedYears, setSelectedYears] = useState(1);
+  const [msg, setMsg] = useState(null);
+
+  const expiringEntries = useMemo(() => {
+    const entries = [];
+    (squad.starters || []).forEach((p, i) => { if (p && (p.contractYearsRemaining ?? 1) <= 1) entries.push({ player: p, group: "starters", index: i }); });
+    (squad.reserves || []).forEach((p, i) => { if (p && (p.contractYearsRemaining ?? 1) <= 1) entries.push({ player: p, group: "reserves", index: i }); });
+    return entries;
+  }, [squad]);
+
+  if (expiringEntries.length === 0) return null;
+
+  const doRenew = (group, index) => {
+    const err = renewPlayerContract(teamId, group, index, selectedYears);
+    if (err) setMsg({ text: err, tone: "red" });
+    else {
+      setMsg({ text: "Contract renewed.", tone: "green" });
+      setRenewingKey(null);
+    }
+  };
+
+  return (
+    <div style={{ background: C.panelAlt, border: `1px solid ${C.gold}55`, borderRadius: 10, padding: 14, marginBottom: 18 }}>
+      <div style={{ color: C.gold, fontWeight: 700, fontSize: 13, marginBottom: 4 }}>
+        Contracts Expiring This Season ({expiringEntries.length})
+      </div>
+      <div style={{ color: C.muted, fontSize: 11, marginBottom: 10 }}>
+        Renew now to keep them beyond this season, or risk losing them for nothing at season end — and other
+        teams can poach anyone left unrenewed once their deal is down to its final year.
+      </div>
+      <div style={{ display: "grid", gap: 8 }}>
+        {expiringEntries.map(({ player, group, index }) => {
+          const key = `${group}-${index}`;
+          const isOpen = renewingKey === key;
+          const quote = isOpen ? getRenewalQuote(teamId, player, selectedYears) : null;
+          return (
+            <div key={key} style={{ background: C.panel, borderRadius: 8, padding: 10 }}>
+              <div className="flex items-center justify-between flex-wrap gap-2">
+                <div>
+                  <span style={{ fontWeight: 600 }}>{player.name}</span>
+                  <span style={{ color: C.muted, fontSize: 11.5 }}> — {player.position}, {moneyK(player.wage)}/wk, {player.seasonsAtClub ?? 0} season{(player.seasonsAtClub ?? 0) === 1 ? "" : "s"} at the club</span>
+                </div>
+                <Btn size="sm" variant="outline" onClick={() => { setRenewingKey(isOpen ? null : key); setSelectedYears(1); setMsg(null); }}>
+                  {isOpen ? "Cancel" : "Renew"}
+                </Btn>
+              </div>
+              {isOpen && quote && (
+                <div style={{ marginTop: 10, paddingTop: 10, borderTop: `1px solid ${C.border}` }}>
+                  <div className="flex items-center gap-2 flex-wrap" style={{ marginBottom: 8 }}>
+                    {[1, 2, 3].map((y) => (
+                      <button key={y} onClick={() => setSelectedYears(y)}
+                        style={{
+                          background: selectedYears === y ? C.gold : "transparent",
+                          color: selectedYears === y ? "#1a1508" : C.text,
+                          border: `1px solid ${C.border}`, borderRadius: 6, padding: "4px 10px", fontSize: 12, cursor: "pointer", fontWeight: 600,
+                        }}>
+                        {y} year{y === 1 ? "" : "s"}
+                      </button>
+                    ))}
+                  </div>
+                  <div style={{ fontSize: 11.5, color: C.muted, lineHeight: 1.7, marginBottom: 8 }}>
+                    Base (10× wage): {money(quote.baseAnnual)}/yr
+                    {quote.loyaltyDiscount > 0 && <> · Loyalty discount: −{Math.round(quote.loyaltyDiscount * 100)}%</>}
+                    {quote.performancePremium > 0 && <> · Performance premium ({quote.goals} goals this season): +{Math.round(quote.performancePremium * 100)}%</>}
+                    <br />
+                    <span style={{ color: C.text, fontWeight: 700 }}>Total for {quote.years} year{quote.years === 1 ? "" : "s"}: {money(quote.totalCost)}</span>
+                  </div>
+                  <Btn size="sm" onClick={() => doRenew(group, index)}>Confirm Renewal</Btn>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+      {msg && <div style={{ color: msg.tone === "green" ? C.green : C.red, fontSize: 12, marginTop: 10 }}>{msg.text}</div>}
     </div>
   );
 }
@@ -8274,7 +8512,7 @@ function MessagesTab({ teams, myTeamId, privateMessages, sendPrivateMessage, dmL
   );
 }
 
-function ChatTab({ chat, setChat, teams, myTeamId, markChatSeen }) {
+function ChatTab({ chat, setChat, teams, myTeamId, markChatSeen, generateTransferRumor }) {
   const [name, setName] = useState("");
   const [text, setText] = useState("");
   const [tagTeam, setTagTeam] = useState("");
@@ -8298,6 +8536,12 @@ function ChatTab({ chat, setChat, teams, myTeamId, markChatSeen }) {
     setTagTeam("");
   };
 
+  const [rumorMsg, setRumorMsg] = useState(null);
+  const doGenerateRumor = () => {
+    const err = generateTransferRumor();
+    setRumorMsg(err ? { text: err, tone: "red" } : null); // success just shows up in the chat feed itself
+  };
+
   const timeStr = (t) => new Date(t).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
 
   return (
@@ -8308,6 +8552,12 @@ function ChatTab({ chat, setChat, teams, myTeamId, markChatSeen }) {
         leaving the page. {!mine && "Pick your team (top right) and it'll sign your messages automatically."}
         {" "}Tag a team to flash a notification for whoever's on it.
       </div>
+
+      <div className="flex items-center gap-2" style={{ marginBottom: 14 }}>
+        <Btn size="sm" variant="outline" onClick={doGenerateRumor}>🗞️ Generate Transfer Rumor</Btn>
+        <span style={{ color: C.muted, fontSize: 11 }}>Just for fun — posts a made-up gossip line, no actual transfer involved.</span>
+      </div>
+      {rumorMsg && <div style={{ color: C.red, fontSize: 12, marginBottom: 10 }}>{rumorMsg.text}</div>}
 
       <div style={{
         background: C.panelAlt, border: `1px solid ${C.border}`, borderRadius: 10, padding: 12,
@@ -8408,7 +8658,7 @@ function StatComparisonChart({ refPlayer, candidate, onClose }) {
   );
 }
 
-function ScoutingTab({ playerDatabase, openPlayerStats, myTeamId, teams, budgetStats, scoutingBookmarks, toggleScoutingBookmark }) {
+function ScoutingTab({ playerDatabase, openPlayerStats, myTeamId, teams, squads, budgetStats, scoutingBookmarks, toggleScoutingBookmark, poachExpiringPlayer }) {
   const [refQuery, setRefQuery] = useState("");
   const [refPlayer, setRefPlayer] = useState(null);
   const [expanded, setExpanded] = useState({}); // playerKey -> bool, full breakdown toggle
@@ -8418,6 +8668,29 @@ function ScoutingTab({ playerDatabase, openPlayerStats, myTeamId, teams, budgetS
 
   const myTeam = myTeamId ? teams.find((t) => t.id === myTeamId) : null;
   const myBudget = myTeamId && budgetStats[myTeamId] ? budgetStats[myTeamId] : null;
+
+  // Every player, on any OTHER team's squad, whose contract has run down to its final year and
+  // hasn't been renewed - these are the only players eligible to be poached on a pre-contract deal.
+  const expiringElsewhere = useMemo(() => {
+    if (!myTeamId) return [];
+    const entries = [];
+    teams.forEach((t) => {
+      if (t.id === myTeamId) return;
+      const sq = squads[t.id];
+      if (!sq) return;
+      [...(sq.starters || []).map((p, i) => ({ p, group: "starters", i })), ...(sq.reserves || []).map((p, i) => ({ p, group: "reserves", i }))].forEach(({ p, group, i }) => {
+        if (p && (p.contractYearsRemaining ?? 1) <= 1) entries.push({ player: p, teamId: t.id, teamName: t.name, group, index: i });
+      });
+    });
+    return entries;
+  }, [teams, squads, myTeamId]);
+
+  const [poachMsg, setPoachMsg] = useState(null);
+  const doPoach = (entry) => {
+    if (!window.confirm(`Sign ${entry.player.name} from ${entry.teamName} on a pre-contract deal now? Their contract was about to run out unrenewed.`)) return;
+    const err = poachExpiringPlayer(myTeamId, entry.teamId, entry.group, entry.index);
+    setPoachMsg(err ? { text: err, tone: "red" } : { text: `${entry.player.name} signed on a pre-contract deal.`, tone: "green" });
+  };
 
   const results = useMemo(() => {
     if (!refPlayer) return null;
@@ -8589,6 +8862,29 @@ function ScoutingTab({ playerDatabase, openPlayerStats, myTeamId, teams, budgetS
           ) : (
             <div>{results.established.map(renderMatchRow)}</div>
           )}
+        </div>
+      )}
+
+      {myTeamId && expiringElsewhere.length > 0 && (
+        <div style={{ marginTop: 24, paddingTop: 16, borderTop: `1px solid ${C.border}` }}>
+          <div style={{ color: C.gold, fontWeight: 700, fontSize: 13, marginBottom: 4 }}>
+            ⏳ Expiring Contracts Elsewhere ({expiringElsewhere.length})
+          </div>
+          <div style={{ color: C.muted, fontSize: 11, marginBottom: 8 }}>
+            These players are in the final year of their contract on another team's squad. Sign them now on a
+            reduced pre-contract deal, before their own team renews them or they run out for good.
+          </div>
+          <div style={{ display: "grid", gap: 6 }}>
+            {expiringElsewhere.map((entry) => (
+              <div key={`${entry.teamId}-${entry.player.name}`} className="flex items-center justify-between flex-wrap gap-2" style={{ background: C.panelAlt, borderRadius: 8, padding: "8px 10px", fontSize: 12 }}>
+                <span style={{ color: C.text }}>
+                  {entry.player.name} <span style={{ color: C.muted }}>— {entry.player.position}, {entry.player.rating} OVR, currently at {entry.teamName}</span>
+                </span>
+                <Btn size="sm" variant="outline" onClick={() => doPoach(entry)}>Sign Pre-Contract</Btn>
+              </div>
+            ))}
+          </div>
+          {poachMsg && <div style={{ color: poachMsg.tone === "green" ? C.green : C.red, fontSize: 12, marginTop: 8 }}>{poachMsg.text}</div>}
         </div>
       )}
 
