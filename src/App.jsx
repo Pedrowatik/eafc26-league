@@ -749,6 +749,12 @@ export default function EafcLeagueApp() {
   // the PIN every single time.
   const [adminViewUnlocked, setAdminViewUnlocked] = useState(false);
   const [loaded, setLoaded] = useState(false);
+  // True only when a genuine fetch failure hit one of the truly critical pieces of data (main
+  // league data, squads, or teams) during initial load - as opposed to those simply not existing
+  // yet for a brand new league, which is handled separately. When true, the app shows a retry
+  // screen instead of proceeding - loading anyway would let this session's incomplete, empty
+  // fallback state get written straight over everyone else's real data the moment autosave fires.
+  const [loadError, setLoadError] = useState(false);
   const [saveState, setSaveState] = useState("idle"); // idle | saving | saved
   const [syncState, setSyncState] = useState("idle"); // idle | checking | updated
   const [lastSyncedAt, setLastSyncedAt] = useState(null);
@@ -872,6 +878,15 @@ export default function EafcLeagueApp() {
       let legacyBlindBidsForMigration = null;
       let legacyTransfersForMigration = null;
       let teamIdsForSquadLoad = defaultTeams().map((t) => t.id);
+      // Tracks whether any of the truly critical loads (main league data, squads, teams) hit a
+      // genuine error - a network blip, a timeout, anything that isn't simply "this key doesn't
+      // exist yet." That distinction matters enormously: storage.get already returns a falsy
+      // value for a real "no data yet" case, which is handled separately below by checking
+      // res.value - so anything landing in a catch block here is a genuine fetch failure, not a
+      // new league starting fresh. If this stays true, the app must NOT proceed into its normal,
+      // autosave-enabled state, since that would write this session's empty fallback state
+      // straight over everyone else's real, existing data the moment the autosave timer fires.
+      let hadCriticalLoadFailure = false;
       try {
         const res = await storage.get(STORAGE_KEY, true);
         if (res && res.value) {
@@ -896,7 +911,7 @@ export default function EafcLeagueApp() {
           setLastSyncedAt(knownSavedAtRef.current);
         }
       } catch (e) {
-        // no saved data yet — fine, start fresh
+        hadCriticalLoadFailure = true;
       }
       // Each team's squad now lives under its own key. Falls back to whatever was in the old
       // combined blob (for leagues that existed before this split) or a fresh empty squad.
@@ -914,7 +929,7 @@ export default function EafcLeagueApp() {
               return;
             }
           } catch (e) {
-            // no dedicated squad key yet for this team — fall through to migration/default below
+            hadCriticalLoadFailure = true;
           }
           loadedSquads[teamId] = (legacySquadsForMigration && legacySquadsForMigration[teamId]) || fallback[teamId] || { starters: Array(STARTER_SLOTS).fill(null), reserves: Array(RESERVE_SLOTS).fill(null) };
           knownSquadSavedAtRef.current.set(teamId, 0); // hasn't been saved under the new per-team key yet
@@ -922,7 +937,7 @@ export default function EafcLeagueApp() {
         }));
         setSquads(loadedSquads);
       } catch (e) {
-        // best effort — whatever the initial default state was will remain
+        hadCriticalLoadFailure = true;
       }
       // Player database loads from its own key, merged with anything from the old shared blob
       // (so nobody's imports are lost on the first load under this new version).
@@ -1079,7 +1094,7 @@ export default function EafcLeagueApp() {
               return;
             }
           } catch (e) {
-            // no dedicated team key yet — fall through to migration/default below
+            hadCriticalLoadFailure = true;
           }
           loadedTeams[i] = fallback;
           knownTeamSavedAtRef.current.set(teamId, 0);
@@ -1087,7 +1102,7 @@ export default function EafcLeagueApp() {
         }));
         setTeams(loadedTeams.filter(Boolean).filter((t) => !HIDDEN_TEAM_IDS.includes(t.id)));
       } catch (e) {
-        // best effort
+        hadCriticalLoadFailure = true;
       }
       try {
         const ares = await storage.get(AUCTIONS_STORAGE_KEY, true);
@@ -1172,7 +1187,11 @@ export default function EafcLeagueApp() {
       } catch (e) {
         // no chat saved yet — fine, start fresh
       }
-      setLoaded(true);
+      if (hadCriticalLoadFailure) {
+        setLoadError(true);
+      } else {
+        setLoaded(true);
+      }
     })();
   }, [applyRemoteData]);
 
@@ -5023,6 +5042,26 @@ export default function EafcLeagueApp() {
       document.body.style.margin = prevBodyMargin;
     };
   }, []);
+
+  // If a genuine error hit any of the critical data during load, refuse to proceed into the
+  // normal app entirely - this is what actually prevents this session's incomplete/empty
+  // fallback state from ever being auto-saved over everyone else's real, existing data.
+  if (loadError) {
+    return (
+      <div style={{ minHeight: "100vh", background: C.bg, display: "flex", alignItems: "center", justifyContent: "center", padding: 24, fontFamily: "'Oswald', 'Segoe UI', sans-serif" }}>
+        <div style={{ maxWidth: 480, textAlign: "center" }}>
+          <div style={{ fontSize: 40, marginBottom: 12 }}>⚠️</div>
+          <div style={{ color: C.text, fontWeight: 700, fontSize: 18, marginBottom: 10 }}>Couldn't load the league data safely</div>
+          <div style={{ color: C.muted, fontSize: 13.5, lineHeight: 1.6, marginBottom: 20 }}>
+            Something went wrong reaching the server for a critical piece of data — this is deliberately blocking the
+            app from continuing, since proceeding with incomplete data could risk overwriting real, existing league
+            data for everyone. Please check your internet connection and try again.
+          </div>
+          <Btn onClick={() => window.location.reload()}>Retry</Btn>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div style={{
