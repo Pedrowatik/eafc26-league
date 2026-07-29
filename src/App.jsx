@@ -3910,50 +3910,68 @@ export default function EafcLeagueApp() {
     // this needs to actually WIN on the server too, immediately and unconditionally, rather than
     // trusting the regular (now merge-based, per-team/per-record) autosave to eventually catch up.
     // Squads specifically are stored per-team, so each team's key gets written directly here too.
+    // Every failure is actually collected and reported back, rather than silently swallowed - a
+    // "restored" message that hides a real write failure underneath is worse than no message at
+    // all, since it tells you everything's fine when it isn't.
+    const failures = [];
     const savedAt = Date.now();
+
     try {
       const freshMain = await storage.get(STORAGE_KEY, true);
       const freshMainData = freshMain && freshMain.value ? JSON.parse(freshMain.value) : {};
-      await storage.set(STORAGE_KEY, JSON.stringify({ ...freshMainData, fixtures: restoredFixtures, prizes: restoredPrizes, events: restoredEvents, savedAt }), true);
-      knownSavedAtRef.current = savedAt;
-      setLastSyncedAt(savedAt);
-    } catch (e) { /* best effort */ }
+      const result = await storage.set(STORAGE_KEY, JSON.stringify({ ...freshMainData, fixtures: restoredFixtures, prizes: restoredPrizes, events: restoredEvents, savedAt }), true);
+      if (!result) failures.push("main league data (fixtures/prizes/events)");
+      else { knownSavedAtRef.current = savedAt; setLastSyncedAt(savedAt); }
+    } catch (e) { failures.push(`main league data (fixtures/prizes/events) — ${e.message || e}`); }
 
     try {
-      await storage.set(TRANSFERS_STORAGE_KEY, JSON.stringify({ transfers: restoredTransfers, savedAt }), true);
-      knownTransfersSavedAtRef.current = savedAt;
-      lastSyncedTransfersRef.current = new Map(restoredTransfers.map((tx) => [tx.id, JSON.stringify(tx)]));
-    } catch (e) { /* best effort */ }
+      const result = await storage.set(TRANSFERS_STORAGE_KEY, JSON.stringify({ transfers: restoredTransfers, savedAt }), true);
+      if (!result) failures.push("transfers");
+      else {
+        knownTransfersSavedAtRef.current = savedAt;
+        lastSyncedTransfersRef.current = new Map(restoredTransfers.map((tx) => [tx.id, JSON.stringify(tx)]));
+      }
+    } catch (e) { failures.push(`transfers — ${e.message || e}`); }
 
     try {
-      await storage.set(AUCTIONS_STORAGE_KEY, JSON.stringify({ auctions: restoredAuctions, savedAt }), true);
-      knownAuctionsSavedAtRef.current = savedAt;
-      lastSyncedAuctionsRef.current = new Map(restoredAuctions.map((a) => [a.id, JSON.stringify(a)]));
-    } catch (e) { /* best effort */ }
+      const result = await storage.set(AUCTIONS_STORAGE_KEY, JSON.stringify({ auctions: restoredAuctions, savedAt }), true);
+      if (!result) failures.push("auctions");
+      else {
+        knownAuctionsSavedAtRef.current = savedAt;
+        lastSyncedAuctionsRef.current = new Map(restoredAuctions.map((a) => [a.id, JSON.stringify(a)]));
+      }
+    } catch (e) { failures.push(`auctions — ${e.message || e}`); }
 
     if (restoredPlayerDatabase) {
       try {
-        await storage.set(PLAYERDB_STORAGE_KEY, JSON.stringify({ players: restoredPlayerDatabase, savedAt }), true);
-        knownPlayerDbSavedAtRef.current = savedAt;
-        lastSyncedPlayerDbRef.current = new Map(restoredPlayerDatabase.map((p) => [`${p.name}::${p.position}::${p.club || ""}`, JSON.stringify(p)]));
-      } catch (e) { /* best effort */ }
+        const result = await storage.set(PLAYERDB_STORAGE_KEY, JSON.stringify({ players: restoredPlayerDatabase, savedAt }), true);
+        if (!result) failures.push("player database");
+        else {
+          knownPlayerDbSavedAtRef.current = savedAt;
+          lastSyncedPlayerDbRef.current = new Map(restoredPlayerDatabase.map((p) => [`${p.name}::${p.position}::${p.club || ""}`, JSON.stringify(p)]));
+        }
+      } catch (e) { failures.push(`player database — ${e.message || e}`); }
     }
 
     await Promise.all(restoredTeams.map(async (team) => {
       try {
-        await storage.set(teamKeyFor(team.id), JSON.stringify({ team, savedAt }), true);
+        const result = await storage.set(teamKeyFor(team.id), JSON.stringify({ team, savedAt }), true);
+        if (!result) { failures.push(`team: ${team.name || team.id}`); return; }
         knownTeamSavedAtRef.current.set(team.id, savedAt);
         lastSyncedTeamDataRef.current.set(team.id, JSON.stringify(team));
-      } catch (e) { /* best effort — this team will need a manual retry if this specific write failed */ }
+      } catch (e) { failures.push(`team: ${team.name || team.id} — ${e.message || e}`); }
     }));
 
     await Promise.all(Object.keys(restoredSquads).map(async (teamId) => {
       try {
-        await storage.set(squadKeyFor(teamId), JSON.stringify({ ...restoredSquads[teamId], savedAt }), true);
+        const result = await storage.set(squadKeyFor(teamId), JSON.stringify({ ...restoredSquads[teamId], savedAt }), true);
+        if (!result) { failures.push(`squad: ${teamId}`); return; }
         knownSquadSavedAtRef.current.set(teamId, savedAt);
         lastSyncedSquadDataRef.current.set(teamId, JSON.stringify(restoredSquads[teamId]));
-      } catch (e) { /* best effort — this team's squad will need a manual retry if this specific write failed */ }
+      } catch (e) { failures.push(`squad: ${teamId} — ${e.message || e}`); }
     }));
+
+    return failures;
   };
 
   // Restores from a previously exported backup file. PIN-gated since it overwrites live data.
@@ -3971,7 +3989,10 @@ export default function EafcLeagueApp() {
     if (!window.confirm("Restore this backup? It will replace all current league data for everyone using this app.")) {
       return null;
     }
-    await applyBackupData(data);
+    const failures = await applyBackupData(data);
+    if (failures && failures.length > 0) {
+      return `Restored, but some parts failed to save to the server and may not stick after a refresh: ${failures.join("; ")}. Try again, or check your connection.`;
+    }
     return null;
   };
 
@@ -3986,7 +4007,10 @@ export default function EafcLeagueApp() {
       const res = await storage.get(key, true);
       if (!res || !res.value) return "Couldn't find that backup.";
       const data = JSON.parse(res.value);
-      await applyBackupData(data);
+      const failures = await applyBackupData(data);
+      if (failures && failures.length > 0) {
+        return `Restored, but some parts failed to save to the server and may not stick after a refresh: ${failures.join("; ")}. Try again, or check your connection.`;
+      }
       return null;
     } catch (e) {
       return "Couldn't load that backup — try again.";
