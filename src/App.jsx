@@ -6260,7 +6260,7 @@ function ContractStatusPanel({ team, squad, teamId, renewPlayerContract, getRene
             <div key={key} style={{ background: C.panel, borderRadius: 8, padding: 10 }}>
               <div className="flex items-center justify-between flex-wrap gap-2">
                 <div>
-                  <span style={{ fontWeight: 600 }}>{player.name}</span>
+                  <span style={{ fontWeight: 600, color: C.text }}>{player.name}</span>
                   <span style={{ color: C.muted, fontSize: 11.5 }}> — {player.position}, {moneyK(player.wage)}/wk, {player.seasonsAtClub ?? 0} season{(player.seasonsAtClub ?? 0) === 1 ? "" : "s"} at the club</span>
                 </div>
                 <Btn size="sm" variant="outline" onClick={() => { setRenewingKey(isOpen ? null : key); setSelectedYears(1); setMsg(null); }}>
