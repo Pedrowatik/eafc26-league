@@ -75,11 +75,9 @@ function transferStatus(tx, nowMs) {
 }
 
 const N_TEAMS = 10;
-// Only 8 of the 10 team slots are actually being used this season — these two were never claimed
-// and have no data. Filtered out at load time everywhere teams are read, without touching N_TEAMS
-// itself or anything downstream that depends on it, since this app is in active mid-season use.
-// To bring a team back, just remove its id from this list.
-const HIDDEN_TEAM_IDS = ["T8", "T10"];
+// Both remaining slots have now been claimed - bringing the league to the full 10 teams.
+// To hide a team again in future, just add its id back to this list.
+const HIDDEN_TEAM_IDS = [];
 const STARTER_SLOTS = 21;
 const MIN_U21_PLAYERS = 5; // at least this many players aged 20 or under, somewhere in the squad
 const RESERVE_SLOTS = 5;
