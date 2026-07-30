@@ -2964,16 +2964,36 @@ export default function EafcLeagueApp() {
   const RENEWAL_LOYALTY_DISCOUNT_MAX = 0.30; // capped so renewals never become nearly free
   const RENEWAL_MULTI_YEAR_MULTIPLIER = { 1: 1, 2: 1.8, 3: 2.5 }; // total-cost multiplier vs paying for 1 year at a time
 
-  // How many goals this player has scored FOR THIS TEAM across fixtures already played this
-  // season - used purely to size the performance premium on their renewal cost, nothing else.
-  const goalsThisSeasonFor = (teamId, playerName) => {
-    let goals = 0;
+  // Weights used to combine very different kinds of contribution into one comparable score - a
+  // goal and an assist are both worth the same single point since they're equally direct
+  // attacking contributions, MOTM counts for more since it reflects a whole standout performance
+  // rather than one moment in it, and a clean sheet is the goalkeeper-specific equivalent of a
+  // goal or assist, giving keepers a fair route to the same premium strikers get from scoring.
+  const PERFORMANCE_WEIGHTS = { goal: 1, assist: 1, motm: 3, cleanSheet: 2 };
+
+  // Every relevant contribution this player has made FOR THIS TEAM across fixtures already played
+  // this season - goals, assists, MOTM awards, and (for a goalkeeper) clean sheets kept while they
+  // played - used purely to size the performance premium on their renewal cost, nothing else.
+  const seasonPerformanceStatsFor = (teamId, player) => {
+    let goals = 0, assists = 0, motm = 0, cleanSheets = 0;
+    const isGK = player.position === "GK";
     fixtures.forEach((f) => {
       if (!f.stats) return;
-      if (f.team1 === teamId) goals += (f.stats.team1 || []).filter((p) => p.name === playerName).reduce((s, p) => s + (p.goals || 0), 0);
-      if (f.team2 === teamId) goals += (f.stats.team2 || []).filter((p) => p.name === playerName).reduce((s, p) => s + (p.goals || 0), 0);
+      const isTeam1 = f.team1 === teamId, isTeam2 = f.team2 === teamId;
+      if (!isTeam1 && !isTeam2) return;
+      const mySide = isTeam1 ? (f.stats.team1 || []) : (f.stats.team2 || []);
+      const myLine = mySide.find((p) => p.name === player.name);
+      if (myLine) {
+        goals += myLine.goals || 0;
+        assists += myLine.assists || 0;
+      }
+      if (f.stats.motm === player.name) motm += 1;
+      if (isGK && myLine && myLine.played) {
+        const concededByMe = isTeam1 ? Number(f.score2) : Number(f.score1);
+        if (concededByMe === 0) cleanSheets += 1;
+      }
     });
-    return goals;
+    return { goals, assists, motm, cleanSheets };
   };
 
   // The full breakdown behind a renewal's price - exposed separately so the UI can show the
@@ -2982,12 +3002,14 @@ export default function EafcLeagueApp() {
     const baseAnnual = RENEWAL_BASE_MULTIPLIER * ((Number(player.wage) || 0) / 1000);
     const seasonsAtClub = player.seasonsAtClub ?? 0;
     const loyaltyDiscount = Math.min(RENEWAL_LOYALTY_DISCOUNT_MAX, seasonsAtClub * RENEWAL_LOYALTY_DISCOUNT_PER_SEASON);
-    const goals = goalsThisSeasonFor(teamId, player.name);
-    const performancePremium = goals >= 20 ? 1.0 : goals >= 10 ? 0.5 : 0;
+    const perf = seasonPerformanceStatsFor(teamId, player);
+    const performanceScore = perf.goals * PERFORMANCE_WEIGHTS.goal + perf.assists * PERFORMANCE_WEIGHTS.assist
+      + perf.motm * PERFORMANCE_WEIGHTS.motm + perf.cleanSheets * PERFORMANCE_WEIGHTS.cleanSheet;
+    const performancePremium = performanceScore >= 20 ? 1.0 : performanceScore >= 10 ? 0.5 : 0;
     const perYearCost = baseAnnual * (1 - loyaltyDiscount) * (1 + performancePremium);
     const multiYearMultiplier = RENEWAL_MULTI_YEAR_MULTIPLIER[years] || years; // no discount beyond 3 years
     const totalCost = +(perYearCost * multiYearMultiplier).toFixed(3);
-    return { baseAnnual, loyaltyDiscount, goals, performancePremium, perYearCost, totalCost, years };
+    return { baseAnnual, loyaltyDiscount, perf, performanceScore, performancePremium, perYearCost, totalCost, years };
   };
 
   const renewPlayerContract = (teamId, group, slotIndex, years) => {
@@ -6295,7 +6317,14 @@ function ContractStatusPanel({ team, squad, teamId, renewPlayerContract, getRene
                   <div style={{ fontSize: 11.5, color: C.muted, lineHeight: 1.7, marginBottom: 8 }}>
                     Base (10× wage): {money(quote.baseAnnual)}/yr
                     {quote.loyaltyDiscount > 0 && <> · Loyalty discount: −{Math.round(quote.loyaltyDiscount * 100)}%</>}
-                    {quote.performancePremium > 0 && <> · Performance premium ({quote.goals} goals this season): +{Math.round(quote.performancePremium * 100)}%</>}
+                    {quote.performancePremium > 0 && (
+                      <> · Performance premium ({[
+                        quote.perf.goals > 0 && `${quote.perf.goals} goal${quote.perf.goals === 1 ? "" : "s"}`,
+                        quote.perf.assists > 0 && `${quote.perf.assists} assist${quote.perf.assists === 1 ? "" : "s"}`,
+                        quote.perf.motm > 0 && `${quote.perf.motm} MOTM`,
+                        quote.perf.cleanSheets > 0 && `${quote.perf.cleanSheets} clean sheet${quote.perf.cleanSheets === 1 ? "" : "s"}`,
+                      ].filter(Boolean).join(", ")} this season): +{Math.round(quote.performancePremium * 100)}%</>
+                    )}
                     <br />
                     <span style={{ color: C.text, fontWeight: 700 }}>Total for {quote.years} year{quote.years === 1 ? "" : "s"}: {money(quote.totalCost)}</span>
                   </div>
