@@ -5051,10 +5051,23 @@ export default function EafcLeagueApp() {
   const sendMarketMessage = (toTeamId, text) => sendPrivateMessage(toTeamId, text);
 
   /* --------------------------------- render --------------------------------- */
+  // The Contracts tab only makes sense once there's nothing left to decide mid-season - every
+  // fixture needs a result entered first. An empty fixture list (e.g. right after a new season
+  // starts, before any fixtures have been scheduled yet) does NOT count as "complete" - there's
+  // nothing to judge completion against yet.
+  const seasonComplete = fixtures.length > 0 && fixtures.every((f) => f.score1 !== "" && f.score1 != null && f.score2 !== "" && f.score2 != null);
+
+  // If someone's sitting on the Contracts tab and a new season resets the fixtures out from under
+  // them, don't leave them stranded on a tab that's no longer supposed to be reachable.
+  useEffect(() => {
+    if (tab === "contracts" && !seasonComplete) setTab("dashboard");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [seasonComplete]);
+
   const TABS = [
     { id: "dashboard", label: "Dashboard", icon: Home },
     { id: "squads", label: "Squad List", icon: Users },
-    { id: "contracts", label: "Contracts", icon: CalendarClock },
+    ...(seasonComplete ? [{ id: "contracts", label: "Contracts", icon: CalendarClock }] : []),
     { id: "budgets", label: "Budgets & Wages", icon: Wallet },
     { id: "transfers", label: "Transfers", icon: Repeat },
     { id: "draft", label: "Draft", icon: Users },
@@ -5199,7 +5212,7 @@ export default function EafcLeagueApp() {
             signCaptain={signCaptain} playerDatabase={playerDatabase} openPlayerStats={openPlayerStats}
             injuries={injuries} fixtures={fixtures} />
         )}
-        {tab === "contracts" && (
+        {tab === "contracts" && seasonComplete && (
           <ContractsTab teams={teams} squads={squads} myTeamId={myTeamId}
             renewPlayerContract={renewPlayerContract} getRenewalQuote={getRenewalQuote} poachExpiringPlayer={poachExpiringPlayer} />
         )}
