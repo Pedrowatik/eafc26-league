@@ -7893,6 +7893,9 @@ function FixturesTab({ teams, fixtures, setFixtures, logActivity, myTeamId, squa
   const [enteringResultFor, setEnteringResultFor] = useState(null); // fixture id
   const [resultForm, setResultForm] = useState(null); // { score1, score2, team1Stats, team2Stats, motm }
   const [resultError, setResultError] = useState("");
+  const [addFixturesTeamId, setAddFixturesTeamId] = useState("");
+  const [addFixturesOpponents, setAddFixturesOpponents] = useState(new Set());
+  const [addFixturesMsg, setAddFixturesMsg] = useState(null);
 
   const add = () => {
     if (form.team1 === form.team2) { setWarning("Team 1 and Team 2 can't be the same."); return; }
@@ -7917,6 +7920,28 @@ function FixturesTab({ teams, fixtures, setFixtures, logActivity, myTeamId, squa
       });
     });
     setFixtures(generated);
+  };
+
+  // For a team that joined after the season's fixtures were already generated - creates fixtures
+  // between just this one team and whichever opponents are chosen, and appends them onto the
+  // existing list rather than replacing it. Matchdays continue on from whatever the highest
+  // existing matchday number already is, so these slot in after everything already scheduled.
+  const generateFixturesForTeam = (newTeamId, opponentIds, doubleRound) => {
+    if (opponentIds.length === 0) return "Pick at least one opponent.";
+    const highestExistingMatchday = fixtures.reduce((max, f) => Math.max(max, Number(f.matchday) || 0), 0);
+    const newFixtures = [];
+    opponentIds.forEach((oppId, i) => {
+      const matchday = highestExistingMatchday + i + 1;
+      // Alternate home/away across opponents just for a bit of variety, same spirit as the full
+      // round-robin generator above.
+      const [team1, team2] = i % 2 === 0 ? [newTeamId, oppId] : [oppId, newTeamId];
+      newFixtures.push({ id: uid(), matchday, team1, team2, date: todayISO(), score1: "", score2: "", proof: "", hasProofImage: false });
+      if (doubleRound) {
+        newFixtures.push({ id: uid(), matchday: matchday + opponentIds.length, team1: team2, team2: team1, date: todayISO(), score1: "", score2: "", proof: "", hasProofImage: false });
+      }
+    });
+    setFixtures((f) => [...f, ...newFixtures]);
+    return null;
   };
 
   const squadPlayersFor = (teamId) => [...(squads[teamId]?.starters || []), ...(squads[teamId]?.reserves || [])].filter(Boolean);
@@ -8130,6 +8155,69 @@ function FixturesTab({ teams, fixtures, setFixtures, logActivity, myTeamId, squa
           <Btn icon={Plus} onClick={() => generateSchedule(false)}>Single round (play once)</Btn>
           <Btn icon={Plus} onClick={() => generateSchedule(true)}>Home & away (play twice)</Btn>
         </div>
+      </Panel>
+
+      <Panel style={{ padding: 18 }}>
+        <SectionTitle icon={Plus}>Add Fixtures for One Team</SectionTitle>
+        <div style={{ color: C.muted, fontSize: 11.5, marginBottom: 12 }}>
+          For a team that joined after the season schedule was already generated — creates fixtures for just this
+          one team against whichever opponents you pick, and adds them onto the existing fixture list below rather
+          than replacing it. Uncheck any team you don't want fixtures against yet (e.g. one that isn't occupied).
+        </div>
+        <div className="flex items-end gap-3 flex-wrap" style={{ marginBottom: 12 }}>
+          <Field label="Team needing fixtures">
+            <Select
+              value={addFixturesTeamId}
+              onChange={(e) => {
+                const id = e.target.value;
+                setAddFixturesTeamId(id);
+                setAddFixturesOpponents(new Set(teams.filter((t) => t.id !== id).map((t) => t.id)));
+                setAddFixturesMsg(null);
+              }}
+              style={{ minWidth: 200 }}
+            >
+              <option value="">Select a team…</option>
+              {teams.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+            </Select>
+          </Field>
+        </div>
+        {addFixturesTeamId && (
+          <>
+            <div style={{ color: C.muted, fontSize: 11, marginBottom: 6 }}>Opponents to schedule against:</div>
+            <div className="flex items-center gap-2 flex-wrap" style={{ marginBottom: 14 }}>
+              {teams.filter((t) => t.id !== addFixturesTeamId).map((t) => {
+                const checked = addFixturesOpponents.has(t.id);
+                return (
+                  <label key={t.id} className="flex items-center gap-1" style={{
+                    background: checked ? "rgba(231,197,104,0.1)" : C.panelAlt,
+                    border: `1px solid ${checked ? C.gold + "55" : C.border}`,
+                    borderRadius: 6, padding: "5px 10px", fontSize: 12, cursor: "pointer",
+                  }}>
+                    <input type="checkbox" checked={checked} onChange={() => {
+                      setAddFixturesOpponents((prev) => {
+                        const next = new Set(prev);
+                        if (next.has(t.id)) next.delete(t.id); else next.add(t.id);
+                        return next;
+                      });
+                    }} />
+                    {t.name}
+                  </label>
+                );
+              })}
+            </div>
+            <div className="flex items-center gap-2 flex-wrap">
+              <Btn icon={Plus} onClick={() => {
+                const err = generateFixturesForTeam(addFixturesTeamId, [...addFixturesOpponents], false);
+                setAddFixturesMsg(err ? { text: err, tone: "red" } : { text: "Fixtures added.", tone: "green" });
+              }}>Add — single round</Btn>
+              <Btn icon={Plus} onClick={() => {
+                const err = generateFixturesForTeam(addFixturesTeamId, [...addFixturesOpponents], true);
+                setAddFixturesMsg(err ? { text: err, tone: "red" } : { text: "Fixtures added.", tone: "green" });
+              }}>Add — home & away</Btn>
+            </div>
+            {addFixturesMsg && <div style={{ color: addFixturesMsg.tone === "green" ? C.green : C.red, fontSize: 12, marginTop: 8 }}>{addFixturesMsg.text}</div>}
+          </>
+        )}
       </Panel>
 
       <Panel style={{ padding: 18 }}>
