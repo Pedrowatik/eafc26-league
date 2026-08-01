@@ -7895,6 +7895,7 @@ function FixturesTab({ teams, fixtures, setFixtures, logActivity, myTeamId, squa
   const [resultError, setResultError] = useState("");
   const [addFixturesTeamId, setAddFixturesTeamId] = useState("");
   const [addFixturesOpponents, setAddFixturesOpponents] = useState(new Set());
+  const [addFixturesStartMatchday, setAddFixturesStartMatchday] = useState(1);
   const [addFixturesMsg, setAddFixturesMsg] = useState(null);
 
   const add = () => {
@@ -7924,14 +7925,16 @@ function FixturesTab({ teams, fixtures, setFixtures, logActivity, myTeamId, squa
 
   // For a team that joined after the season's fixtures were already generated - creates fixtures
   // between just this one team and whichever opponents are chosen, and appends them onto the
-  // existing list rather than replacing it. Matchdays continue on from whatever the highest
-  // existing matchday number already is, so these slot in after everything already scheduled.
-  const generateFixturesForTeam = (newTeamId, opponentIds, doubleRound) => {
+  // existing list rather than replacing it. The starting matchday is chosen by the admin, not
+  // auto-calculated from the season's highest matchday - the highest matchday number scheduled
+  // isn't necessarily where the season has actually reached, so leaving that choice to a human
+  // avoids fixtures landing implausibly far in the future.
+  const generateFixturesForTeam = (newTeamId, opponentIds, doubleRound, startMatchday) => {
     if (opponentIds.length === 0) return "Pick at least one opponent.";
-    const highestExistingMatchday = fixtures.reduce((max, f) => Math.max(max, Number(f.matchday) || 0), 0);
+    const start = Math.max(1, Number(startMatchday) || 1);
     const newFixtures = [];
     opponentIds.forEach((oppId, i) => {
-      const matchday = highestExistingMatchday + i + 1;
+      const matchday = start + i;
       // Alternate home/away across opponents just for a bit of variety, same spirit as the full
       // round-robin generator above.
       const [team1, team2] = i % 2 === 0 ? [newTeamId, oppId] : [oppId, newTeamId];
@@ -8191,7 +8194,7 @@ function FixturesTab({ teams, fixtures, setFixtures, logActivity, myTeamId, squa
                   <label key={t.id} className="flex items-center gap-1" style={{
                     background: checked ? "rgba(231,197,104,0.1)" : C.panelAlt,
                     border: `1px solid ${checked ? C.gold + "55" : C.border}`,
-                    borderRadius: 6, padding: "5px 10px", fontSize: 12, cursor: "pointer",
+                    borderRadius: 6, padding: "5px 10px", fontSize: 12, cursor: "pointer", color: C.text,
                   }}>
                     <input type="checkbox" checked={checked} onChange={() => {
                       setAddFixturesOpponents((prev) => {
@@ -8205,13 +8208,23 @@ function FixturesTab({ teams, fixtures, setFixtures, logActivity, myTeamId, squa
                 );
               })}
             </div>
+            <div className="flex items-end gap-3 flex-wrap" style={{ marginBottom: 12 }}>
+              <Field label="Starting matchday">
+                <TextInput type="number" min={1} value={addFixturesStartMatchday}
+                  onChange={(e) => setAddFixturesStartMatchday(e.target.value)} style={{ width: 110 }} />
+              </Field>
+              <div style={{ color: C.muted, fontSize: 11, paddingBottom: 9 }}>
+                Pick whatever matchday roughly matches where the rest of the league actually is —
+                this doesn't have to line up exactly with anyone else's fixtures.
+              </div>
+            </div>
             <div className="flex items-center gap-2 flex-wrap">
               <Btn icon={Plus} onClick={() => {
-                const err = generateFixturesForTeam(addFixturesTeamId, [...addFixturesOpponents], false);
+                const err = generateFixturesForTeam(addFixturesTeamId, [...addFixturesOpponents], false, addFixturesStartMatchday);
                 setAddFixturesMsg(err ? { text: err, tone: "red" } : { text: "Fixtures added.", tone: "green" });
               }}>Add — single round</Btn>
               <Btn icon={Plus} onClick={() => {
-                const err = generateFixturesForTeam(addFixturesTeamId, [...addFixturesOpponents], true);
+                const err = generateFixturesForTeam(addFixturesTeamId, [...addFixturesOpponents], true, addFixturesStartMatchday);
                 setAddFixturesMsg(err ? { text: err, tone: "red" } : { text: "Fixtures added.", tone: "green" });
               }}>Add — home & away</Btn>
             </div>
